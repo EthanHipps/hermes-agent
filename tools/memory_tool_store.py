@@ -337,6 +337,39 @@ class MemoryStore:
             return working, f"Applied {len(operations)} operation(s)."
         return self._mutate(target, _apply)
 
+    def apply_exact_delta(self, target: str, *, retire: List[str], add: List[str]) -> Dict[str, Any]:
+        """Retire exact entry texts and append new ones atomically against the final budget.
+
+        The host memory service addresses entries by stable ID, so it must
+        not use substring matching. Retirements precede additions; duplicate
+        additions are no-ops. The shared mutation path enforces the file lock,
+        drift detection, and read-failure guard.
+        """
+        def _failure(message):
+            return self._failure_with_entries(
+                target, message + " No operations were applied (batch is all-or-nothing).")
+
+        def _apply(current, limit):
+            entries = list(current)
+            for text in retire:
+                if text not in entries:
+                    return _failure(f"No entry equals the retired text ({text[:40]!r}).")
+                entries.remove(text)
+            for text in add:
+                content = text.strip()
+                if not content:
+                    return _failure("Content cannot be empty.")
+                if scan_error := _scan_memory_content(content):
+                    return _failure(scan_error)
+                if content not in entries:
+                    entries.append(content)
+            new_total = len(ENTRY_DELIMITER.join(entries))
+            if new_total > limit:
+                return _failure(f"Result would be {new_total:,}/{limit:,} chars, over the limit.")
+            return entries, "Delta applied."
+
+        return self._mutate(target, _apply)
+
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """Frozen load-time snapshot (NOT live state — mid-session writes don't touch
         it, preserving the prefix cache); None if empty."""

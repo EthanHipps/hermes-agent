@@ -375,6 +375,64 @@ def _get_active_memory_provider() -> Optional[str]:
         return None
 
 
+def load_authoritative_backend_factory(name: str):
+    """Return the provider's ``create_authoritative_backend(config)`` factory, or None.
+
+    Generic seam for ``memory.provider_mode: authoritative`` (host spec §9.1):
+    a provider that can act as the sole curated-memory authority exports a
+    module-level ``create_authoritative_backend`` returning an object that
+    implements ``agent.memory_service.backend.AuthoritativeBackend``. Bundled,
+    user-installed, project-local, and entry-point providers are searched in
+    the same order as ``load_memory_provider``; nothing is instantiated here.
+    """
+    provider_dir = find_provider_dir(name)
+    if provider_dir is not None:
+        module = _import_provider_module(provider_dir)
+        return getattr(module, "create_authoritative_backend", None) if module else None
+    entry_point = find_provider_entry_point(name)
+    if entry_point is None:
+        return None
+    try:
+        loaded = entry_point.load()
+    except Exception as exc:  # pragma: no cover - environment specific
+        logger.warning("Failed to load memory provider entry point '%s': %s", name, exc)
+        return None
+    factory = getattr(loaded, "create_authoritative_backend", None)
+    if factory is None:
+        module = sys.modules.get(getattr(loaded, "__module__", ""))
+        factory = getattr(module, "create_authoritative_backend", None) if module else None
+    return factory
+
+
+def _import_provider_module(provider_dir: Path):
+    """Import a provider package directory without instantiating a provider."""
+    name = provider_dir.name
+    is_bundled = _is_bundled(provider_dir)
+    module_name = _module_name(provider_dir, name)
+    cached = sys.modules.get(module_name)
+    if cached is not None and getattr(cached, "__file__", None):
+        return cached
+    init_file = provider_dir / "__init__.py"
+    if not init_file.exists():
+        return None
+    if not is_bundled and _USER_NAMESPACE not in sys.modules:
+        _register_synthetic_package(_USER_NAMESPACE, [])
+    spec = importlib.util.spec_from_file_location(
+        module_name, str(init_file), submodule_search_locations=[str(provider_dir)]
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        logger.warning("Failed to import memory provider '%s': %s", name, exc)
+        return None
+    return module
+
+
 def _prune_inactive_memory_provider_skills(active_provider: Optional[str] = None) -> None:
     """Remove tracked skills that no longer belong to the active provider."""
     if active_provider is None:
