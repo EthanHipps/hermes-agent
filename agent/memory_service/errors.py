@@ -20,6 +20,11 @@ class MemoryServiceError(Exception):
 class MemoryBlockedError(MemoryServiceError):
     """Authoritative fail-closed: the model request or mutation must not proceed."""
 
+    def __init__(self, message: str, *, code: Optional[str] = None, provider_error: Optional[BaseException] = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.provider_error = provider_error
+
 
 class TargetDisabledError(MemoryServiceError):
     """The target is disabled by configuration and MUST NOT be loaded, rendered, or mutated."""

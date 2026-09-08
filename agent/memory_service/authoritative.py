@@ -71,6 +71,16 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         missing = [op for op in REQUIRED_OPERATIONS if op not in neg.operations]
         if missing:
             raise MemoryConfigurationError(f"memory provider {self._config.provider!r} lacks required operation(s): {', '.join(missing)}")
+        # A capability flag names an optional operation of the same name
+        # (§9.1); a provider that sets the flag but omits the operation from
+        # `operations` contradicts itself and ServiceCapabilities must not
+        # just follow the flag -- fail the negotiation instead of trusting it.
+        for capability in ("recall_context", "capture_continuity"):
+            if getattr(neg.capabilities, capability) and capability not in neg.operations:
+                raise MemoryConfigurationError(
+                    f"memory provider {self._config.provider!r} negotiated capabilities.{capability}: true "
+                    f"but does not list {capability!r} in operations"
+                )
         self._negotiation = neg
         return result.provider_epoch
 
@@ -230,16 +240,16 @@ class ProviderAuthoritativeMemoryService(MemoryService):
                 self._epoch_changed = True
                 self._blocked = True
                 self._block_reason = "provider epoch changed"
-                raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required") from exc
+                raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
             if exc.code in ("binding_invalid", "binding_revoked"):
                 self._binding_lost = True
                 self._blocked = True
                 self._block_reason = exc.code
-                raise MemoryBlockedError(f"binding is {exc.code}; explicit rebind or a new logical session is required") from exc
+                raise MemoryBlockedError(f"binding is {exc.code}; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
             if fresh_load and not non_blocking:
                 self._blocked = True
                 self._block_reason = f"{operation} failed with {exc.code}"
-                raise MemoryBlockedError(self._block_reason) from exc
+                raise MemoryBlockedError(self._block_reason, code=exc.code, provider_error=exc) from exc
             raise
         except ProviderTransportError as exc:
             self._fail_transport(exc, operation=operation, fresh_load=fresh_load, mutation=mutation, non_blocking=non_blocking)

@@ -4,9 +4,9 @@ import pytest
 
 from agent.memory_service import wire as w
 from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
-from agent.memory_service.config import MemoryConfigurationError
+from agent.memory_service.config import MemoryConfigurationError, resolve_memory_service_config
 from agent.memory_service.errors import BindingInvalidError, CapabilityUnavailableError, MemoryBlockedError, ProviderError, ProviderTransportError, TargetDisabledError
-from agent.memory_service.identity import HostSessionState
+from agent.memory_service.identity import FrozenMemoryIdentity, HostSessionState
 from agent.memory_service.service import CommitIntent, ContinuityCapture, InspectRequest, MemoryDisposition, MutationRequest, RecallQuery, ServiceCapabilities, StatelessMemoryService, select_memory_service
 
 from tests.agent.memory_service.stub_backend import REPO, StubBackend
@@ -72,6 +72,23 @@ def test_incompatible_api_and_missing_operation_are_configuration_errors(tmp_pat
     # configuration errors are errors under the stateless policy too
     with pytest.raises(MemoryConfigurationError):
         _select(tmp_path, StubBackend(api_version=2), authoritative_failure_policy="stateless")
+
+
+def test_capability_flag_without_its_operation_is_a_configuration_error(tmp_path):
+    """M13: a provider negotiating capabilities.recall_context: true without
+    listing recall_context in operations contradicts itself; ServiceCapabilities
+    must not simply follow the flag -- a provider that contradicts itself is
+    not a provider to trust."""
+    contradictory = StubBackend(
+        operations=["bind_session", "validate_session", "load_curated", "stage_curated", "inspect_staged", "commit_curated"],
+        recall=True,
+    )
+    with pytest.raises(MemoryConfigurationError, match="recall_context"):
+        _select(tmp_path, contradictory)
+
+    consistent = StubBackend(recall=True)
+    service = _select(tmp_path, consistent)
+    assert service.capabilities.recall_context is True
 
 
 def test_bind_failure_fails_closed_or_starts_stateless(tmp_path):
@@ -164,6 +181,28 @@ def test_malformed_snapshot_fails_closed(tmp_path):
         backend.malformed_snapshot = None
         assert service.load_curated("memory").target == "memory"
         assert not service.blocked
+
+
+def test_blocked_load_exposes_typed_code_and_provider_error(tmp_path):
+    """M5: MemoryBlockedError carries its typed code and the underlying
+    ProviderError as attributes, so a caller (row 40) can distinguish
+    ambiguous_policy from unavailable without parsing str(err) or __cause__."""
+    backend = StubBackend()
+    service = _select(tmp_path, backend)
+    backend.fail_typed("load_curated", "ambiguous_policy")
+    with pytest.raises(MemoryBlockedError) as excinfo:
+        service.load_curated("memory")
+    err = excinfo.value
+    assert err.code == "ambiguous_policy"
+    assert isinstance(err.provider_error, ProviderError)
+    assert err.provider_error.code == "ambiguous_policy"
+
+    backend2 = StubBackend()
+    service2 = _select(tmp_path, backend2)
+    backend2.fail_typed("load_curated", "unavailable")
+    with pytest.raises(MemoryBlockedError) as excinfo2:
+        service2.load_curated("memory")
+    assert excinfo2.value.code == "unavailable"
 
 
 def test_failure_after_success_blocks_until_a_fresh_load(tmp_path):
@@ -264,6 +303,24 @@ def test_resume_uses_validate_never_bind(tmp_path):
         select_memory_service(_config(tmp_path), store_factory=_never_built, session_state=state, backend_factory=lambda cfg: backend3)
     with pytest.raises(BindingInvalidError):
         HostSessionState.from_dict({"provider_epoch": "ep-1"})
+
+
+def test_resume_with_non_authoritative_identity_raises_a_typed_error(tmp_path):
+    """M14: resume() must never let a bare ValueError escape from
+    FrozenMemoryIdentity.to_wire() when a hand-built HostSessionState carries
+    a non-authoritative identity -- select_memory_service does not catch a
+    bare ValueError, so it would otherwise reach the caller unhandled."""
+    backend = StubBackend()
+    cfg = resolve_memory_service_config(_config(tmp_path))
+    service = ProviderAuthoritativeMemoryService(cfg, backend)
+    bad_identity = FrozenMemoryIdentity(
+        provider="builtin", provider_mode="additive", principal_id="ethan", profile_id="default",
+        logical_session_id="sess-1", org_id=None, project_id=None, repo_id=None, workspace_id=None,
+        platform="cli", binding_revision="rev-1", opaque_binding_b64url="",
+    )
+    state = HostSessionState(provider_epoch="ep-1", identity=bad_identity)
+    with pytest.raises(BindingInvalidError):
+        service.resume(state)
 
 
 def test_shutdown_reaches_the_backend(tmp_path):

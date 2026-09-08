@@ -98,3 +98,21 @@ def test_plugin_discovery_reports_missing_factory(tmp_path, monkeypatch):
     cfg = resolve_memory_service_config({"memory": {"provider": "demo"}})
     assert factory(cfg) == ("backend-for", "demo")
     assert pm.load_authoritative_backend_factory("absent-provider") is None
+
+
+def test_plugin_import_failure_is_reported_distinctly_from_missing_factory(tmp_path, monkeypatch):
+    """M12: an import failure in the provider module (e.g. a syntax or
+    top-level exception) must surface as the import failure, not as the
+    generic 'does not export create_authoritative_backend' message -- that
+    message means something different: the module imported fine but simply
+    lacks the symbol."""
+    import plugins.memory as pm
+
+    plugin_dir = tmp_path / "plugins" / "broken"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text("raise ValueError('boom')\n", encoding="utf-8")
+    monkeypatch.setattr(pm, "_get_user_plugins_dir", lambda: tmp_path / "plugins")
+    monkeypatch.setattr(pm, "_is_memory_provider_dir", lambda p: True)
+
+    with pytest.raises(MemoryConfigurationError, match="boom"):
+        pm.load_authoritative_backend_factory("broken")

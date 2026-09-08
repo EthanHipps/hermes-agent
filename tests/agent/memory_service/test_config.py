@@ -35,6 +35,20 @@ def test_empty_provider_mode_string_is_additive():
     assert resolve_memory_service_config(_cfg(provider_mode="")).provider_mode is MemoryMode.ADDITIVE
 
 
+@pytest.mark.parametrize("memory", ["authoritative", [1, 2]])
+def test_non_mapping_memory_value_is_a_configuration_error(memory):
+    """M6: a scalar or sequence `memory:` value must not be silently treated
+    as an absent (and therefore additive) section -- that would let a typo
+    like `memory: authoritative` downgrade authority without any error."""
+    with pytest.raises(MemoryConfigurationError, match="memory"):
+        resolve_memory_service_config({"memory": memory})
+
+
+def test_null_or_missing_memory_key_is_still_additive():
+    assert resolve_memory_service_config({"memory": None}).provider_mode is MemoryMode.ADDITIVE
+    assert resolve_memory_service_config({}).provider_mode is MemoryMode.ADDITIVE
+
+
 def test_authoritative_requires_provider_and_absolute_existing_executable(tmp_path):
     exe = tmp_path / "provider.exe"
     exe.write_bytes(b"MZ")

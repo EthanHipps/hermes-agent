@@ -26,7 +26,11 @@ class FrozenMemoryIdentity:
 
     def to_wire(self) -> FrozenIdentityWire:
         if self.provider_mode != "authoritative":
-            raise ValueError("only an authoritative identity has a wire form")
+            # A bare ValueError must never escape the seam: resume() calls
+            # this on a caller-supplied HostSessionState and does not catch
+            # ValueError, so a hand-built non-authoritative identity needs
+            # the package's own typed error here (M14).
+            raise BindingInvalidError("only an authoritative identity has a wire form")
         return FrozenIdentityWire.from_wire(asdict(self))
 
     @classmethod

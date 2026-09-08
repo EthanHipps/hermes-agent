@@ -75,7 +75,13 @@ def _memory_section(config: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     if not isinstance(config, Mapping):
         return {}
     section = config.get("memory")
-    return section if isinstance(section, Mapping) else {}
+    if section is None:
+        return {}
+    if not isinstance(section, Mapping):
+        raise MemoryConfigurationError(
+            f"memory: {section!r} must be a mapping of configuration keys, not {type(section).__name__}"
+        )
+    return section
 
 
 def _parse_enum(enum_cls, raw: Any, key: str, default):

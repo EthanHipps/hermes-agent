@@ -387,7 +387,12 @@ def load_authoritative_backend_factory(name: str):
     """
     provider_dir = find_provider_dir(name)
     if provider_dir is not None:
-        module = _import_provider_module(provider_dir)
+        try:
+            module = _import_provider_module(provider_dir)
+        except Exception as exc:
+            from agent.memory_service.config import MemoryConfigurationError
+
+            raise MemoryConfigurationError(f"memory.provider {name!r} failed to import: {exc}") from exc
         return getattr(module, "create_authoritative_backend", None) if module else None
     entry_point = find_provider_entry_point(name)
     if entry_point is None:
@@ -405,7 +410,13 @@ def load_authoritative_backend_factory(name: str):
 
 
 def _import_provider_module(provider_dir: Path):
-    """Import a provider package directory without instantiating a provider."""
+    """Import a provider package directory without instantiating a provider.
+
+    Returns None only when there is nothing to import (no ``__init__.py``, or
+    an already-broken spec); an exception raised while executing the module
+    propagates to the caller so an import failure is never indistinguishable
+    from "module imported but lacks a symbol".
+    """
     name = provider_dir.name
     is_bundled = _is_bundled(provider_dir)
     module_name = _module_name(provider_dir, name)
@@ -429,7 +440,7 @@ def _import_provider_module(provider_dir: Path):
     except Exception as exc:
         sys.modules.pop(module_name, None)
         logger.warning("Failed to import memory provider '%s': %s", name, exc)
-        return None
+        raise
     return module
 
 

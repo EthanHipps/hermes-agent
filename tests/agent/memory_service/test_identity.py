@@ -51,7 +51,10 @@ def test_wire_round_trip_requires_authoritative_mode():
     assert isinstance(wire, FrozenIdentityWire)
     assert wire.to_wire()["opaque_binding_b64url"] == HANDLE
     assert FrozenMemoryIdentity.from_wire(wire) == ident
-    with pytest.raises(ValueError, match="authoritative"):
+    # M14: a bare ValueError must never escape the seam -- resume() does not
+    # catch it, so a hand-built non-authoritative identity needs the
+    # package's own typed error here.
+    with pytest.raises(BindingInvalidError, match="authoritative"):
         _identity(provider_mode="additive").to_wire()
 
 
