@@ -26,6 +26,15 @@ _NATIVE_HEADER = {"memory": "Memory", "user": "User profile"}
 
 
 class ProviderAuthoritativeMemoryService(MemoryService):
+    """Provider-authoritative disposition (§9.1, §9.6).
+
+    An instance is bound to one logical session. The fail-closed latches
+    (``_blocked``, ``_epoch_changed``, ``_binding_lost``) are plain
+    attributes with no lock; Hermes runs gateway sessions on threads, so
+    callers MUST serialize access to a given instance rather than share it
+    across concurrent calls.
+    """
+
     def __init__(self, config: MemoryServiceConfig, backend: Any) -> None:
         super().__init__(config)
         self._backend = backend

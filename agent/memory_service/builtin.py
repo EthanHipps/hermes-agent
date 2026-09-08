@@ -88,6 +88,15 @@ def _timestamp(dt: datetime) -> str:
 
 
 class BuiltinMemoryService(MemoryService):
+    """Built-in (additive) disposition (§9.1 built-in backend).
+
+    An instance is bound to one logical session. The staged-mutation and
+    commit-receipt tables (``_stages``, ``_stage_by_request``,
+    ``_receipts``) are plain dict attributes with no lock; Hermes runs
+    gateway sessions on threads, so callers MUST serialize access to a
+    given instance rather than share it across concurrent calls.
+    """
+
     def __init__(
         self,
         config: MemoryServiceConfig,
