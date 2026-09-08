@@ -93,7 +93,7 @@ def test_plugin_discovery_reports_missing_factory(tmp_path, monkeypatch):
         "def create_authoritative_backend(config):\n    return ('backend-for', config.provider)\n",
         encoding="utf-8",
     )
-    monkeypatch.delitem(__import__("sys").modules, f"{pm._USER_NAMESPACE}.demo", raising=False)
+    monkeypatch.delitem(__import__("sys").modules, pm._module_name(plugin_dir, "demo"), raising=False)
     factory = pm.load_authoritative_backend_factory("demo")
     cfg = resolve_memory_service_config({"memory": {"provider": "demo"}})
     assert factory(cfg) == ("backend-for", "demo")

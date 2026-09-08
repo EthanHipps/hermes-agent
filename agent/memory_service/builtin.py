@@ -53,7 +53,7 @@ from agent.memory_service.service import (
     RecallQuery,
     ServiceCapabilities,
 )
-from tools.memory_tool_store import _read_failed_error
+from tools.memory_tool_store import MemoryFileUnreadableError
 
 _STAGE_TTL = timedelta(hours=1)
 _CHANNEL = {"memory": "hermes_memory", "user": "hermes_user"}
@@ -148,16 +148,14 @@ class BuiltinMemoryService(MemoryService):
         only (see ``_wire_identity``); its ``provider_mode`` MUST NOT be read
         by hosts. Raises :class:`BuiltinStoreError` instead of returning a
         false ``status="ok"`` snapshot when the on-disk file exists but could
-        not be read (the native store's checked read) -- the in-memory
-        view would otherwise be silently stale.
+        not be read (``tools.memory_tool_store.MemoryFileUnreadableError``) -- the
+        in-memory view would otherwise be silently stale.
         """
         self._require_target(target)
-        path = self._store._path_for(target)
-        raw, read_ok = self._store._read_raw_checked(path)
-        if not read_ok:
-            raise BuiltinStoreError(_read_failed_error(path))
-        entries = list(dict.fromkeys(self._store._parse_entries(raw)))
-        self._store._set_entries(target, entries)
+        try:
+            entries = self._store.read_entries(target)
+        except MemoryFileUnreadableError as exc:
+            raise BuiltinStoreError(exc.response) from exc
         return self._snapshot(target, entries)
 
     def prompt_block(self, target: str) -> Optional[str]:

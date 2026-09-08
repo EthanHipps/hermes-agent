@@ -9,6 +9,7 @@ from tools.memory_tool import (
     memory_tool,
     _scan_memory_content,
 )
+from tools.memory_tool_store import MemoryFileUnreadableError
 from tools.skill_provenance import reset_current_write_origin, set_current_write_origin
 
 
@@ -849,3 +850,33 @@ class TestBackgroundReviewDeleteGate:
             reset_current_write_origin(token)
         assert result["success"] is True
         assert "rewritten by refine" in store._entries_for("memory")
+
+
+class TestReadEntriesPublicMethod:
+    """``read_entries`` is the one public read for callers outside this module
+    (e.g. the built-in memory service) that need the real on-disk state --
+    see ``agent/memory_service/builtin.py``, which used to reach into
+    ``_reload_target``/``_entries_for``/``_path_for`` directly for this.
+    """
+
+    def test_returns_current_entries_for_a_readable_target(self, store):
+        store.add("memory", "First fact.")
+        store.add("memory", "Second fact.")
+        assert store.read_entries("memory") == ["First fact.", "Second fact."]
+        assert store.read_entries("user") == []
+
+    def test_raises_on_an_unreadable_target_without_touching_disk(self, store):
+        store.add("memory", "Existing fact.")
+        path = store._path_for("memory")
+        original_bytes = path.read_bytes()
+        path.write_bytes(b"\xff\xfe invalid utf-8 \x80\x81 memory content")
+
+        with pytest.raises(MemoryFileUnreadableError) as exc:
+            store.read_entries("memory")
+
+        assert exc.value.path == path
+        assert exc.value.response["success"] is False
+        assert "could not be read" in exc.value.response["error"]
+        # Refusing to read must not rewrite or otherwise touch the file.
+        assert path.read_bytes() != original_bytes  # still the corrupted bytes we planted
+        assert path.read_bytes() == b"\xff\xfe invalid utf-8 \x80\x81 memory content"

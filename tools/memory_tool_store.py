@@ -54,6 +54,19 @@ def _read_failed_error(path: Path) -> Dict[str, Any]:
         f"memory, so the write is refused. Nothing was changed — retry in a moment.")
 
 
+class MemoryFileUnreadableError(Exception):
+    """An existing native memory file could not be read.
+
+    ``response`` carries the native write-error envelope, so service callers
+    can fail loudly without reaching into the store's private read helpers.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.response = _read_failed_error(path)
+        super().__init__(str(self.response.get("error")))
+
+
 def _find_unique_match(entries: List[str], old_text: str) -> Tuple[Optional[int], bool]:
     """``(index, ambiguous)`` for entries containing *old_text*. Exact-duplicate
     matches are safe (first wins); distinct matches → ``(None, True)``."""
@@ -131,6 +144,20 @@ class MemoryStore:
             entries = list(dict.fromkeys(self._read_file(path)))
             self._set_entries(target, entries)
             self._system_prompt_snapshot[target] = self._render_block(target, [_sanitize(e, path.name) for e in entries])
+
+    def read_entries(self, target: str) -> List[str]:
+        """Refresh and return current entries, preserving the frozen prompt snapshot.
+
+        Raise :class:`MemoryFileUnreadableError` on an unreadable file without
+        changing live entries. No drift check is needed for this pure read.
+        """
+        path = self._path_for(target)
+        raw, read_ok = self._read_raw_checked(path)
+        if not read_ok:
+            raise MemoryFileUnreadableError(path)
+        entries = list(dict.fromkeys(self._parse_entries(raw)))
+        self._set_entries(target, entries)
+        return list(entries)
 
     @staticmethod
     @contextmanager
