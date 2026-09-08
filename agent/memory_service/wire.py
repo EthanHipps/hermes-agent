@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union, get_args, get_origin, get_type_hints
+
+logger = logging.getLogger(__name__)
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 

@@ -14,12 +14,15 @@ reinterprets a bad authoritative configuration as additive.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Optional
 
 from utils import is_truthy_value
+
+logger = logging.getLogger(__name__)
 
 PROVIDER_API_VERSION = 1
 

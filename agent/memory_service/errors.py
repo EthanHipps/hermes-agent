@@ -8,9 +8,12 @@ is unknowable). Host-level errors describe the §9.6 dispositions.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from agent.memory_service.wire import ERROR_CODES
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryServiceError(Exception):

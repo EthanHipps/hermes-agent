@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
 from agent.memory_service.errors import BindingInvalidError
 from agent.memory_service.wire import FrozenIdentityWire, WireError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

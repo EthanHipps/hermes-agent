@@ -12,6 +12,7 @@ no provider epoch or frozen identity; the service injects both.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -33,6 +34,8 @@ from agent.memory_service.errors import (
     StatelessSessionError,
 )
 from agent.memory_service.identity import FrozenMemoryIdentity, HostSessionState
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryDisposition(str, Enum):
@@ -272,6 +275,7 @@ def select_memory_service(
     except (ProviderError, ProviderTransportError, w.WireError, MemoryServiceError) as exc:
         service.shutdown()
         if cfg.failure_policy is FailurePolicy.STATELESS:
+            logger.warning("memory session starting stateless: authoritative provider unavailable before the first model request")
             return StatelessMemoryService(cfg, reason=str(exc))
         raise MemoryBlockedError(f"authoritative memory provider failed before the first model request: {exc}") from exc
     return service

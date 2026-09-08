@@ -1,5 +1,7 @@
 """Authoritative disposition over the stub transport: §9.1 selection, §9.2 frozen identity, §9.6 fail-closed."""
 
+import logging
+
 import pytest
 
 from agent.memory_service import wire as w
@@ -91,7 +93,7 @@ def test_capability_flag_without_its_operation_is_a_configuration_error(tmp_path
     assert service.capabilities.recall_context is True
 
 
-def test_bind_failure_fails_closed_or_starts_stateless(tmp_path):
+def test_bind_failure_fails_closed_or_starts_stateless(tmp_path, caplog):
     backend = StubBackend()
     backend.fail_transport("bind_session")
     with pytest.raises(MemoryBlockedError):
@@ -99,7 +101,11 @@ def test_bind_failure_fails_closed_or_starts_stateless(tmp_path):
     assert backend.shutdown_calls == 1
     backend = StubBackend()
     backend.fail_typed("bind_session", "unavailable")
-    service = _select(tmp_path, backend, authoritative_failure_policy="stateless")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="agent.memory_service.service"):
+        service = _select(tmp_path, backend, authoritative_failure_policy="stateless")
+    # M8: the stateless-start transition emits exactly one record.
+    assert len(caplog.records) == 1
     assert isinstance(service, StatelessMemoryService)
     assert "unavailable" in service.degraded_warning()
     assert backend.count("load_curated") == 0
@@ -205,13 +211,17 @@ def test_blocked_load_exposes_typed_code_and_provider_error(tmp_path):
     assert excinfo2.value.code == "unavailable"
 
 
-def test_failure_after_success_blocks_until_a_fresh_load(tmp_path):
+def test_failure_after_success_blocks_until_a_fresh_load(tmp_path, caplog):
     backend = StubBackend()
     service = _select(tmp_path, backend)
     snap = service.load_curated("memory")
     backend.fail_transport("load_curated")
-    with pytest.raises(MemoryBlockedError):
-        service.load_curated("memory")
+    with caplog.at_level(logging.WARNING, logger="agent.memory_service.authoritative"):
+        with pytest.raises(MemoryBlockedError):
+            service.load_curated("memory")
+    # M8: the blocked transition is exactly what an operator needs when a
+    # session fails closed -- one record, no more, no payload asserted.
+    assert len(caplog.records) == 1
     assert service.blocked
     with pytest.raises(MemoryBlockedError):
         service.stage_curated(_mutation(snap))
@@ -226,12 +236,15 @@ def test_failure_after_success_blocks_until_a_fresh_load(tmp_path):
     assert wire_stage.expected_provider_epoch == "ep-1" and wire_stage.frozen_identity == service.identity.to_wire()
 
 
-def test_epoch_change_invalidates_state_until_rebind(tmp_path):
+def test_epoch_change_invalidates_state_until_rebind(tmp_path, caplog):
     backend = StubBackend()
     service = _select(tmp_path, backend)
     backend.epoch = "ep-2"
-    with pytest.raises(MemoryBlockedError, match="epoch"):
-        service.load_curated("memory")
+    with caplog.at_level(logging.WARNING, logger="agent.memory_service.authoritative"):
+        with pytest.raises(MemoryBlockedError, match="epoch"):
+            service.load_curated("memory")
+    # M8: the epoch-changed transition emits exactly one record.
+    assert len(caplog.records) == 1
     assert service.blocked and service.epoch_changed
     backend.epoch = "ep-1"
     with pytest.raises(MemoryBlockedError, match="rebind"):
@@ -330,14 +343,17 @@ def test_shutdown_reaches_the_backend(tmp_path):
     assert backend.shutdown_calls == 1
 
 
-def test_revoked_binding_is_latched_until_rebind(tmp_path):
+def test_revoked_binding_is_latched_until_rebind(tmp_path, caplog):
     backend = StubBackend()
     service = _select(tmp_path, backend)
     snap = service.load_curated("memory")
     old_identity = service.identity
     backend.fail_typed("stage_curated", "binding_revoked")
-    with pytest.raises(MemoryBlockedError):
-        service.stage_curated(_mutation(snap))
+    with caplog.at_level(logging.WARNING, logger="agent.memory_service.authoritative"):
+        with pytest.raises(MemoryBlockedError):
+            service.stage_curated(_mutation(snap))
+    # M8: the binding-lost transition emits exactly one record.
+    assert len(caplog.records) == 1
     # a later successful-looking load must not re-enable mutations: the
     # binding is latched invalid until an explicit rebind, not just blocked
     # until a fresh load.

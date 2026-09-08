@@ -9,6 +9,7 @@ native memory files and knows no particular provider.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Optional
 
@@ -18,6 +19,8 @@ from agent.memory_service.config import PROVIDER_API_VERSION, REQUIRED_OPERATION
 from agent.memory_service.errors import CapabilityUnavailableError, MemoryBlockedError, ProviderError, ProviderTransportError, TargetDisabledError
 from agent.memory_service.identity import FrozenMemoryIdentity, HostSessionState
 from agent.memory_service.service import CommitIntent, ContinuityCapture, InspectRequest, MemoryDisposition, MemoryService, MutationRequest, RecallQuery, ServiceCapabilities
+
+logger = logging.getLogger(__name__)
 
 _NATIVE_HEADER = {"memory": "Memory", "user": "User profile"}
 
@@ -53,6 +56,7 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         epoch = self._negotiate()
         if epoch != session_state.provider_epoch:
             self._epoch_changed = True
+            logger.warning("memory provider epoch changed (operation=resume)")
             raise MemoryBlockedError(f"provider epoch changed from {session_state.provider_epoch} to {epoch}; explicit rebind or a new logical session is required")
         request = w.ValidateSessionRequest(expected_provider_epoch=session_state.provider_epoch, frozen_identity=session_state.identity.to_wire())
         result = self._call("validate_session", request, expected_epoch=session_state.provider_epoch)
@@ -209,6 +213,7 @@ class ProviderAuthoritativeMemoryService(MemoryService):
     def _block(self, reason: str) -> None:
         self._blocked = True
         self._block_reason = reason
+        logger.warning("memory service blocked")
         raise MemoryBlockedError(reason)
 
     def _fail_transport(self, exc: ProviderTransportError, *, operation: str, fresh_load: bool, mutation: bool, non_blocking: bool) -> None:
@@ -217,6 +222,7 @@ class ProviderAuthoritativeMemoryService(MemoryService):
             raise exc
         self._blocked = True
         self._block_reason = f"{operation}: {exc.reason}"
+        logger.warning("memory service blocked (operation=%s)", operation)
         # A read (or any non-mutation call) can be reported as a plain block:
         # nothing was attempted at the provider's store. A mutation's caller
         # instead needs the raw ProviderTransportError, whose
@@ -240,15 +246,18 @@ class ProviderAuthoritativeMemoryService(MemoryService):
                 self._epoch_changed = True
                 self._blocked = True
                 self._block_reason = "provider epoch changed"
+                logger.warning("memory provider epoch changed (operation=%s)", operation)
                 raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
             if exc.code in ("binding_invalid", "binding_revoked"):
                 self._binding_lost = True
                 self._blocked = True
                 self._block_reason = exc.code
+                logger.warning("memory provider binding lost (operation=%s)", operation)
                 raise MemoryBlockedError(f"binding is {exc.code}; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
             if fresh_load and not non_blocking:
                 self._blocked = True
                 self._block_reason = f"{operation} failed with {exc.code}"
+                logger.warning("memory service blocked (operation=%s)", operation)
                 raise MemoryBlockedError(self._block_reason, code=exc.code, provider_error=exc) from exc
             raise
         except ProviderTransportError as exc:
@@ -265,5 +274,6 @@ class ProviderAuthoritativeMemoryService(MemoryService):
             self._epoch_changed = True
             self._blocked = True
             self._block_reason = "provider epoch changed"
+            logger.warning("memory provider epoch changed (operation=%s)", operation)
             raise MemoryBlockedError(f"provider epoch changed from {expected} to {result.provider_epoch}; explicit rebind or a new logical session is required")
         return result

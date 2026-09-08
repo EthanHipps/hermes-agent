@@ -6,6 +6,8 @@ code lives behind :class:`AuthoritativeBackend`; nothing in this package
 knows any particular provider.
 """
 
+import logging
+
 from agent.memory_service import wire
 from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
 from agent.memory_service.builtin import BuiltinMemoryService
@@ -41,6 +43,8 @@ from agent.memory_service.service import (
     StatelessMemoryService,
     select_memory_service,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "PROVIDER_API_VERSION",

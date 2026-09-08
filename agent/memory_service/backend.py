@@ -12,10 +12,13 @@ malformed output.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
 from agent.memory_service import wire as w
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 

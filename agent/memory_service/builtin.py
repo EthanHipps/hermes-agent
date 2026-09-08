@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -54,6 +55,8 @@ from agent.memory_service.service import (
     ServiceCapabilities,
 )
 from tools.memory_tool_store import MemoryFileUnreadableError
+
+logger = logging.getLogger(__name__)
 
 _STAGE_TTL = timedelta(hours=1)
 _CHANNEL = {"memory": "hermes_memory", "user": "hermes_user"}
