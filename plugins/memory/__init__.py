@@ -58,7 +58,9 @@ def _is_memory_provider_dir(path: Path) -> bool:
         return False
     try:
         source = init_file.read_text(errors="replace", encoding="utf-8")[:8192]
-        return "register_memory_provider" in source or "MemoryProvider" in source
+        return any(marker in source for marker in (
+            "register_memory_provider", "MemoryProvider", "create_authoritative_backend",
+        ))
     except Exception:
         return False
 
@@ -373,6 +375,76 @@ def _get_active_memory_provider() -> Optional[str]:
         return cfg_get(config, "memory", "provider") or None
     except Exception:
         return None
+
+
+def load_authoritative_backend_factory(name: str):
+    """Return the provider's ``create_authoritative_backend(config)`` factory, or None.
+
+    Generic seam for ``memory.provider_mode: authoritative`` (host spec §9.1):
+    a provider that can act as the sole curated-memory authority exports a
+    module-level ``create_authoritative_backend`` returning an object that
+    implements ``agent.memory_service.backend.AuthoritativeBackend``. Bundled,
+    user-installed, project-local, and entry-point providers are searched in
+    the same order as ``load_memory_provider``; nothing is instantiated here.
+    Import failures and non-callable exports raise ``MemoryConfigurationError``.
+    """
+    from agent.memory_service.config import MemoryConfigurationError
+
+    provider_dir = find_provider_dir(name)
+    try:
+        if provider_dir is not None:
+            loaded = _import_provider_module(provider_dir)
+        else:
+            entry_point = find_provider_entry_point(name)
+            if entry_point is None:
+                return None
+            loaded = entry_point.load()
+    except Exception as exc:
+        raise MemoryConfigurationError(f"memory.provider {name!r} failed to import: {exc}") from exc
+    factory = getattr(loaded, "create_authoritative_backend", None)
+    if factory is None and provider_dir is None:
+        module = sys.modules.get(getattr(loaded, "__module__", ""))
+        factory = getattr(module, "create_authoritative_backend", None) if module else None
+    if factory is not None and not callable(factory):
+        raise MemoryConfigurationError(
+            f"memory.provider {name!r} exports create_authoritative_backend, but it is not callable"
+        )
+    return factory
+
+
+def _import_provider_module(provider_dir: Path):
+    """Import a provider package directory without instantiating a provider.
+
+    Returns None only when there is nothing to import (no ``__init__.py``, or
+    an already-broken spec); an exception raised while executing the module
+    propagates to the caller so an import failure is never indistinguishable
+    from "module imported but lacks a symbol".
+    """
+    name = provider_dir.name
+    is_bundled = _is_bundled(provider_dir)
+    module_name = _module_name(provider_dir, name)
+    cached = sys.modules.get(module_name)
+    if cached is not None and getattr(cached, "__file__", None):
+        return cached
+    init_file = provider_dir / "__init__.py"
+    if not init_file.exists():
+        return None
+    if not is_bundled and _USER_NAMESPACE not in sys.modules:
+        _register_synthetic_package(_USER_NAMESPACE, [])
+    spec = importlib.util.spec_from_file_location(
+        module_name, str(init_file), submodule_search_locations=[str(provider_dir)]
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        logger.warning("Failed to import memory provider '%s': %s", name, exc)
+        raise
+    return module
 
 
 def _prune_inactive_memory_provider_skills(active_provider: Optional[str] = None) -> None:

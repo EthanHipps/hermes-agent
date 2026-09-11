@@ -54,6 +54,19 @@ def _read_failed_error(path: Path) -> Dict[str, Any]:
         f"memory, so the write is refused. Nothing was changed — retry in a moment.")
 
 
+class MemoryFileUnreadableError(Exception):
+    """An existing native memory file could not be read.
+
+    ``response`` carries the native write-error envelope, so service callers
+    can fail loudly without reaching into the store's private read helpers.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.response = _read_failed_error(path)
+        super().__init__(str(self.response.get("error")))
+
+
 def _find_unique_match(entries: List[str], old_text: str) -> Tuple[Optional[int], bool]:
     """``(index, ambiguous)`` for entries containing *old_text*. Exact-duplicate
     matches are safe (first wins); distinct matches → ``(None, True)``."""
@@ -131,6 +144,20 @@ class MemoryStore:
             entries = list(dict.fromkeys(self._read_file(path)))
             self._set_entries(target, entries)
             self._system_prompt_snapshot[target] = self._render_block(target, [_sanitize(e, path.name) for e in entries])
+
+    def read_entries(self, target: str) -> List[str]:
+        """Refresh and return current entries, preserving the frozen prompt snapshot.
+
+        Raise :class:`MemoryFileUnreadableError` on an unreadable file without
+        changing live entries. No drift check is needed for this pure read.
+        """
+        path = self._path_for(target)
+        raw, read_ok = self._read_raw_checked(path)
+        if not read_ok:
+            raise MemoryFileUnreadableError(path)
+        entries = list(dict.fromkeys(self._parse_entries(raw)))
+        self._set_entries(target, entries)
+        return list(entries)
 
     @staticmethod
     @contextmanager
@@ -336,6 +363,73 @@ class MemoryStore:
                     f"entries in the same batch (see current_entries below), then retry."))
             return working, f"Applied {len(operations)} operation(s)."
         return self._mutate(target, _apply)
+
+    @staticmethod
+    def normalize_entry(text: str) -> str:
+        """Use the same newline form before admission and native text-file publication."""
+        return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    @staticmethod
+    def entries_round_trip(entries: List[str]) -> bool:
+        """Whether native serialization preserves every entry and its boundaries.
+
+        LF-only text survives platform newline translation. The reader strips
+        a leading BOM; delimiter matches can also span adjacent entry boundaries.
+        """
+        content = ENTRY_DELIMITER.join(entries)
+        return ("\r" not in content and not content.startswith("\ufeff")
+                and MemoryStore._parse_entries(content) == list(entries))
+
+    def apply_exact_delta(self, target: str, *, retire: List[str], add: List[str],
+                          expected_entries: Optional[Tuple[str, ...]] = None) -> Dict[str, Any]:
+        """Retire exact entry texts and append new ones atomically against the final budget.
+
+        The host memory service addresses entries by stable ID, so it must
+        not use substring matching. Retirements precede additions; duplicate
+        additions are no-ops. The shared mutation path enforces the file lock,
+        drift detection, and read-failure guard. When supplied, expected_entries
+        is compared with the reloaded state under that same lock. Success carries
+        an owned committed_entries snapshot for the host's receipt, without a readback.
+        """
+        expected = tuple(expected_entries) if expected_entries is not None else None
+        committed_entries: Tuple[str, ...] = ()
+
+        def _failure(message):
+            return self._failure_with_entries(
+                target, message + " No operations were applied (batch is all-or-nothing).")
+
+        def _apply(current, limit):
+            nonlocal committed_entries
+            if expected is not None and tuple(current) != expected:
+                return _error("Memory changed since this mutation was staged.",
+                              code="version_conflict", current_entries=list(current))
+            entries = list(current)
+            for text in retire:
+                if text not in entries:
+                    return _failure(f"No entry equals the retired text ({text[:40]!r}).")
+                entries.remove(text)
+            for text in add:
+                content = self.normalize_entry(text)
+                if not content:
+                    return _failure("Content cannot be empty.")
+                if not self.entries_round_trip([content]):
+                    return _failure("Content cannot be preserved as one native memory entry.")
+                if scan_error := _scan_memory_content(content):
+                    return _failure(scan_error)
+                if content not in entries:
+                    entries.append(content)
+            if not self.entries_round_trip(entries):
+                return _failure("The resulting native memory entries would change on reload.")
+            new_total = len(ENTRY_DELIMITER.join(entries))
+            if new_total > limit:
+                return _failure(f"Result would be {new_total:,}/{limit:,} chars, over the limit.")
+            committed_entries = tuple(entries)
+            return entries, "Delta applied."
+
+        response = self._mutate(target, _apply)
+        if response.get("success"):
+            response["committed_entries"] = committed_entries
+        return response
 
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """Frozen load-time snapshot (NOT live state — mid-session writes don't touch

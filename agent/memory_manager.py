@@ -112,6 +112,15 @@ def memory_provider_tools_exposed(agent: Any) -> bool:
     Same gate as ``inject_memory_provider_tools`` so a provider's ``system_prompt_block()``
     never advertises tools absent from the tool surface.
     """
+    # Host spec §9.1: in an authoritative (or stateless) session the only
+    # model-facing curated-memory mutation path is Hermes' own memory tool
+    # over MemoryService; provider-defined curated-memory tools are withheld.
+    # Additive sessions are unchanged.
+    service = getattr(agent, "_memory_service", None)
+    disposition = getattr(service, "disposition", None)
+    if disposition is not None and getattr(disposition, "value", disposition) in ("provider_authoritative", "stateless"):
+        return False
+
     tools = getattr(agent, "tools", None)
     present = isinstance(tools, (list, tuple)) and any(_tool_name(t) == "memory" for t in tools)
     enabled, disabled = getattr(agent, "enabled_toolsets", None), getattr(agent, "disabled_toolsets", None)
@@ -126,19 +135,32 @@ def inject_memory_provider_tools(agent: Any) -> int:
         return 0
 
     if not memory_provider_tools_exposed(agent):
-        # Say so once: a silent 0 leaves the provider looking "half on" with no clue which
-        # config key (platform_toolsets / disabled_toolsets) gated it.
+        # Say so once: a silent 0 leaves the provider looking "half on" with no clue whether
+        # toolset settings or the authoritative/stateless MemoryService withheld its tools.
         # See #81014.
         _providers = [p for p in getattr(memory_manager, "providers", None) or []
                       if getattr(p, "name", "") != "builtin"]
         if _providers:
-            logger.info(
-                "Memory provider(s) %s configured but the 'memory' toolset is "
-                "gated off for this session (platform_toolsets / "
-                "agent.disabled_toolsets) — provider tools and system-prompt "
-                "block are both withheld.",
-                [getattr(p, "name", type(p).__name__) for p in _providers],
-            )
+            _service = getattr(agent, "_memory_service", None)
+            _disposition = getattr(_service, "disposition", None)
+            _disposition_value = getattr(_disposition, "value", _disposition)
+            if _disposition_value in ("provider_authoritative", "stateless"):
+                logger.info(
+                    "Memory provider(s) %s configured but this session's "
+                    "MemoryService disposition is %r — provider-defined "
+                    "curated-memory tools and system-prompt block are both "
+                    "withheld (host spec §9.1).",
+                    [getattr(p, "name", type(p).__name__) for p in _providers],
+                    _disposition_value,
+                )
+            else:
+                logger.info(
+                    "Memory provider(s) %s configured but the 'memory' toolset is "
+                    "gated off for this session (platform_toolsets / "
+                    "agent.disabled_toolsets) — provider tools and system-prompt "
+                    "block are both withheld.",
+                    [getattr(p, "name", type(p).__name__) for p in _providers],
+                )
         return 0
 
     get_schemas = getattr(memory_manager, "get_all_tool_schemas", None)
