@@ -80,6 +80,122 @@ def _write_provider_dir(root: Path, name: str) -> Path:
     return provider
 
 
+def _write_authoritative_package(root: Path, name: str, label: str) -> Path:
+    provider = root / name
+    provider.mkdir(parents=True)
+    (provider / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_name('IMPORTED').write_text('loaded')\n"
+        "from .backend import create_authoritative_backend\n",
+        encoding="utf-8",
+    )
+    (provider / "backend.py").write_text(
+        "from tests.agent.memory_service.stub_backend import StubBackend\n"
+        "def create_authoritative_backend(config):\n"
+        "    backend = StubBackend(provider=config.provider)\n"
+        f"    backend.entries['memory'] = [{label!r}]\n"
+        "    return backend\n",
+        encoding="utf-8",
+    )
+    return provider
+
+
+def _write_entry_point(root: Path, name: str, package: str):
+    distribution = root / f"{package}-1.0.dist-info"
+    distribution.mkdir()
+    (distribution / "METADATA").write_text(f"Name: {package}\nVersion: 1.0\n", encoding="utf-8")
+    (distribution / "entry_points.txt").write_text(
+        f"[hermes_agent.memory_providers]\n{name} = {package}\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("source", ("user", "project", "entry_point"))
+def test_factory_only_package_is_selected_without_importing_other_providers(tmp_path, monkeypatch, source):
+    from agent.memory_service import wire as w
+    from agent.memory_service.service import MemoryDisposition, select_memory_service
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HERMES_ENABLE_PROJECT_PLUGINS", raising=False)
+    roots = {
+        "user": tmp_path / "home" / "plugins",
+        "project": tmp_path / ".hermes" / "plugins",
+        "entry_point": tmp_path,
+    }
+    root = roots[source]
+    selected = _write_authoritative_package(root, "standalone_authority", source)
+    unselected = _write_authoritative_package(root, "unselected_authority", "must stay unloaded")
+    if source == "entry_point":
+        _write_entry_point(root, "standalone_authority", selected.name)
+        _write_entry_point(root, "unselected_authority", unselected.name)
+        monkeypatch.syspath_prepend(str(root))
+    if source == "project":
+        assert "standalone_authority" not in memory_plugins.list_memory_provider_names()
+        assert memory_plugins.find_provider_dir("standalone_authority") is None
+        assert memory_plugins.load_authoritative_backend_factory("standalone_authority") is None
+        assert not (selected / "IMPORTED").exists()
+        monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1")
+
+    assert {"standalone_authority", "unselected_authority"} <= set(memory_plugins.list_memory_provider_names())
+    assert memory_plugins.find_provider_dir("standalone_authority") == selected
+    assert not (selected / "IMPORTED").exists()
+    assert not (unselected / "IMPORTED").exists()
+
+    def native_store():
+        raise AssertionError("authoritative selection must not construct native storage")
+
+    config = {"memory": {"provider": "standalone_authority", "provider_mode": "authoritative", "provider_executable": sys.executable}}
+    context = w.RequestedContext(
+        principal_id="ethan", profile_id="default", logical_session_id="factory-discovery", platform="cli",
+        org_id=None, project_id=None, repo_id=None, workspace_id=None,
+        resolution_source="directory", canonical_directory=str(tmp_path),
+    )
+    service = select_memory_service(config, store_factory=native_store, requested_context=context)
+    try:
+        assert service.disposition is MemoryDisposition.AUTHORITATIVE
+        assert service.identity.provider == config["memory"]["provider"]
+        assert service.identity.logical_session_id == context.logical_session_id
+        snapshot = service.load_curated("memory")
+        assert snapshot.frozen_identity == service.identity.to_wire()
+        assert [entry.text for entry in snapshot.delivery_entries] == [source]
+        assert (selected / "IMPORTED").exists()
+        assert not (unselected / "IMPORTED").exists()
+    finally:
+        service.shutdown()
+
+
+def test_authoritative_factory_precedence_and_profile_imports_are_independent(tmp_path, monkeypatch):
+    from agent.memory_service.config import resolve_memory_service_config
+
+    name = "collision_authority"
+    first_home = tmp_path / "first_home"
+    second_home = tmp_path / "second_home"
+    first = _write_authoritative_package(first_home / "plugins", name, "first profile")
+    second = _write_authoritative_package(second_home / "plugins", name, "second profile")
+    project = _write_authoritative_package(tmp_path / ".hermes" / "plugins", name, "project")
+    pip = _write_authoritative_package(tmp_path, "collision_authority_pip", "pip")
+    _write_entry_point(tmp_path, name, pip.name)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1")
+    config = resolve_memory_service_config({"memory": {"provider": name}})
+
+    for home, expected_dir, label in (
+        (first_home, first, "first profile"),
+        (second_home, second, "second profile"),
+        (first_home, first, "first profile"),
+        (tmp_path / "empty_home", project, "project"),
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        assert memory_plugins.find_provider_dir(name) == expected_dir
+        factory = memory_plugins.load_authoritative_backend_factory(name)
+        assert factory(config).entries["memory"] == [label]
+    assert not (pip / "IMPORTED").exists()
+    monkeypatch.delenv("HERMES_ENABLE_PROJECT_PLUGINS")
+    assert memory_plugins.find_provider_dir(name) == pip
+    assert memory_plugins.load_authoritative_backend_factory(name)(config).entries["memory"] == ["pip"]
+
+
 # ---------------------------------------------------------------------------
 # Project-local providers
 # ---------------------------------------------------------------------------
@@ -109,12 +225,18 @@ def test_bundled_still_wins_over_project(tmp_path, monkeypatch):
     PluginManager's later-wins order. A provider is activated by name, so a
     directory dropped into the working tree must not be able to shadow a
     shipped one and silently redirect the agent's memory."""
-    _write_provider_dir(tmp_path / ".hermes" / "plugins", "honcho")
+    user = _write_authoritative_package(tmp_path / "home" / "plugins", "honcho", "user")
+    project = _write_authoritative_package(tmp_path / ".hermes" / "plugins", "honcho", "project")
+    pip = _write_authoritative_package(tmp_path, "shadowed_honcho", "pip")
+    _write_entry_point(tmp_path, "honcho", pip.name)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HERMES_ENABLE_PROJECT_PLUGINS", "1")
 
     resolved = memory_plugins.find_provider_dir("honcho")
     assert resolved == Path(memory_plugins.__file__).parent / "honcho"
+    assert all(not (provider / "IMPORTED").exists() for provider in (user, project, pip))
 
 
 # ---------------------------------------------------------------------------

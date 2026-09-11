@@ -58,7 +58,9 @@ def _is_memory_provider_dir(path: Path) -> bool:
         return False
     try:
         source = init_file.read_text(errors="replace", encoding="utf-8")[:8192]
-        return "register_memory_provider" in source or "MemoryProvider" in source
+        return any(marker in source for marker in (
+            "register_memory_provider", "MemoryProvider", "create_authoritative_backend",
+        ))
     except Exception:
         return False
 
@@ -384,28 +386,29 @@ def load_authoritative_backend_factory(name: str):
     implements ``agent.memory_service.backend.AuthoritativeBackend``. Bundled,
     user-installed, project-local, and entry-point providers are searched in
     the same order as ``load_memory_provider``; nothing is instantiated here.
+    Import failures and non-callable exports raise ``MemoryConfigurationError``.
     """
-    provider_dir = find_provider_dir(name)
-    if provider_dir is not None:
-        try:
-            module = _import_provider_module(provider_dir)
-        except Exception as exc:
-            from agent.memory_service.config import MemoryConfigurationError
+    from agent.memory_service.config import MemoryConfigurationError
 
-            raise MemoryConfigurationError(f"memory.provider {name!r} failed to import: {exc}") from exc
-        return getattr(module, "create_authoritative_backend", None) if module else None
-    entry_point = find_provider_entry_point(name)
-    if entry_point is None:
-        return None
+    provider_dir = find_provider_dir(name)
     try:
-        loaded = entry_point.load()
-    except Exception as exc:  # pragma: no cover - environment specific
-        logger.warning("Failed to load memory provider entry point '%s': %s", name, exc)
-        return None
+        if provider_dir is not None:
+            loaded = _import_provider_module(provider_dir)
+        else:
+            entry_point = find_provider_entry_point(name)
+            if entry_point is None:
+                return None
+            loaded = entry_point.load()
+    except Exception as exc:
+        raise MemoryConfigurationError(f"memory.provider {name!r} failed to import: {exc}") from exc
     factory = getattr(loaded, "create_authoritative_backend", None)
-    if factory is None:
+    if factory is None and provider_dir is None:
         module = sys.modules.get(getattr(loaded, "__module__", ""))
         factory = getattr(module, "create_authoritative_backend", None) if module else None
+    if factory is not None and not callable(factory):
+        raise MemoryConfigurationError(
+            f"memory.provider {name!r} exports create_authoritative_backend, but it is not callable"
+        )
     return factory
 
 
