@@ -245,8 +245,8 @@ def select_memory_service(
     each enabled target and discards the snapshot. That probe is what gives a
     first-load failure a stateless outcome instead of a
     :class:`MemoryBlockedError` raised later under either policy. It does not
-    weaken the per-request rule: every model request still performs its own
-    fresh load, and no snapshot from the probe is ever cached or reused.
+    weaken the per-request rule: callers must perform a fresh load for each
+    model request; no snapshot from the probe is cached or reused here.
     """
     cfg = resolve_memory_service_config(config)
     if cfg.provider_mode is MemoryMode.ADDITIVE:

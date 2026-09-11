@@ -1,9 +1,9 @@
 """Host-owned generic memory service (spec §9.1–§9.3, §9.6).
 
-Hermes routes every curated-memory read, mutation, lifecycle event, and
-administrative operation through :class:`MemoryService`. Provider-specific
-code lives behind :class:`AuthoritativeBackend`; nothing in this package
-knows any particular provider.
+This package provides the service/interface foundation for curated-memory
+reads, mutations, and lifecycle operations. Live agent integration is a
+separate step. Provider-specific code lives behind
+:class:`AuthoritativeBackend`; this package is provider-independent.
 """
 
 import logging
