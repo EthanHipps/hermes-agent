@@ -1,6 +1,8 @@
 """Authoritative disposition over the stub transport: §9.1 selection, §9.2 frozen identity, §9.6 fail-closed."""
 
+import json
 import logging
+from dataclasses import replace
 
 import pytest
 
@@ -11,7 +13,7 @@ from agent.memory_service.errors import BindingInvalidError, CapabilityUnavailab
 from agent.memory_service.identity import FrozenMemoryIdentity, HostSessionState
 from agent.memory_service.service import CommitIntent, ContinuityCapture, InspectRequest, MemoryDisposition, MutationRequest, RecallQuery, ServiceCapabilities, StatelessMemoryService, select_memory_service
 
-from tests.agent.memory_service.stub_backend import REPO, StubBackend
+from tests.agent.memory_service.stub_backend import PG, REPO, StubBackend
 
 PROVENANCE = w.MutationProvenance(actor_kind="hermes", principal_id="ethan", logical_session_id="sess-1", initiating_surface="memory_tool", source_entry_ids=(), source_commit=None, threat_decision_id=None)
 
@@ -446,3 +448,181 @@ def test_inspect_staged_returns_the_live_stage(tmp_path):
     with pytest.raises(ProviderError) as exc:
         service.inspect_staged(InspectRequest("memory", "r-other", staged.stage_handle_b64url))
     assert exc.value.code == "stage_not_found"
+
+
+def _replace_reply_field(reply, path, replacement):
+    if not path:
+        return replacement(reply) if callable(replacement) else replacement
+    field, _, remaining = path.partition(".")
+    return replace(reply, **{field: _replace_reply_field(getattr(reply, field), remaining, replacement)})
+
+
+def _other_snapshot_target(snapshot):
+    return replace(snapshot, target="user", mutation_entries=(), delivery_entries=(),
+                   hidden_preservation_state=replace(snapshot.hidden_preservation_state, target="user"))
+
+
+class _CorruptReplyBackend(StubBackend):
+    corruption = None
+    reply_epoch = None
+
+    def _send(self, operation, result):
+        if self.corruption and operation == self.corruption[0]:
+            result = _replace_reply_field(result, *self.corruption[1:])
+        # Corrupt before the real codec round trip: these are structurally
+        # valid replies, and commits have already reached the provider store.
+        reply = super()._send(operation, result)
+        return replace(reply, provider_epoch=self.reply_epoch or reply.provider_epoch)
+
+
+_CORRELATION_CASES = [
+    ("load_curated", "frozen_identity.logical_session_id", "other-session"),
+    ("load_curated", "", _other_snapshot_target),
+    ("load_curated", "revision.provider_epoch", "ep-other"),
+    ("commit_curated", "snapshot.frozen_identity.logical_session_id", "other-session"),
+    ("commit_curated", "snapshot", _other_snapshot_target),
+    ("commit_curated", "snapshot.revision.provider_epoch", "ep-other"),
+    ("commit_curated", "request_id", "other-request"),
+    ("recall_context", "frozen_identity.logical_session_id", "other-session"),
+    ("recall_context", "target", "user"),
+    ("recall_context", "source_revision.provider_epoch", "ep-other"),
+    ("recall_context", "source_revision.visibility_revision", "other-visibility"),
+    ("recall_context", "source_revision.scope_revisions", lambda scopes: scopes[::-1]),
+    ("recall_context", "source_revision.scope_revisions", lambda scopes: (replace(scopes[0], revision="other-revision"), *scopes[1:])),
+    ("stage_curated", "request_id", "other-request"),
+    ("stage_curated", "target", "user"),
+    ("stage_curated", "expected_revision.provider_epoch", "ep-other"),
+    ("stage_curated", "expected_revision.visibility_revision", "other-visibility"),
+    ("stage_curated", "expected_revision.scope_revisions", lambda scopes: scopes[::-1]),
+    ("stage_curated", "expected_revision.scope_revisions", lambda scopes: (replace(scopes[0], revision="other-revision"), *scopes[1:])),
+    ("stage_curated", "requested_write_scopes", ()),
+    ("stage_curated", "requested_write_scopes", lambda scopes: scopes[::-1]),
+    ("inspect_staged", "summary.request_id", "other-request"),
+    ("inspect_staged", "summary.target", "user"),
+    ("inspect_staged", "summary.stage_handle_b64url", "AAAA"),
+    ("capture_continuity", "request_id", "other-request"),
+]
+
+
+def _correlation_actions(service, snapshot, staged):
+    mutation = replace(_mutation(snapshot), requested_write_scopes=(REPO, PG))
+    return {
+        "load_curated": lambda: service.load_curated("memory"),
+        "stage_curated": lambda: service.stage_curated(mutation),
+        "commit_curated": lambda: service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, staged.approval_binding_sha256, (REPO,), w.ApprovalAuthorization(kind="not_required"))),
+        "recall_context": lambda: service.recall_context(RecallQuery("memory", snapshot.revision, "q", ("general", "hermes_memory"), (), w.RecallBudget(0, 3000, 20))),
+        "inspect_staged": lambda: service.inspect_staged(InspectRequest("memory", "r1", staged.stage_handle_b64url)),
+        "capture_continuity": lambda: service.capture_continuity(ContinuityCapture("cr1", "compression_snapshot", "text", "compression")),
+    }
+
+
+@pytest.mark.parametrize("operation,path,replacement,conflict", [
+    pytest.param(op, path, replacement, False, id=f"{op}-{path or 'target'}-{i}")
+    for i, (op, path, replacement) in enumerate(_CORRELATION_CASES)
+] + [
+    pytest.param(op, path, replacement, True, id=f"{op}-conflict-{path or 'target'}")
+    for op in ("load_curated", "stage_curated", "commit_curated", "recall_context", "inspect_staged")
+    for _, path, replacement in _CORRELATION_CASES[:3]
+] + [
+    pytest.param("capture_continuity", path, replacement, True, id=f"capture_continuity-conflict-{path}")
+    for _, path, replacement in (_CORRELATION_CASES[0], _CORRELATION_CASES[2])
+])
+def test_provider_replies_must_correlate_before_results_escape_or_loads_unblock(tmp_path, operation, path, replacement, conflict):
+    backend = _CorruptReplyBackend(recall=True, continuity=True)
+    service = _select(tmp_path, backend)
+    snapshot = service.load_curated("memory")
+    staged = service.stage_curated(replace(_mutation(snapshot), requested_write_scopes=(REPO, PG)))
+    actions = _correlation_actions(service, snapshot, staged)
+    mutation = operation in ("stage_curated", "commit_curated")
+
+    if conflict:
+        # Null details and a correlated current snapshot (whose revision may
+        # have advanced) remain legitimate provider decisions.
+        current = replace(snapshot, revision=replace(snapshot.revision, visibility_revision="new-visibility"))
+        for details in (None, {"current_snapshot": current.to_wire()}):
+            backend.fail_typed(operation, "version_conflict", outcome="not_committed" if mutation else "not_applicable", details=details)
+            with pytest.raises(MemoryBlockedError if operation == "load_curated" else ProviderError) as exc:
+                actions[operation]()
+            assert exc.value.code == "version_conflict"
+            service.load_curated("memory")
+        bad_snapshot = _replace_reply_field(current, path, replacement)
+        # Exercise the same strict error-details decoder as the transport.
+        details = w.decode_error_details("version_conflict", json.loads(w.canonical_json({"current_snapshot": bad_snapshot.to_wire()})))
+        backend.fail_typed(operation, "version_conflict", outcome="not_committed" if mutation else "not_applicable", details=details.to_wire())
+    else:
+        backend.corruption = (operation, path, replacement)
+
+    expected_error = ProviderTransportError if mutation or operation == "capture_continuity" else MemoryBlockedError
+    with pytest.raises(expected_error, match="malformed provider output") as exc:
+        actions[operation]()
+    if isinstance(exc.value, ProviderTransportError):
+        assert exc.value.mutation_outcome_unknown is mutation
+    assert not service.epoch_changed  # Only the envelope can change the session epoch.
+    assert service.blocked is (operation != "capture_continuity")
+    backend.corruption = None
+
+    if service.blocked:
+        calls_before = len(backend.calls)
+        for blocked_operation in ("stage_curated", "commit_curated"):
+            with pytest.raises(MemoryBlockedError):
+                actions[blocked_operation]()
+        assert len(backend.calls) == calls_before
+        assert actions["capture_continuity"]().outcome == "stored"
+        assert service.blocked  # A successful non-load cannot clear the latch.
+        backend.corruption = ("load_curated", "revision.provider_epoch", "ep-other")
+        with pytest.raises(MemoryBlockedError):
+            service.load_curated("memory")
+        assert service.blocked and not service.epoch_changed
+        backend.corruption = None
+
+    fresh = service.load_curated("memory")
+    assert not service.blocked
+    recovered = service.stage_curated(_mutation(fresh, request_id="recovered"))
+    assert recovered.expected_revision == fresh.revision
+
+
+@pytest.mark.parametrize("operation", ["load_curated", "stage_curated", "commit_curated", "recall_context", "inspect_staged", "capture_continuity"])
+@pytest.mark.parametrize("changed_envelope", [False, True])
+def test_correlation_failures_preserve_publication_uncertainty_and_epoch_precedence(tmp_path, operation, changed_envelope):
+    backend = _CorruptReplyBackend(recall=True, continuity=True)
+    service = _select(tmp_path, backend)
+    snapshot = service.load_curated("memory")
+    staged = service.stage_curated(_mutation(snapshot))
+    actions = _correlation_actions(service, snapshot, staged)
+    path = {
+        "load_curated": "frozen_identity.logical_session_id",
+        "stage_curated": "request_id", "commit_curated": "request_id",
+        "recall_context": "frozen_identity.logical_session_id",
+        "inspect_staged": "summary.request_id", "capture_continuity": "request_id",
+    }[operation]
+    backend.corruption = (operation, path, "other-session-or-request")
+    backend.reply_epoch = "ep-other" if changed_envelope else None
+    mutation = operation in ("stage_curated", "commit_curated")
+    expected_error = MemoryBlockedError if changed_envelope or not (mutation or operation == "capture_continuity") else ProviderTransportError
+    with pytest.raises(expected_error) as exc:
+        actions[operation]()
+    assert service.epoch_changed is changed_envelope
+    assert service.blocked is (changed_envelope or operation != "capture_continuity")
+    if isinstance(exc.value, ProviderTransportError):
+        assert exc.value.mutation_outcome_unknown is mutation
+    if operation == "commit_curated":
+        assert backend.entries["memory"] == ["committed:r1"]  # Publication preceded the corrupt acknowledgement.
+
+    backend.corruption = None
+    backend.reply_epoch = None
+    if changed_envelope:
+        calls_before = len(backend.calls)
+        for blocked_operation in ("load_curated", "stage_curated", "commit_curated"):
+            with pytest.raises(MemoryBlockedError, match="rebind"):
+                actions[blocked_operation]()
+        assert len(backend.calls) == calls_before
+        service.start(_context("sess-2"), bind_intent="explicit_rebind", prior_identity=service.identity)
+    fresh = service.load_curated("memory")
+    assert not service.blocked and not service.epoch_changed
+    if operation == "commit_curated":
+        assert [entry.text for entry in fresh.mutation_entries] == ["committed:r1"]
+        assert fresh.revision != snapshot.revision
+    # A correct post-write snapshot advances beyond the staged pre-write revision.
+    next_stage = service.stage_curated(_mutation(fresh, request_id="r2"))
+    committed = service.commit_curated(CommitIntent("memory", "r2", next_stage.stage_handle_b64url, next_stage.approval_binding_sha256, (REPO,), w.ApprovalAuthorization(kind="not_required")))
+    assert committed.snapshot.revision != next_stage.expected_revision

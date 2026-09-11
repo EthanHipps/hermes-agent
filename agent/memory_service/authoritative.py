@@ -23,6 +23,38 @@ from agent.memory_service.service import CommitIntent, ContinuityCapture, Inspec
 logger = logging.getLogger(__name__)
 
 _NATIVE_HEADER = {"memory": "Memory", "user": "User profile"}
+_RESPONSE_ECHO_FIELDS = {
+    "recall_context": ("frozen_identity", "target", "source_revision"),
+    "stage_curated": ("request_id", "target", "expected_revision", "requested_write_scopes"),
+    "inspect_staged": ("request_id", "target", "stage_handle_b64url"),
+    "commit_curated": ("request_id",),
+    "capture_continuity": ("request_id",),
+}
+
+
+def _validate_snapshot_correlation(request: Any, snapshot: w.CuratedSnapshot, path: str) -> None:
+    for field in ("frozen_identity", "target"):
+        # Error snapshots can also accompany calls without a target (e.g.
+        # continuity); compare only identity/context fixed by that request.
+        if hasattr(request, field) and getattr(snapshot, field) != getattr(request, field):
+            raise w.WireError(f"{path}.{field}", "does not match the request")
+    if snapshot.revision.provider_epoch != request.expected_provider_epoch:
+        raise w.WireError(f"{path}.revision.provider_epoch", "does not match the bound provider epoch")
+
+
+def _validate_response_correlation(operation: str, request: Any, result: Any) -> None:
+    """Check request-dependent promises that a standalone wire decode cannot."""
+    body = result.summary if operation == "inspect_staged" else result
+    path = "$.result.summary" if operation == "inspect_staged" else "$.result"
+    for field in _RESPONSE_ECHO_FIELDS.get(operation, ()):
+        # Dataclass equality includes the complete revision and tuple order.
+        if getattr(body, field) != getattr(request, field):
+            raise w.WireError(f"{path}.{field}", "does not match the request")
+    if operation == "load_curated":
+        _validate_snapshot_correlation(request, result, "$.result")
+    elif operation == "commit_curated":
+        # A committed snapshot has a post-write revision, not the staged base.
+        _validate_snapshot_correlation(request, result.snapshot, "$.result.snapshot")
 
 
 class ProviderAuthoritativeMemoryService(MemoryService):
@@ -129,12 +161,9 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         self._require_bound()
         request = w.LoadRequest(expected_provider_epoch=self._state.provider_epoch, frozen_identity=self._state.identity.to_wire(), target=target)
         result = self._call("load_curated", request, fresh_load=True)
-        snapshot = result.result
-        if snapshot.frozen_identity != request.frozen_identity or snapshot.target != target:
-            self._block("load_curated returned a snapshot for a different identity or target")
         self._blocked = False
         self._block_reason = ""
-        return snapshot
+        return result.result
 
     def prompt_block(self, target: str) -> Optional[str]:
         snapshot = self.load_curated(target)
@@ -219,12 +248,6 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         if self._blocked:
             raise MemoryBlockedError(f"provider mutations are blocked until a fresh load succeeds: {self._block_reason}")
 
-    def _block(self, reason: str) -> None:
-        self._blocked = True
-        self._block_reason = reason
-        logger.warning("memory service blocked")
-        raise MemoryBlockedError(reason)
-
     def _fail_transport(self, exc: ProviderTransportError, *, operation: str, fresh_load: bool, mutation: bool, non_blocking: bool) -> None:
         """Shared handling for a real or WireError-synthesized transport failure."""
         if non_blocking:
@@ -249,40 +272,44 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         if expected is None and operation != "negotiate":
             raise MemoryBlockedError(f"{operation} attempted before the session was bound to a provider epoch")
         try:
-            result = getattr(self._backend, operation)(request)
-        except ProviderError as exc:
-            if exc.code == "provider_epoch_changed":
+            try:
+                result = getattr(self._backend, operation)(request)
+            except ProviderError as exc:
+                if exc.code == "provider_epoch_changed":
+                    self._epoch_changed = True
+                    self._blocked = True
+                    self._block_reason = "provider epoch changed"
+                    logger.warning("memory provider epoch changed (operation=%s)", operation)
+                    raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
+                if exc.code in ("binding_invalid", "binding_revoked"):
+                    self._binding_lost = True
+                    self._blocked = True
+                    self._block_reason = exc.code
+                    logger.warning("memory provider binding lost (operation=%s)", operation)
+                    raise MemoryBlockedError(f"binding is {exc.code}; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
+                if exc.code == "version_conflict" and exc.details is not None:
+                    details = w.decode_error_details(exc.code, exc.details)
+                    _validate_snapshot_correlation(request, details.current_snapshot, "$.error.details.current_snapshot")
+                if fresh_load and not non_blocking:
+                    self._blocked = True
+                    self._block_reason = f"{operation} failed with {exc.code}"
+                    logger.warning("memory service blocked (operation=%s)", operation)
+                    raise MemoryBlockedError(self._block_reason, code=exc.code, provider_error=exc) from exc
+                raise
+            # An envelope epoch change takes precedence over a simultaneous
+            # correlation failure: only rebind/new session may recover it.
+            if expected is not None and result.provider_epoch != expected:
                 self._epoch_changed = True
                 self._blocked = True
                 self._block_reason = "provider epoch changed"
                 logger.warning("memory provider epoch changed (operation=%s)", operation)
-                raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
-            if exc.code in ("binding_invalid", "binding_revoked"):
-                self._binding_lost = True
-                self._blocked = True
-                self._block_reason = exc.code
-                logger.warning("memory provider binding lost (operation=%s)", operation)
-                raise MemoryBlockedError(f"binding is {exc.code}; explicit rebind or a new logical session is required", code=exc.code, provider_error=exc) from exc
-            if fresh_load and not non_blocking:
-                self._blocked = True
-                self._block_reason = f"{operation} failed with {exc.code}"
-                logger.warning("memory service blocked (operation=%s)", operation)
-                raise MemoryBlockedError(self._block_reason, code=exc.code, provider_error=exc) from exc
-            raise
+                raise MemoryBlockedError(f"provider epoch changed from {expected} to {result.provider_epoch}; explicit rebind or a new logical session is required")
+            _validate_response_correlation(operation, request, result.result)
         except ProviderTransportError as exc:
             self._fail_transport(exc, operation=operation, fresh_load=fresh_load, mutation=mutation, non_blocking=non_blocking)
         except w.WireError as exc:
-            # A WireError escaping the backend (a malformed response) is
-            # transport-shaped, not a typed provider decision: fold it into
-            # the same ProviderTransportError handling so mutation callers
-            # get mutation_outcome_unknown and non-blocking callers (e.g.
-            # capture_continuity) never latch _blocked.
+            # This also catches correlation errors in success results and
+            # ProviderError details, preserving the same failure semantics.
             transport_exc = ProviderTransportError(reason=f"malformed provider output: {exc}", operation=operation, mutation_outcome_unknown=mutation)
             self._fail_transport(transport_exc, operation=operation, fresh_load=fresh_load, mutation=mutation, non_blocking=non_blocking)
-        if expected is not None and result.provider_epoch != expected:
-            self._epoch_changed = True
-            self._blocked = True
-            self._block_reason = "provider epoch changed"
-            logger.warning("memory provider epoch changed (operation=%s)", operation)
-            raise MemoryBlockedError(f"provider epoch changed from {expected} to {result.provider_epoch}; explicit rebind or a new logical session is required")
         return result
