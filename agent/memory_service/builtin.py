@@ -9,6 +9,10 @@ the first 24 hex characters of SHA-256 of its text; revisions are content
 hashes; approval requirements are empty because native approval is the host
 ``write_approval`` gate, not a provider requirement.
 
+Native candidates use stripped, LF-normalized text before hashing or approval.
+Staging rejects text whose serialization changes records or their boundaries;
+commit compares the staged state and publishes under the native file lock.
+
 Two §9.3 intents need explicit treatment here, because neither is expressible
 as an ordinary delta over the native files:
 
@@ -217,6 +221,17 @@ class BuiltinMemoryService(MemoryService):
             retire_texts = tuple(e.text for e in current.mutation_entries)
         else:
             retire_texts = tuple(by_id[d.record_id or d.old_record_id].text for d in request.mutation_delta if d.action in ("retire", "supersede"))
+        # Keep the original wire request for idempotency/approval binding, but
+        # all admitted, inspected and published text uses one canonical form.
+        request = dataclasses.replace(request, candidate_entries=tuple(
+            dataclasses.replace(c, text=self._store.normalize_entry(c.text))
+            for c in request.candidate_entries
+        ))
+        projected = self._apply_to_entries(
+            [e.text for e in current.mutation_entries], retire_texts, request.candidate_entries)
+        if (any(not self._store.entries_round_trip([c.text]) for c in request.candidate_entries)
+                or not self._store.entries_round_trip(projected)):
+            raise ProviderError(code="invalid_request", outcome="not_committed", details=None, operation="stage_curated")
         admissions = []
         hashes = []
         superseded = {d.replacement_client_ref: d.old_record_id for d in request.mutation_delta if d.action == "supersede"}
@@ -287,18 +302,21 @@ class BuiltinMemoryService(MemoryService):
             raise ProviderError(code="approval_invalid", outcome="not_committed", details=None, operation="commit_curated")
         if list(intent.authorized_write_scopes) != list(result.requested_write_scopes):
             raise ProviderError(code="unauthorized_scope", outcome="not_committed", details=None, operation="commit_curated")
-        current = self.load_curated(intent.target)
-        if current.revision != before.revision:
-            raise ProviderError(code="version_conflict", outcome="not_committed", details={"current_snapshot": current.to_wire()}, operation="commit_curated")
         add = [c.text.strip() for c in mutation.candidate_entries]
-        response = self._store.apply_exact_delta(intent.target, retire=list(retire), add=add)
-        if not response.get("success"):
-            raise BuiltinStoreError(response)
         tx_id = uuid.uuid4().hex
-        snapshot = self.load_curated(intent.target)
+        response = self._store.apply_exact_delta(
+            intent.target, retire=list(retire), add=add,
+            expected_entries=tuple(e.text for e in before.mutation_entries))
+        if not response.get("success"):
+            if response.get("code") == "version_conflict":
+                current = self._snapshot(intent.target, response["current_entries"])
+                raise ProviderError(code="version_conflict", outcome="not_committed",
+                                    details={"current_snapshot": current.to_wire()}, operation="commit_curated")
+            raise BuiltinStoreError(response)
+        snapshot = self._snapshot(intent.target, list(response["committed_entries"]))
         committed = w.CommitResult(outcome="committed_audit_clean", request_id=intent.request_id, tx_id=tx_id, snapshot=snapshot, admissions=result.admissions)
-        self._stages.pop(intent.stage_handle_b64url, None)
         self._receipts[intent.request_id] = (intent.stage_handle_b64url, committed)
+        self._stages.pop(intent.stage_handle_b64url, None)
         return committed
 
     def recall_context(self, query: RecallQuery) -> w.TypedRecall:

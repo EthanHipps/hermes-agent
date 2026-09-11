@@ -1,6 +1,8 @@
 """Built-in (additive) service: native semantics over complete state and explicit delta."""
 
 from datetime import datetime, timedelta, timezone
+import subprocess
+import sys
 
 import pytest
 
@@ -11,6 +13,7 @@ from agent.memory_service.config import resolve_memory_service_config
 from agent.memory_service.errors import ProviderError, TargetDisabledError
 from agent.memory_service.service import CommitIntent, InspectRequest, MemoryDisposition, MutationRequest
 from tools.memory_tool import MemoryStore, get_memory_dir
+from tools.memory_tool_store import MemoryFileUnreadableError
 
 PROVENANCE = w.MutationProvenance(
     actor_kind="hermes",
@@ -385,3 +388,159 @@ def test_unreadable_native_file_raises_instead_of_false_completeness(monkeypatch
     with pytest.raises(BuiltinStoreError) as exc:
         service.load_curated("memory")
     assert exc.value.response["success"] is False
+
+
+def _mutation_request(service, target, kind="add", texts=("new",), request_id="transaction"):
+    snapshot = service.load_curated(target)
+    scope = snapshot.default_write_scope
+    candidates = tuple(
+        w.CandidateEntry(f"c{i}", text, scope, target, None, None)
+        for i, text in enumerate(texts)
+    )
+    if kind == "reset":
+        intent = w.MutationIntent(kind="reset", reset_scopes=(scope,))
+        delta, candidates = (), ()
+    elif kind == "remove":
+        record_id = snapshot.mutation_entries[0].id
+        intent = w.MutationIntent(kind="remove", matched_entry_id=record_id)
+        delta, candidates = (w.MutationDeltaItem(action="retire", record_id=record_id),), ()
+    elif kind == "replace":
+        record_id = snapshot.mutation_entries[0].id
+        intent = w.MutationIntent(kind="replace", matched_entry_id=record_id)
+        delta = (w.MutationDeltaItem(action="supersede", old_record_id=record_id,
+                                     replacement_client_ref="c0"),)
+    else:
+        intent = w.MutationIntent(kind="bulk_edit" if len(candidates) > 1 else "add")
+        delta = tuple(w.MutationDeltaItem(action="add", client_ref=c.client_ref) for c in candidates)
+    return MutationRequest(target, request_id, snapshot.revision, snapshot.hidden_preservation_state,
+                           (scope,), intent, delta, candidates, PROVENANCE)
+
+
+def _commit_intent(staged):
+    return CommitIntent(staged.target, staged.request_id, staged.stage_handle_b64url,
+                        staged.approval_binding_sha256, staged.requested_write_scopes,
+                        w.ApprovalAuthorization(kind="not_required"))
+
+
+@pytest.mark.parametrize("target", ["memory", "user"])
+@pytest.mark.parametrize("kind", ["reset", "add", "remove", "replace"])
+def test_commit_rejects_another_session_write_at_the_native_lock(monkeypatch, target, kind):
+    service = _service()
+    _add(service, target, "alpha", "seed")
+    staged = service.stage_curated(_mutation_request(service, target, kind))
+    service.inspect_staged(InspectRequest(target, staged.request_id, staged.stage_handle_b64url))
+    other = MemoryStore()
+    other.load_from_disk()
+    frozen_prompt = service.prompt_block(target)
+    original_apply = service._store.apply_exact_delta
+
+    def interleave(*args, **kwargs):
+        # A separate process publishes between the service and native mutation.
+        subprocess.run([
+            sys.executable, "-c",
+            "import sys; from tools.memory_tool_store import MemoryStore; "
+            "result = MemoryStore().add(sys.argv[1], 'concurrent'); assert result['success'], result",
+            target,
+        ], check=True, capture_output=True, text=True, timeout=15)
+        return original_apply(*args, **kwargs)
+
+    monkeypatch.setattr(service._store, "apply_exact_delta", interleave)
+    with pytest.raises(ProviderError) as exc:
+        service.commit_curated(_commit_intent(staged))
+    assert (exc.value.code, exc.value.outcome) == ("version_conflict", "not_committed")
+    observed = w.CuratedSnapshot.from_wire(exc.value.details["current_snapshot"])
+    assert [entry.text for entry in observed.mutation_entries] == other.read_entries(target) == ["alpha", "concurrent"]
+    assert service.prompt_block(target) == frozen_prompt
+
+
+@pytest.mark.parametrize("target", ["memory", "user"])
+@pytest.mark.parametrize("after_write", ["read_failure", "another_write"])
+def test_commit_receipt_describes_publication_and_replays_without_writing(monkeypatch, target, after_write):
+    service = _service()
+    staged = service.stage_curated(_mutation_request(service, target))
+    intent = _commit_intent(staged)
+    original_apply = service._store.apply_exact_delta
+    original_read = service._store.read_entries
+    other = MemoryStore()
+    writes = []
+
+    def fail_read(_target):
+        raise MemoryFileUnreadableError(service._store._path_for(_target))
+
+    def publish_then_interleave(*args, **kwargs):
+        response = original_apply(*args, **kwargs)
+        writes.append(response)
+        if after_write == "read_failure":
+            monkeypatch.setattr(service._store, "read_entries", fail_read)
+        else:
+            assert other.add(target, "later")["success"]
+            # A subsequent read must not mutate the captured publication result.
+            original_read(target)
+        return response
+
+    monkeypatch.setattr(service._store, "apply_exact_delta", publish_then_interleave)
+    committed = service.commit_curated(intent)
+    assert committed.outcome == "committed_audit_clean"
+    assert [entry.text for entry in committed.snapshot.mutation_entries] == ["new"]
+    if after_write == "read_failure":
+        with pytest.raises(BuiltinStoreError):
+            service.commit_curated(intent)
+        monkeypatch.setattr(service._store, "read_entries", original_read)
+    replay = service.commit_curated(intent)
+    assert replay.outcome == "idempotent_replay"
+    assert replay.tx_id == committed.tx_id and replay.admissions == committed.admissions
+    assert replay.snapshot == service.load_curated(target)
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize("target", ["memory", "user"])
+@pytest.mark.parametrize("kind", ["add", "replace"])
+@pytest.mark.parametrize("text", ["alpha\n§\nbeta", "alpha\r\n§\r\nbeta", "\ufeffalpha"])
+def test_unrepresentable_candidate_is_rejected_before_stage_or_write(target, kind, text):
+    service = _service()
+    _add(service, target, "seed", "seed")
+    if kind == "add":
+        # Put a BOM candidate first as well as covering replacement of the first entry.
+        service._store.remove(target, "seed")
+    before = service.load_curated(target)
+    path = service._store._path_for(target)
+    before_bytes = path.read_bytes()
+    request = _mutation_request(service, target, kind, (text,))
+    with pytest.raises(ProviderError) as exc:
+        service.stage_curated(request)
+    assert (exc.value.code, exc.value.outcome) == ("invalid_request", "not_committed")
+    assert service.load_curated(target) == before and path.read_bytes() == before_bytes
+    with pytest.raises(ProviderError) as retry:
+        service.stage_curated(request)
+    assert retry.value.code == "invalid_request"
+    response = service._store.apply_exact_delta(target, retire=[e.text for e in before.mutation_entries], add=[text])
+    assert response["success"] is False and path.read_bytes() == before_bytes
+
+
+@pytest.mark.parametrize("target", ["memory", "user"])
+@pytest.mark.parametrize("texts, expected", [
+    (("alpha\n§", "beta"), None),
+    (("alpha\n§",), ["alpha\n§"]),
+    (("alpha\nsecond line", "inline § symbol"), ["alpha\nsecond line", "inline § symbol"]),
+    (("alpha\r\nsecond\rthird",), ["alpha\nsecond\nthird"]),
+    (("same\r\nentry", "same\nentry"), ["same\nentry"]),
+])
+def test_serialization_preserves_whole_record_list_and_admission_ids(target, texts, expected):
+    service = _service()
+    request = _mutation_request(service, target, texts=texts)
+    if expected is None:
+        with pytest.raises(ProviderError) as exc:
+            service.stage_curated(request)
+        assert exc.value.code == "invalid_request"
+        result = service._store.apply_exact_delta(target, retire=[], add=list(texts))
+        assert result["success"] is False
+        assert service.load_curated(target).mutation_entries == ()
+        return
+    staged = service.stage_curated(request)
+    inspected = service.inspect_staged(InspectRequest(target, staged.request_id, staged.stage_handle_b64url))
+    committed = service.commit_curated(_commit_intent(staged))
+    disk = service.load_curated(target)
+    assert [entry.text for entry in disk.mutation_entries] == expected
+    assert inspected.visible_after == committed.snapshot.mutation_entries == disk.mutation_entries
+    assert {a.assigned_id for a in staged.admissions} == {e.id for e in disk.mutation_entries}
+    assert [c.text for c in inspected.canonical_candidates] == [text.replace("\r\n", "\n").replace("\r", "\n") for text in texts]
