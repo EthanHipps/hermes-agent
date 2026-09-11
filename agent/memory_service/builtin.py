@@ -277,7 +277,7 @@ class BuiltinMemoryService(MemoryService):
         self._require_target(request.target)
         self._expire_stages()
         self._require_not_expired(request.request_id, "inspect_staged")
-        staged = self._lookup_stage(request.stage_handle_b64url, request.request_id, "inspect_staged")
+        staged = self._lookup_stage(request.stage_handle_b64url, request.request_id, request.target, "inspect_staged")
         mutation, result, before, _, retire_texts = staged
         after = self._apply_to_entries([e.text for e in before.mutation_entries], retire_texts, mutation.candidate_entries)
         return w.StageInspection(
@@ -293,9 +293,11 @@ class BuiltinMemoryService(MemoryService):
         receipt = self._receipts.get(intent.request_id)
         if receipt is not None and receipt[0] == intent.stage_handle_b64url:
             _, original = receipt
+            if intent.target != original.snapshot.target:
+                raise ProviderError(code="invalid_request", outcome="not_committed", details=None, operation="commit_curated")
             return w.CommitResult(outcome="idempotent_replay", request_id=intent.request_id, tx_id=original.tx_id, snapshot=self.load_curated(intent.target), admissions=original.admissions)
         self._require_not_expired(intent.request_id, "commit_curated")
-        mutation, result, before, _, retire = self._lookup_stage(intent.stage_handle_b64url, intent.request_id, "commit_curated")
+        mutation, result, before, _, retire = self._lookup_stage(intent.stage_handle_b64url, intent.request_id, intent.target, "commit_curated")
         if intent.approval_binding_sha256 != result.approval_binding_sha256:
             raise ProviderError(code="approval_invalid", outcome="not_committed", details=None, operation="commit_curated")
         if intent.authorization.kind == "approved" and intent.authorization.approval_binding_sha256 != result.approval_binding_sha256:
@@ -416,13 +418,15 @@ class BuiltinMemoryService(MemoryService):
         payload = {"stage_result_without_binding_hash": without_hash, "request_semantics": semantics}
         return hashlib.sha256(w.canonical_json(payload)).hexdigest()
 
-    def _lookup_stage(self, handle: str, request_id: str, operation: str):
+    def _lookup_stage(self, handle: str, request_id: str, target: str, operation: str):
         staged = self._stages.get(handle)
         if staged is None or staged[1].request_id != request_id:
             receipt = self._receipts.get(request_id)
             if receipt is not None and receipt[0] == handle:
                 raise ProviderError(code="stage_not_found", outcome="not_committed", details={"state": "committed", "tx_id": receipt[1].tx_id}, operation=operation)
             raise ProviderError(code="stage_not_found", outcome="not_committed", details=None, operation=operation)
+        if staged[1].target != target:
+            raise ProviderError(code="invalid_request", outcome="not_committed", details=None, operation=operation)
         return staged
 
     def _expire_stages(self) -> None:

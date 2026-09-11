@@ -1,6 +1,7 @@
 """Built-in (additive) service: native semantics over complete state and explicit delta."""
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import subprocess
 import sys
 
@@ -414,6 +415,32 @@ def _mutation_request(service, target, kind="add", texts=("new",), request_id="t
         delta = tuple(w.MutationDeltaItem(action="add", client_ref=c.client_ref) for c in candidates)
     return MutationRequest(target, request_id, snapshot.revision, snapshot.hidden_preservation_state,
                            (scope,), intent, delta, candidates, PROVENANCE)
+
+
+@pytest.mark.parametrize("target,other", [("memory", "user"), ("user", "memory")])
+@pytest.mark.parametrize("operation", ["inspect", "commit", "replay"])
+def test_stage_target_remains_bound_through_inspection_commit_and_replay(target, other, operation):
+    service = _service()
+    staged = service.stage_curated(_mutation_request(service, target))
+    intended = _commit_intent(staged)
+    if operation == "replay":
+        committed = service.commit_curated(intended)
+    before = {t: service.load_curated(t) for t in (target, other)}
+    with pytest.raises(ProviderError) as exc:
+        if operation == "inspect":
+            service.inspect_staged(InspectRequest(other, staged.request_id, staged.stage_handle_b64url))
+        else:
+            service.commit_curated(replace(intended, target=other))
+    assert (exc.value.code, exc.value.outcome) == ("invalid_request", "not_committed")
+    assert {t: service.load_curated(t) for t in (target, other)} == before
+    # A refused cross-target request neither consumes nor invalidates the
+    # correctly bound stage/receipt, even when the two files held equal text.
+    correct = service.commit_curated(intended)
+    assert correct.snapshot.target == target
+    assert {entry.target for entry in correct.admissions} == {target}
+    assert service.load_curated(other) == before[other]
+    if operation == "replay":
+        assert (correct.tx_id, correct.admissions) == (committed.tx_id, committed.admissions)
 
 
 def _commit_intent(staged):
