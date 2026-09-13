@@ -280,6 +280,9 @@ export interface MessagingPlatformInfo {
   gateway_running: boolean
   home_channel?: MessagingHomeChannel | null
   id: string
+  /** Served secondary under a multiplexed gateway: the /p/<profile>/ URL on the shared listener
+   *  the client (or vendor console) must call. Null for standalone and default-profile platforms. */
+  ingress_url?: null | string
   name: string
   state?: null | string
   updated_at?: null | string
@@ -1121,9 +1124,6 @@ export interface ProfilesResponse {
 export interface SkillInfo {
   category: string
   description: string
-  /** Human-facing presentation copy; absent on older backends. */
-  editorial_description?: string
-  editorial_name?: string
   enabled: boolean
   name: string
   /** Total observed activity (use + view + patch). Absent on older backends. */
@@ -1137,8 +1137,6 @@ export interface SkillInfo {
 export interface OfficialSkillInfo {
   category: string
   description: string
-  editorial_description?: string
-  editorial_name?: string
   identifier: string
   installed: boolean
   name: string
@@ -1337,6 +1335,9 @@ export interface StatusResponse {
   gateway_pid: number | null
   gateway_platforms: Record<string, PlatformStatus>
   gateway_running: boolean
+  /** Every profile the gateway process serves when the polled profile is carried by the shared
+   *  multiplexer (e.g. ['default', 'alpha', 'beta']); null/absent for a standalone gateway. */
+  gateway_shared_with?: string[] | null
   gateway_state: string | null
   gateway_updated_at: string | null
   hermes_home: string
@@ -1400,7 +1401,9 @@ export interface LocalCatalogModel {
   native_context: number
   native_context_label: string
   recommended: boolean
-  /** Why the resolver picked this entry (recommended rows only). */
+  /** Why the resolver picked this entry (recommended rows only):
+   *  best-quality-resident | speed-gated-quality | fastest-resident |
+   *  least-painful-spilled. Renders as the Recommended badge's tooltip. */
   recommended_reason?: string | null
   downloaded: boolean
   downloaded_model_id?: string | null
@@ -1594,8 +1597,6 @@ export interface SkillHubSource {
 export interface SkillHubResult {
   name: string
   description: string
-  editorial_name?: string
-  editorial_description?: string
   source: string
   identifier: string
   trust_level: string
@@ -1627,8 +1628,6 @@ export interface SkillHubSearchResponse {
 export interface SkillHubPreview {
   name: string
   description: string
-  editorial_name?: string
-  editorial_description?: string
   source: string
   identifier: string
   trust_level: string
