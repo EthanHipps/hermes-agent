@@ -499,14 +499,6 @@ class FakeProviderStore:
 
     # -- internals shared by every backend ----------------------------------
 
-    def _mark_committed(self, request_id: str) -> None:
-        """Test hook (until commit_curated lands): turn a live stage into a receipt."""
-        with self.lock:
-            key = (self.epoch, request_id)
-            staged = self.stage_by_request[key]
-            stage = self.stages.pop(staged.stage_handle)
-            self.receipts[key] = Receipt(handle=stage.handle, stage_handle=staged.stage_handle, fingerprint=b"", tx_id="tx-" + secrets.token_hex(8), admissions=stage.result.admissions, identity=stage.identity, stage_result=stage.result, target=stage.request.target)
-
     def _expire_stages(self) -> None:
         """TTL: replace expired stage bytes with a content-free tombstone (§9.3 L1356)."""
         now = self.clock.now()
@@ -981,7 +973,90 @@ class FakeAuthoritativeBackend:
         return tuple(after)
 
     def _do_commit(self, request: w.CommitRequest, handle: HandleRecord) -> w.CommitResult:
-        raise NotImplementedError("commit_curated lands in Task 5")
+        op = "commit_curated"
+        store = self._store
+        store._expire_stages()
+        key = (store.epoch, request.request_id)
+        fingerprint = w.canonical_json(request.to_wire())
+        # receipt replay: served even while blocked (ruling R36-H); writes nothing
+        receipt = store.receipts.get(key)
+        if receipt is not None:
+            if receipt.fingerprint != fingerprint:
+                self._raise(op, "idempotency_mismatch", None)
+            return w.CommitResult(outcome="idempotent_replay", request_id=request.request_id, tx_id=receipt.tx_id, snapshot=self._snapshot(handle, receipt.target), admissions=receipt.admissions)
+        stage = self._lookup_stage(op, request.stage_handle_b64url, request.request_id, request.frozen_identity, request.target)
+        if store.store_state != "normal":
+            self._raise(op, "store_blocked", {"reason": store.store_state})
+        # approval codes (§9.3 L1394)
+        result = stage.result
+        auth = request.authorization
+        if result.approval_requirements and auth.kind == "not_required":
+            self._raise(op, "approval_required", None)
+        if request.approval_binding_sha256 != result.approval_binding_sha256:
+            self._raise(op, "approval_invalid", None)
+        if auth.kind == "approved":
+            if auth.approval_binding_sha256 != result.approval_binding_sha256 or auth.approved_by_principal_id != store.registry.owner_principal_id:
+                self._raise(op, "approval_invalid", None)
+            expires = _parse_timestamp(auth.expires_at)
+            if expires > stage.expires_at:
+                self._raise(op, "approval_invalid", None)
+            if expires < store.clock.now():
+                self._raise(op, "approval_expired", None)
+        # scopes (§9.3 L1392; ruling R36-F for the code)
+        _, _, _, eligible = self._scopes_for(handle, request.target)
+        authorized = list(request.authorized_write_scopes)
+        if authorized != list(result.requested_write_scopes):
+            self._raise(op, COMMIT_SCOPE_MISMATCH_CODE, None)
+        eligible_keys = {_scope_key(s) for s in eligible}
+        authorized_keys = {_scope_key(s) for s in authorized}
+        if not authorized_keys <= eligible_keys or any(_scope_key(s) not in authorized_keys for s in stage.affected_scopes):
+            self._raise(op, "unauthorized_scope", None)
+        # CAS re-check inside the same critical section as publication (D-R36-11)
+        current = self._snapshot(handle, request.target)
+        if current.revision != stage.request.expected_revision:
+            self._raise(op, "version_conflict", {"current_snapshot": current.to_wire()})
+        if store.before_publish is not None:
+            store.before_publish()
+        # receipt-store failure fires before anything durable (ruling R36-L)
+        if store._receipt_persistence_failures > 0:
+            store._receipt_persistence_failures -= 1
+            self._raise(op, APPROVAL_STORE_FAILURE_CODE, None)
+        tx_id = "tx-" + secrets.token_hex(8)
+        self._publish(stage, tx_id, fingerprint)
+        self._fault_during(op)
+        if store._audit_failures > 0:
+            store._audit_failures -= 1
+            store.store_state = "git_dirty"
+            outcome = "committed_audit_pending"
+        else:
+            outcome = "committed_audit_clean"
+        return w.CommitResult(outcome=outcome, request_id=request.request_id, tx_id=tx_id, snapshot=self._snapshot(handle, request.target), admissions=result.admissions)
+
+    def _publish(self, stage: Stage, tx_id: str, commit_fingerprint: bytes) -> None:
+        """Publish the exact staged bytes and write the receipt as one step under the lock."""
+        store = self._store
+        request, result = stage.request, stage.result
+        superseded_ids = {a.superseded_id for a in result.admissions if a.superseded_id is not None}
+        for record_id in stage.retire_ids:
+            store.records[record_id].lifecycle = "superseded" if record_id in superseded_ids else "retired"
+        for record_id in stage.hidden_retire_ids:
+            store.records[record_id].lifecycle = "retired"
+        by_ref = {c.client_ref: c for c in request.candidate_entries}
+        provenance = self._accepted_provenance(request, tx_id)
+        for admission in result.admissions:
+            if admission.publication_effect == "reuse_existing_import":
+                store.import_acknowledgements.append((tx_id, admission.assigned_id))
+                continue
+            cand = by_ref[admission.client_ref]
+            lane = "raw" if admission.disposition == "withheld_raw" else admission.disposition
+            store.records[admission.assigned_id] = FakeRecord(id=admission.assigned_id, text=cand.text, target=admission.target, record_channel=admission.record_channel, lane=lane, lifecycle="active", origin_scope=admission.origin_scope, policy_key=admission.policy_key, provenance=provenance, epoch=store.epoch)
+            if request.intent.kind == "import" and ENABLE_IMPORT_SOURCE_INDEX:
+                sha = next(h.canonical_sha256 for h in result.candidate_hashes if h.client_ref == admission.client_ref)
+                store.import_index[self._import_tuple(store.handles[stage.handle], cand, sha)] = admission.assigned_id
+        for scope in stage.affected_scopes:
+            store._bump(scope)
+        store.receipts[(store.epoch, request.request_id)] = Receipt(handle=stage.handle, stage_handle=result.stage_handle_b64url, fingerprint=commit_fingerprint, tx_id=tx_id, admissions=result.admissions, identity=stage.identity, stage_result=result, target=request.target)
+        del store.stages[result.stage_handle_b64url]
 
     def _do_recall(self, request: w.RecallRequest, handle: HandleRecord) -> w.TypedRecall:
         raise NotImplementedError("recall_context lands in Task 6")

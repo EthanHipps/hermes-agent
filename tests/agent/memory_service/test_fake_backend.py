@@ -17,6 +17,7 @@ from agent.memory_service.errors import ProviderError, ProviderTransportError
 
 from tests.agent.memory_service.fake_backend import (
     APPROVAL_STORE_FAILURE_CODE,
+    COMMIT_SCOPE_MISMATCH_CODE,
     DEFAULT_CURATED_LIMITS,
     DEFAULT_LIMITS,
     EPOCH_BINDING_OUTCOME_ON_MUTATION,
@@ -25,6 +26,7 @@ from tests.agent.memory_service.fake_backend import (
     FakeProviderStore,
     approval_binding_sha256,
     drop_key,
+    set_key,
 )
 
 CLOCK_START = datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc)
@@ -817,9 +819,10 @@ def test_stage_replay_states():
     with pytest.raises(ProviderError) as exc:
         _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "changed", REPO),)))
     assert exc.value.code == "idempotency_mismatch" and exc.value.outcome == "not_committed"
-    store._mark_committed("r1")  # test hook until Task 5 lands commit_curated
+    _commit(backend, identity, first)
     assert store.stage_state("r1") == "committed"
     assert _stage(backend, request) == first  # committed: an exact replay returns the original StageResult (§9.3 L1356)
+    snap = _load(backend, identity)
     second = _stage(backend, _request(identity, snap, request_id="r2"))
     store.clock.advance(3600 + 1)
     for body in ("x", "changed"):
@@ -854,11 +857,11 @@ def test_inspect_live_committed_expired_unknown():
     assert [e.id for e in inspection.visible_after] == [existing.id, staged.admissions[0].assigned_id]
     after = inspection.visible_after[-1]
     assert after.text == "added" and after.record_channel == "hermes_memory" and after.lane == "scoped_evidence" and after.lifecycle == "active"
-    store._mark_committed("r1")  # test hook until Task 5 lands commit_curated
-    tx_id = store.receipts[("ep-1", "r1")].tx_id
+    tx_id = _commit(backend, identity, staged).tx_id
     with pytest.raises(ProviderError) as exc:
         _inspect(backend, identity, staged)
     assert exc.value.code == "stage_not_found" and exc.value.outcome == "not_applicable" and exc.value.details == {"state": "committed", "tx_id": tx_id}
+    snap = _load(backend, identity)
     expiring = _stage(backend, _request(identity, snap, request_id="r2"))
     store.clock.advance(3601)
     with pytest.raises(ProviderError) as exc:
@@ -893,7 +896,7 @@ def test_tombstones_and_receipts_outlive_stages_for_the_epoch():
     snap = _load(backend, identity)
     staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "the staged body", REPO),)))
     committed = _stage(backend, _request(identity, snap, request_id="r2"))
-    store._mark_committed("r2")
+    _commit(backend, identity, committed)
     store.clock.advance(3601)
     with pytest.raises(ProviderError):
         _inspect(backend, identity, staged)
@@ -924,7 +927,6 @@ def test_inspect_from_another_identity_is_invalid_request():
     assert _inspect(backend, identity, staged).summary == staged
 
 
-@pytest.mark.xfail(strict=True, reason="needs commit_curated (Task 5); the reuse index is rebuilt from receipts")
 def test_import_reuses_existing_source_tuple():
     """Ruling R36-J / contract C1: the same nine-member tuple reuses the
     original assigned id, even when that record is hidden."""
@@ -944,3 +946,310 @@ def test_import_reuses_existing_source_tuple():
     snap = _load(backend, identity)
     changed = _stage(backend, _request(identity, snap, request_id="r3", intent=w.MutationIntent(kind="import", import_run_id="run-3", source_kind="native_memory"), candidates=(_candidate("c1", "Always imported, edited", REPO, import_identity=ident),)))
     assert changed.admissions[0].publication_effect == "create_record" and changed.admissions[0].assigned_id != original
+
+
+# --- Task 5: commit ---
+
+
+def _repo_revision(store, handle):
+    return {r.scope: int(r.revision) for r in store.revision_for(handle).scope_revisions}
+
+
+def test_commit_publishes_exact_stage_and_advances_revision():
+    store, backend, identity = _session()
+    handle = identity.opaque_binding_b64url
+    snap = _load(backend, identity)
+    old_token = snap.hidden_preservation_state.opaque_state_b64url
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "published body", REPO),)))
+    committed = _commit(backend, identity, staged)
+    assert committed.outcome == "committed_audit_clean" and committed.request_id == "r1"
+    assert committed.tx_id.startswith("tx-") and len(committed.tx_id) > 6
+    assert committed.admissions == staged.admissions
+    assert committed.snapshot.revision != staged.expected_revision
+    assigned = staged.admissions[0].assigned_id
+    assert [e.id for e in committed.snapshot.mutation_entries] == [assigned] and committed.snapshot.mutation_entries[0].text == "published body"
+    assert committed.snapshot.mutation_entries[0].provenance.transaction_id == committed.tx_id
+    assert [r.id for r in store.records_for(REPO, "memory")] == [assigned]
+    assert store.stage_state("r1") == "committed" and staged.stage_handle_b64url not in store.stages
+    new_token = committed.snapshot.hidden_preservation_state.opaque_state_b64url
+    assert new_token != old_token and store.token_for(handle, "memory") == new_token
+    assert _load(backend, identity) == committed.snapshot
+
+
+@pytest.mark.parametrize("case,code", [
+    ("required", "approval_required"),
+    ("request_hash", "approval_invalid"),
+    ("auth_hash", "approval_invalid"),
+    ("wrong_principal", "approval_invalid"),
+    ("expires_after_stage", "approval_invalid"),
+    ("expired", "approval_expired"),
+    ("superfluous", None),
+])
+def test_approval_codes(case, code):
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    if case == "superfluous":
+        staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "plain", REPO),)))
+        assert staged.approval_requirements == ()
+    else:
+        staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "broader", PROJ),)))
+        assert staged.approval_requirements == ("non_default_scope",)
+    kwargs = {}
+    if case == "required":
+        kwargs["authorization"] = w.ApprovalAuthorization(kind="not_required")
+    elif case == "request_hash":
+        kwargs["authorization"] = _approved(staged)
+        kwargs["binding"] = "d" * 64
+    elif case == "auth_hash":
+        kwargs["authorization"] = _approved(staged, binding="d" * 64)
+    elif case == "wrong_principal":
+        kwargs["authorization"] = _approved(staged, by="someone-else")
+    elif case == "expires_after_stage":
+        kwargs["authorization"] = _approved(staged, expires_at="2026-09-17T13:00:01Z")
+    elif case == "expired":
+        kwargs["authorization"] = _approved(staged, expires_at="2026-09-17T11:59:59Z")
+    else:
+        kwargs["authorization"] = _approved(staged)
+    if code is None:
+        assert _commit(backend, identity, staged, **kwargs).outcome == "committed_audit_clean"  # ruling R36-G
+        return
+    with pytest.raises(ProviderError) as exc:
+        _commit(backend, identity, staged, **kwargs)
+    assert exc.value.code == code and exc.value.outcome == "not_committed" and exc.value.details is None
+    assert store.records_for(REPO, "memory") == [] and store.records_for(PROJ, "memory") == []
+    assert store.stage_state("r1") == "live" and store.receipts == {}
+
+
+def test_authorized_scopes_must_equal_the_staged_requested_set():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "a", REPO), _candidate("c2", "b", PROJ)), intent=w.MutationIntent(kind="bulk_edit"), delta=(w.MutationDeltaItem(action="add", client_ref="c1"), w.MutationDeltaItem(action="add", client_ref="c2")), scopes=(REPO, PROJ)))
+    for scopes in ((PROJ, REPO), (REPO,), ()):
+        with pytest.raises(ProviderError) as exc:
+            _commit(backend, identity, staged, scopes=scopes, authorization=_approved(staged))
+        assert exc.value.code == COMMIT_SCOPE_MISMATCH_CODE == "unauthorized_scope" and exc.value.outcome == "not_committed"
+    assert store.records_for(REPO, "memory") == [] and store.records_for(PROJ, "memory") == [] and store.stage_state("r1") == "live"
+    assert _commit(backend, identity, staged, scopes=(REPO, PROJ), authorization=_approved(staged)).outcome == "committed_audit_clean"
+
+
+def test_commit_recheck_cas_under_the_lock():
+    store, backend, identity = _session()
+    handle = identity.opaque_binding_b64url
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap))
+    store.external_write(REPO, "memory", "concurrent")
+    current = store.revision_for(handle)
+    with pytest.raises(ProviderError) as exc:
+        _commit(backend, identity, staged)
+    assert exc.value.code == "version_conflict" and exc.value.outcome == "not_committed"
+    details = w.decode_error_details("version_conflict", exc.value.details)
+    assert details.current_snapshot.revision == current and details.current_snapshot.frozen_identity == identity
+    assert [r.text for r in store.records_for(REPO, "memory")] == ["concurrent"]
+    assert store.stage_state("r1") == "live" and store.receipts == {}
+    assert store.revision_for(handle) == current
+
+
+def test_before_publish_race_serializes_two_services_on_one_store():
+    import threading
+
+    store = _store()
+    backend_a = FakeAuthoritativeBackend(store)
+    backend_b = FakeAuthoritativeBackend(store)
+    a = _bind(backend_a, "sess-a").frozen_identity
+    b = _bind(backend_b, "sess-b").frozen_identity
+    snap_a = _load(backend_a, a)
+    snap_b = _load(backend_b, b)
+    assert snap_a.revision == snap_b.revision
+    staged_a = _stage(backend_a, _request(a, snap_a, request_id="ra", candidates=(_candidate("c1", "from a", REPO),)))
+    staged_b = _stage(backend_b, _request(b, snap_b, request_id="rb", candidates=(_candidate("c1", "from b", REPO),)))
+    outcome = {}
+    started = threading.Event()
+
+    def commit_b():
+        started.set()
+        try:
+            outcome["result"] = _commit(backend_b, b, staged_b)
+        except ProviderError as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=commit_b)
+
+    def hook():
+        store.before_publish = None  # fire once
+        thread.start()
+        started.wait()
+
+    store.before_publish = hook
+    committed = _commit(backend_a, a, staged_a)
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert committed.outcome == "committed_audit_clean"
+    assert "result" not in outcome and outcome["error"].code == "version_conflict"
+    assert [r.text for r in store.records_for(REPO, "memory")] == ["from a"]
+    assert store.events[-2:] == [("commit_curated", "ok", True), ("commit_curated", "version_conflict", False)]
+
+
+def test_commit_replay_returns_original_tx_and_fresh_snapshot():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "broader", PROJ),)))
+    authorization = _approved(staged)
+    first = _commit(backend, identity, staged, authorization=authorization)
+    store.external_write(REPO, "memory", "later")
+    replay = _commit(backend, identity, staged, authorization=authorization)
+    assert replay.outcome == "idempotent_replay" and replay.tx_id == first.tx_id and replay.admissions == first.admissions
+    assert replay.snapshot == _load(backend, identity) and replay.snapshot.revision != first.snapshot.revision
+    other = _bind(backend, "sess-2").frozen_identity
+    changed = {
+        "handle": dict(binding=None, scopes=None, authorization=authorization, target=None),
+        "binding": dict(binding="e" * 64, authorization=authorization),
+        "scopes": dict(scopes=(REPO,), authorization=authorization),
+        "target": dict(target="user", authorization=authorization),
+        "authorization": dict(authorization=_approved(staged, approved_at="2026-09-17T12:00:01Z")),
+    }
+    for name, kwargs in changed.items():
+        with pytest.raises(ProviderError) as exc:
+            if name == "handle":
+                _commit(backend, identity, replace(staged, stage_handle_b64url="AAAA"), **kwargs)
+            else:
+                _commit(backend, identity, staged, **kwargs)
+        assert exc.value.code == "idempotency_mismatch", name
+    with pytest.raises(ProviderError) as exc:
+        _commit(backend, other, staged, authorization=authorization)
+    assert exc.value.code == "idempotency_mismatch"
+    assert len(store.records) == 2
+    store.block_store("git_dirty")
+    assert _commit(backend, identity, staged, authorization=authorization).outcome == "idempotent_replay"  # ruling R36-H
+
+
+@pytest.mark.parametrize("phase", ["before", "during", "after_publish"])
+def test_commit_fault_phases(phase):
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "fault body", REPO),)))
+    store.fail_transport("commit_curated", reason="crash", phase=phase)
+    events_before = len(store.events)
+    with pytest.raises(ProviderTransportError) as exc:
+        _commit(backend, identity, staged)
+    assert exc.value.mutation_outcome_unknown is True and exc.value.reason == "crash"
+    published = [r.text for r in store.records_for(REPO, "memory")]
+    tail = store.events[events_before:]
+    if phase == "before":
+        assert published == [] and store.receipts == {} and store.stage_state("r1") == "live"
+        assert tail == [("commit_curated", "transport", False)]
+        retry = _commit(backend, identity, staged)
+        assert retry.outcome == "committed_audit_clean"
+    else:
+        # publication and the receipt are one atomic step: the fault lands after both
+        assert published == ["fault body"] and ("ep-1", "r1") in store.receipts and store.stage_state("r1") == "committed"
+        assert staged.stage_handle_b64url not in store.stages
+        expected_tail = [("commit_curated", "transport", True)] if phase == "during" else [("commit_curated", "ok", True)]
+        assert tail == expected_tail  # distinguishes the injection points: inside vs after the critical section
+        retry = _commit(backend, identity, staged)
+        assert retry.outcome == "idempotent_replay" and retry.tx_id == store.receipts[("ep-1", "r1")].tx_id
+    assert [r.text for r in store.records_for(REPO, "memory")] == ["fault body"]
+
+
+def test_corrupt_commit_reply_is_wire_legal_and_lands():
+    """A wire-legal corruption decodes cleanly in the fake; the correlation
+    WireError is the service's (authoritative.py _validate_response_correlation)."""
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "landed", REPO),)))
+    store.corrupt_result("commit_curated", set_key("request_id", "other"))
+    result = backend.commit_curated(w.CommitRequest(expected_provider_epoch="ep-1", frozen_identity=identity, target="memory", request_id="r1", stage_handle_b64url=staged.stage_handle_b64url, approval_binding_sha256=staged.approval_binding_sha256, authorized_write_scopes=(REPO,), authorization=w.ApprovalAuthorization(kind="not_required"))).result
+    assert type(result) is w.CommitResult and result.request_id == "other" and result.outcome == "committed_audit_clean"
+    assert [r.text for r in store.records_for(REPO, "memory")] == ["landed"] and ("ep-1", "r1") in store.receipts
+    store.corrupt_result("commit_curated", drop_key("tx_id"))
+    replay_request = w.CommitRequest(expected_provider_epoch="ep-1", frozen_identity=identity, target="memory", request_id="r1", stage_handle_b64url=staged.stage_handle_b64url, approval_binding_sha256=staged.approval_binding_sha256, authorized_write_scopes=(REPO,), authorization=w.ApprovalAuthorization(kind="not_required"))
+    with pytest.raises(w.WireError, match="tx_id"):  # only an illegal emission is the fake's own WireError
+        backend.commit_curated(replay_request)
+
+
+def test_receipt_persistence_failure_commits_nothing():
+    """Ruling R36-L: a receipt-store failure fires before anything durable, so
+    nothing is published and the outcome is not_committed, never unknown."""
+    store, backend, identity = _session()
+    handle = identity.opaque_binding_b64url
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap))
+    store.fail_receipt_persistence()
+    with pytest.raises(ProviderError) as exc:
+        _commit(backend, identity, staged)
+    assert exc.value.code == APPROVAL_STORE_FAILURE_CODE and exc.value.outcome == "not_committed" and exc.value.details is None
+    assert store.records_for(REPO, "memory") == [] and store.revision_for(handle) == snap.revision
+    assert store.receipts == {} and store.stage_state("r1") == "live"
+    assert _commit(backend, identity, staged).outcome == "committed_audit_clean"
+
+
+def test_audit_failure_moves_the_store_to_git_dirty_until_reconcile():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "audited", REPO),)))
+    pending = _stage(backend, _request(identity, snap, request_id="r2"))
+    store.fail_next_audit()
+    committed = _commit(backend, identity, staged)
+    assert committed.outcome == "committed_audit_pending"
+    assert [r.text for r in store.records_for(REPO, "memory")] == ["audited"] and store.store_state == "git_dirty"
+    fresh = _load(backend, identity)  # reads keep working (§9.6 L1576)
+    assert fresh.status == "ok" and _inspect(backend, identity, pending).summary == pending
+    with pytest.raises(ProviderError) as exc:
+        _stage(backend, _request(identity, fresh, request_id="r3"))
+    assert exc.value.code == "store_blocked" and exc.value.details == {"reason": "git_dirty"} and exc.value.outcome == "not_committed"
+    with pytest.raises(ProviderError) as exc:
+        _commit(backend, identity, pending)
+    assert exc.value.code == "store_blocked" and exc.value.details == {"reason": "git_dirty"}
+    store.reconcile()
+    assert store.store_state == "normal"
+    assert _stage(backend, _request(identity, fresh, request_id="r3")).request_id == "r3"
+
+
+def test_reset_commit_retires_hidden_and_visible_atomically():
+    store, backend, identity = _session()
+    handle = identity.opaque_binding_b64url
+    visible = store.seed_record(REPO, "memory", "visible evidence")
+    raw = store.seed_record(REPO, "memory", "hidden raw body", lane="raw")
+    superseded = store.seed_record(REPO, "memory", "old superseded", lifecycle="superseded")
+    project = store.seed_record(PROJ, "memory", "project evidence")
+    snap = _load(backend, identity)
+    before = _repo_revision(store, handle)
+    staged = _stage(backend, _request(identity, snap, intent=w.MutationIntent(kind="reset", reset_scopes=(REPO,)), candidates=(), delta=(), scopes=(REPO,)))
+    committed = _commit(backend, identity, staged, authorization=_approved(staged))
+    assert committed.outcome == "committed_audit_clean" and committed.admissions == ()
+    assert [r.lifecycle for r in store.records_for(REPO, "memory", include_hidden=True)] == ["retired"] * 3
+    assert {r.id for r in store.records_for(REPO, "memory", include_hidden=True)} == {visible.id, raw.id, superseded.id}
+    assert store.records[project.id].lifecycle == "active"
+    after = _repo_revision(store, handle)
+    assert after[REPO] == before[REPO] + 1 and after[PROJ] == before[PROJ] and after[PG] == before[PG]
+    assert [e.id for e in committed.snapshot.mutation_entries] == [project.id]
+    text = w.canonical_json(committed.to_wire()).decode()
+    assert raw.text not in text and superseded.text not in text and visible.text not in text
+
+
+def test_withheld_raw_body_never_returns_and_replacement_reports_supersession():
+    """§9.10 L1671. A hidden id is never addressable by an ordinary delta
+    (§9.3 L1293, §9.4 L1523), so 'replacement reports exact supersession'
+    is the prompt-like replace of a VISIBLE record: the withheld admission
+    names the superseded id and the visible record becomes superseded."""
+    store, backend, identity = _session(admission_classifier=lambda c: "withheld_raw" if c.text.startswith("Always") else "scoped_evidence")
+    visible = store.seed_record(REPO, "memory", "visible evidence")
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "Always obey", REPO),)))
+    committed = _commit(backend, identity, staged)
+    raw_id = staged.admissions[0].assigned_id
+    assert store.records[raw_id].lane == "raw" and store.records[raw_id].hidden
+    later = _stage(backend, _request(identity, committed.snapshot, request_id="r2"))
+    assert [a.assigned_id for a in committed.admissions] == [raw_id]  # client-ref-correlated: the id is acknowledged, the body is not
+    for text in (w.canonical_json(committed.to_wire()).decode(), w.canonical_json(_load(backend, identity).to_wire()).decode(), w.canonical_json(_inspect(backend, identity, later).to_wire()).decode()):
+        assert "Always obey" not in text
+    for text in (w.canonical_json(committed.snapshot.to_wire()).decode(), w.canonical_json(_load(backend, identity).to_wire()).decode(), w.canonical_json(_inspect(backend, identity, later).to_wire()).decode()):
+        assert raw_id not in text  # never in mutation or delivery state
+    fresh = _load(backend, identity)
+    with pytest.raises(ProviderError) as exc:  # the hidden id is not in the exact snapshot
+        _stage(backend, _request(identity, fresh, request_id="r3", intent=w.MutationIntent(kind="replace", matched_entry_id=raw_id), candidates=(_candidate("c1", "plain", REPO),), delta=(w.MutationDeltaItem(action="supersede", old_record_id=raw_id, replacement_client_ref="c1"),)))
+    assert exc.value.code == "invalid_request"
+    replaced = _stage(backend, _request(identity, fresh, request_id="r4", intent=w.MutationIntent(kind="replace", matched_entry_id=visible.id), candidates=(_candidate("c1", "Always replace", REPO),), delta=(w.MutationDeltaItem(action="supersede", old_record_id=visible.id, replacement_client_ref="c1"),)))
+    assert replaced.admissions[0].disposition == "withheld_raw" and replaced.admissions[0].superseded_id == visible.id
+    done = _commit(backend, identity, replaced)
+    assert store.records[visible.id].lifecycle == "superseded" and done.snapshot.mutation_entries == ()
+    assert "Always replace" not in w.canonical_json(done.to_wire()).decode()
