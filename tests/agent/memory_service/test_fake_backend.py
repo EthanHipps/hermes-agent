@@ -1193,6 +1193,8 @@ def test_audit_failure_moves_the_store_to_git_dirty_until_reconcile():
     assert [r.text for r in store.records_for(REPO, "memory")] == ["audited"] and store.store_state == "git_dirty"
     fresh = _load(backend, identity)  # reads keep working (§9.6 L1576)
     assert fresh.status == "ok" and _inspect(backend, identity, pending).summary == pending
+    assert [e.text for e in _recall(backend, identity, fresh, query="audited").scoped_evidence] == ["audited"]
+    assert _capture(backend, identity).outcome == "stored"  # continuity takes no writer lock (§9.3 L1445)
     with pytest.raises(ProviderError) as exc:
         _stage(backend, _request(identity, fresh, request_id="r3"))
     assert exc.value.code == "store_blocked" and exc.value.details == {"reason": "git_dirty"} and exc.value.outcome == "not_committed"
@@ -1253,3 +1255,120 @@ def test_withheld_raw_body_never_returns_and_replacement_reports_supersession():
     done = _commit(backend, identity, replaced)
     assert store.records[visible.id].lifecycle == "superseded" and done.snapshot.mutation_entries == ()
     assert "Always replace" not in w.canonical_json(done.to_wire()).decode()
+
+
+# --- Task 6: recall and continuity ---
+
+
+def _recall(backend, identity, snapshot, *, query="", channels=("general", "hermes_memory"), exclude=(), budget=None, target="memory", revision=None, epoch="ep-1") -> w.TypedRecall:
+    request = w.RecallRequest(expected_provider_epoch=epoch, frozen_identity=identity, target=target, source_revision=revision or snapshot.revision, query=query, include_channels=tuple(channels), exclude_entry_ids=tuple(exclude), budget=budget or w.RecallBudget(trusted_chars=10_000, evidence_chars=10_000, max_entries=50))
+    request.validate()
+    return backend.recall_context(request).result
+
+
+def _capture(backend, identity, request_id="cr1", text="snapshot text", kind="compression_snapshot", epoch="ep-1") -> w.ContinuityResult:
+    request = w.ContinuityRequest(expected_provider_epoch=epoch, frozen_identity=identity, request_id=request_id, kind=kind, text=text, initiating_surface="compression")
+    request.validate()
+    return backend.capture_continuity(request).result
+
+
+def test_recall_is_channel_exact_excludes_delivered_ids_and_respects_budget():
+    store, backend, identity = _session()
+    general = store.seed_general(REPO, "general rule about uv", policy_key="k1")
+    evidence_a = store.seed_record(REPO, "memory", "evidence about uv (a)")
+    evidence_b = store.seed_record(PROJ, "memory", "evidence about uv (b)")
+    trusted_memory = store.seed_record(REPO, "memory", "trusted memory about uv", lane="trusted_instruction", policy_key="k2")
+    store.seed_record(REPO, "memory", "hidden raw about uv", lane="raw")
+    store.seed_record(REPO, "memory", "superseded about uv", lifecycle="superseded")
+    store.seed_record(REPO, "memory", "retired about uv", lifecycle="retired")
+    store.seed_record(PG, "user", "user profile about uv", lane="trusted_instruction", policy_key="profile:u1")
+    snap = _load(backend, identity)
+    only_general = _recall(backend, identity, snap, query="uv", channels=("general",))
+    assert [e.id for e in only_general.trusted_instructions] == [general.id] and only_general.scoped_evidence == ()
+    assert only_general.frozen_identity == identity and only_general.target == "memory" and only_general.source_revision == snap.revision
+    only_memory = _recall(backend, identity, snap, query="uv", channels=("hermes_memory",))
+    assert [e.id for e in only_memory.trusted_instructions] == [trusted_memory.id]
+    assert sorted(e.id for e in only_memory.scoped_evidence) == sorted([evidence_a.id, evidence_b.id])
+    assert all(e.record_channel == "hermes_memory" and e.target == "memory" for e in only_memory.scoped_evidence + only_memory.trusted_instructions)
+    both = _recall(backend, identity, snap, query="uv")
+    ids = {e.id for e in both.trusted_instructions + both.scoped_evidence}
+    assert ids == {general.id, trusted_memory.id, evidence_a.id, evidence_b.id}
+    text = w.canonical_json(both.to_wire()).decode()
+    for absent in ("hidden raw", "superseded about", "retired about", "user profile"):
+        assert absent not in text
+    excluded = _recall(backend, identity, snap, query="uv", exclude=(evidence_a.id, general.id))
+    assert {e.id for e in excluded.trusted_instructions + excluded.scoped_evidence} == {trusted_memory.id, evidence_b.id}
+    assert _recall(backend, identity, snap, query="no such phrase").scoped_evidence == ()
+    everything = _recall(backend, identity, snap, query="")
+    assert len(everything.trusted_instructions) + len(everything.scoped_evidence) == 4
+    capped = _recall(backend, identity, snap, query="uv", budget=w.RecallBudget(trusted_chars=10_000, evidence_chars=10_000, max_entries=1))
+    assert len(capped.trusted_instructions) + len(capped.scoped_evidence) == 1
+    no_trusted = _recall(backend, identity, snap, query="uv", budget=w.RecallBudget(trusted_chars=0, evidence_chars=10_000, max_entries=50))
+    assert no_trusted.trusted_instructions == () and len(no_trusted.scoped_evidence) == 2
+    one_evidence = _recall(backend, identity, snap, query="uv", budget=w.RecallBudget(trusted_chars=10_000, evidence_chars=len("evidence about uv (a)"), max_entries=50))
+    assert [e.id for e in one_evidence.scoped_evidence] == [min(evidence_a.id, evidence_b.id)]  # ids ascending, deterministic
+    user_snap = _load(backend, identity, "user")
+    user_recall = _recall(backend, identity, user_snap, query="uv", channels=("hermes_user",), target="user")
+    assert [e.record_channel for e in user_recall.trusted_instructions] == ["hermes_user"] and user_recall.scoped_evidence == ()
+
+
+def test_recall_stale_revision_is_version_conflict_with_null_details():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    store.external_write(REPO, "memory", "newer")
+    with pytest.raises(ProviderError) as exc:
+        _recall(backend, identity, snap)
+    assert exc.value.code == "version_conflict" and exc.value.details is None and exc.value.outcome == "not_applicable"
+    assert _recall(backend, identity, _load(backend, identity)).target == "memory"
+
+
+def test_recall_ambiguous_policy_is_typed_and_body_free():
+    store, backend, identity = _session()
+    store.seed_general(REPO, "the conflicting instruction body", policy_key="k")
+    snap = _load(backend, identity)
+    store.add_policy_conflict("k", 2)
+    with pytest.raises(ProviderError) as exc:
+        _recall(backend, identity, snap)
+    assert exc.value.code == "ambiguous_policy" and exc.value.outcome == "not_applicable"
+    details = w.decode_error_details("ambiguous_policy", exc.value.details)
+    assert details.ambiguities[0].policy_key == "k" and "conflicting instruction" not in w.canonical_json(exc.value.details).decode()
+
+
+def test_recall_not_negotiated_is_not_offered():
+    store = _store()
+    backend = FakeAuthoritativeBackend(store, recall=False)
+    neg = backend.negotiate(w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=())).result
+    assert "recall_context" not in neg.operations and neg.capabilities.recall_context is False
+    assert "capture_continuity" in neg.operations and neg.capabilities.capture_continuity is True
+
+
+def test_continuity_store_replay_mismatch_expiry_and_limits():
+    store, backend, identity = _session(secret_detector=lambda t: "aws_access_key" if "AKIA" in t else None)
+    handle = identity.opaque_binding_b64url
+    before = _load(backend, identity)
+    stored = _capture(backend, identity)
+    assert stored.outcome == "stored" and stored.request_id == "cr1" and stored.kind == "compression_snapshot"
+    assert stored.buffer_id.startswith("buf-") and stored.expires_at == "2026-09-18T12:00:00Z"
+    replay = _capture(backend, identity)
+    assert replay == replace(stored, outcome="idempotent_replay")
+    with pytest.raises(ProviderError) as exc:
+        _capture(backend, identity, text="changed")
+    assert exc.value.code == "idempotency_mismatch" and exc.value.outcome == "not_applicable"
+    with pytest.raises(ProviderError) as exc:
+        _capture(backend, identity, request_id="cr2", text="x" * (store.limits.max_continuity_bytes + 1))
+    assert exc.value.code == "limit_exceeded" and exc.value.details == {"limit": "continuity_buffer_bytes"}
+    store.continuity_directory_bytes = len("snapshot text") + 5
+    with pytest.raises(ProviderError) as exc:
+        _capture(backend, identity, request_id="cr3", text="ten chars!")
+    assert exc.value.details == {"limit": "continuity_directory_bytes"}
+    store.continuity_directory_bytes = None
+    with pytest.raises(ProviderError) as exc:
+        _capture(backend, identity, request_id="cr4", text="AKIAIOSFODNN7EXAMPLE")
+    assert exc.value.code == "secret_rejected" and set(exc.value.details) == {"event_id", "detector_code"}
+    assert set(store.continuity) == {("ep-1", "cr1")}
+    assert store.stages == {} and store.receipts == {} and store.revision_for(handle) == before.revision
+    assert _load(backend, identity) == before  # no snapshot change, no token change
+    store.clock.advance(86400 + 1)
+    with pytest.raises(ProviderError) as exc:
+        _capture(backend, identity)
+    assert exc.value.code == "stage_expired" and exc.value.details is None

@@ -1059,10 +1059,56 @@ class FakeAuthoritativeBackend:
         del store.stages[result.stage_handle_b64url]
 
     def _do_recall(self, request: w.RecallRequest, handle: HandleRecord) -> w.TypedRecall:
-        raise NotImplementedError("recall_context lands in Task 6")
+        """Read-only, non-durable, target-specific (§9.3 L1424); ruling R36-K ordering."""
+        op = "recall_context"
+        store = self._store
+        self._check_policy_conflicts(op)
+        _, visible, _, _ = self._scopes_for(handle, request.target)
+        if request.source_revision != store._composite(visible):
+            self._raise(op, "version_conflict", None)
+        visible_keys = {_scope_key(s) for s in visible}
+        channels = set(request.include_channels)
+        excluded = set(request.exclude_entry_ids)
+        needle = request.query.lower()
+        matches = sorted((r for r in store.records.values() if not r.hidden and r.record_channel in channels and _scope_key(r.origin_scope) in visible_keys and r.id not in excluded and (needle == "" or needle in r.text.lower())), key=lambda r: r.id)
+        budget = request.budget
+        trusted: List[w.DeliveredEntry] = []
+        evidence: List[w.DeliveredEntry] = []
+        used = {"trusted_instruction": 0, "scoped_evidence": 0}
+        caps = {"trusted_instruction": budget.trusted_chars, "scoped_evidence": budget.evidence_chars}
+        for record in matches:
+            if len(trusted) + len(evidence) >= budget.max_entries:
+                break
+            if used[record.lane] + len(record.text) > caps[record.lane]:
+                continue
+            used[record.lane] += len(record.text)
+            (trusted if record.lane == "trusted_instruction" else evidence).append(self._delivered(record))
+        return w.TypedRecall(frozen_identity=request.frozen_identity, target=request.target, source_revision=request.source_revision, trusted_instructions=tuple(trusted), scoped_evidence=tuple(evidence))
 
     def _do_continuity(self, request: w.ContinuityRequest, handle: HandleRecord) -> w.ContinuityResult:
-        raise NotImplementedError("capture_continuity lands in Task 6")
+        """One temporary raw buffer (§9.3 L1445): no lock, revision, approval or acknowledgement effect."""
+        op = "capture_continuity"
+        store = self._store
+        now = store.clock.now()
+        key = (store.epoch, request.request_id)
+        fingerprint = w.canonical_json(request.to_wire())
+        existing = store.continuity.get(key)
+        if existing is not None:
+            if existing.expires_at <= now:
+                self._raise(op, "stage_expired", None)
+            if existing.fingerprint != fingerprint:
+                self._raise(op, "idempotency_mismatch", None)
+            return w.ContinuityResult(buffer_id=existing.buffer_id, request_id=request.request_id, kind=existing.kind, expires_at=timestamp(existing.expires_at), outcome="idempotent_replay")
+        self._scan(op, fingerprint, [request.text])
+        size = len(request.text.encode("utf-8"))
+        if size > store.limits.max_continuity_bytes:
+            self._raise(op, "limit_exceeded", {"limit": "continuity_buffer_bytes"})
+        cap = store.continuity_directory_bytes
+        if cap is not None and sum(b.size for b in store.continuity.values() if b.expires_at > now) + size > cap:
+            self._raise(op, "limit_exceeded", {"limit": "continuity_directory_bytes"})
+        buffer = ContinuityBuffer(buffer_id="buf-" + secrets.token_hex(8), fingerprint=fingerprint, kind=request.kind, size=size, expires_at=now + timedelta(seconds=CONTINUITY_TTL_SECONDS))
+        store.continuity[key] = buffer
+        return w.ContinuityResult(buffer_id=buffer.buffer_id, request_id=request.request_id, kind=request.kind, expires_at=timestamp(buffer.expires_at), outcome="stored")
 
 
 def fake_backend_factory(store: FakeProviderStore, **backend_kwargs) -> Callable[[Any], FakeAuthoritativeBackend]:
