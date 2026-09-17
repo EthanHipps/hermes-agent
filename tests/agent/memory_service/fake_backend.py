@@ -941,7 +941,44 @@ class FakeAuthoritativeBackend:
             raise ProviderTransportError(reason=reason, operation=operation, mutation_outcome_unknown=operation in MUTATION_OPERATIONS)
 
     def _do_inspect(self, request: w.InspectStageRequest, handle: HandleRecord) -> w.StageInspection:
-        raise NotImplementedError("inspect_staged lands in Task 4")
+        op = "inspect_staged"
+        self._store._expire_stages()
+        stage = self._lookup_stage(op, request.stage_handle_b64url, request.request_id, request.frozen_identity, request.target)
+        return w.StageInspection(summary=stage.result, canonical_candidates=stage.request.candidate_entries, visible_before=stage.base_snapshot.mutation_entries, visible_after=self._projected(stage))
+
+    def _lookup_stage(self, operation: str, stage_handle: str, request_id: str, identity: w.FrozenIdentityWire, target: str) -> Stage:
+        """The three stage states (§9.3 L1356) plus D-R36-7 identity binding."""
+        store = self._store
+        key = (store.epoch, request_id)
+        if key in store.tombstones:
+            self._raise(operation, "stage_expired", None)
+        stage = store.stages.get(stage_handle)
+        if stage is None or stage.request.request_id != request_id:
+            receipt = store.receipts.get(key)
+            if receipt is not None and receipt.stage_handle == stage_handle:
+                self._raise(operation, "stage_not_found", {"state": "committed", "tx_id": receipt.tx_id})
+            self._raise(operation, "stage_not_found", None)
+        if stage.identity != identity or stage.request.target != target:
+            self._raise(operation, "invalid_request", None)
+        return stage
+
+    @staticmethod
+    def _accepted_provenance(request: w.StageRequest, tx_id: Optional[str]) -> w.AcceptedProvenance:
+        p = request.provenance
+        return w.AcceptedProvenance(actor_kind=p.actor_kind, principal_id=p.principal_id, logical_session_id=p.logical_session_id, surface=p.initiating_surface, source_entry_ids=p.source_entry_ids, source_commit=p.source_commit, transaction_id=tx_id)
+
+    def _projected(self, stage: Stage) -> Tuple[w.StoredEntry, ...]:
+        """visible_after: the base mutation list minus retirements plus new visible records."""
+        retired = set(stage.retire_ids)
+        after = [e for e in stage.base_snapshot.mutation_entries if e.id not in retired]
+        by_ref = {c.client_ref: c for c in stage.request.candidate_entries}
+        provenance = self._accepted_provenance(stage.request, None)
+        for admission in stage.result.admissions:
+            if admission.disposition == "withheld_raw" or admission.publication_effect != "create_record":
+                continue
+            cand = by_ref[admission.client_ref]
+            after.append(w.StoredEntry(id=admission.assigned_id, text=cand.text, origin_scope=admission.origin_scope, target=admission.target, record_channel=admission.record_channel, lane=admission.disposition, lifecycle="active", policy_key=admission.policy_key, provenance=provenance))
+        return tuple(after)
 
     def _do_commit(self, request: w.CommitRequest, handle: HandleRecord) -> w.CommitResult:
         raise NotImplementedError("commit_curated lands in Task 5")

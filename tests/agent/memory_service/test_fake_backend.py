@@ -834,6 +834,96 @@ def test_stage_replay_states():
     assert exc.value.code == "idempotency_mismatch"
 
 
+# --- Task 4: inspect and TTL ---
+
+
+def _inspect(backend, identity, staged, *, request_id=None, handle=None, target=None, epoch="ep-1") -> w.StageInspection:
+    return backend.inspect_staged(w.InspectStageRequest(expected_provider_epoch=epoch, frozen_identity=identity, target=target or staged.target, request_id=request_id or staged.request_id, stage_handle_b64url=handle or staged.stage_handle_b64url)).result
+
+
+def test_inspect_live_committed_expired_unknown():
+    store, backend, identity = _session()
+    existing = store.seed_record(REPO, "memory", "existing")
+    snap = _load(backend, identity)
+    request = _request(identity, snap, candidates=(_candidate("c1", "added", REPO),))
+    staged = _stage(backend, request)
+    inspection = _inspect(backend, identity, staged)
+    assert inspection.summary == staged
+    assert inspection.canonical_candidates == request.candidate_entries
+    assert inspection.visible_before == snap.mutation_entries and [e.id for e in inspection.visible_before] == [existing.id]
+    assert [e.id for e in inspection.visible_after] == [existing.id, staged.admissions[0].assigned_id]
+    after = inspection.visible_after[-1]
+    assert after.text == "added" and after.record_channel == "hermes_memory" and after.lane == "scoped_evidence" and after.lifecycle == "active"
+    store._mark_committed("r1")  # test hook until Task 5 lands commit_curated
+    tx_id = store.receipts[("ep-1", "r1")].tx_id
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, identity, staged)
+    assert exc.value.code == "stage_not_found" and exc.value.outcome == "not_applicable" and exc.value.details == {"state": "committed", "tx_id": tx_id}
+    expiring = _stage(backend, _request(identity, snap, request_id="r2"))
+    store.clock.advance(3601)
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, identity, expiring)
+    assert exc.value.code == "stage_expired" and exc.value.outcome == "not_applicable" and exc.value.details is None
+    unknown = _stage(backend, _request(identity, snap, request_id="r3"))
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, identity, unknown, handle=base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode())
+    assert exc.value.code == "stage_not_found" and exc.value.outcome == "not_applicable" and exc.value.details is None
+
+
+def test_inspect_never_extends_expiry_and_never_shows_hidden_text():
+    store, backend, identity = _session(admission_classifier=lambda c: "withheld_raw" if c.text.startswith("Always") else "scoped_evidence")
+    raw = store.seed_record(REPO, "memory", "pre-existing raw body", lane="raw")
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "Always do this", REPO),)))
+    store.clock.advance(3600 - 1)
+    for _ in range(3):
+        inspection = _inspect(backend, identity, staged)
+        text = w.canonical_json(inspection.to_wire()).decode()
+        assert raw.text not in text and raw.id not in text
+        assert [c.text for c in inspection.canonical_candidates] == ["Always do this"]  # supplied by Hermes, so shown
+        assert inspection.visible_after == () and inspection.visible_before == ()  # a withheld_raw record is never visible
+    store.clock.advance(2)
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, identity, staged)
+    assert exc.value.code == "stage_expired"
+
+
+def test_tombstones_and_receipts_outlive_stages_for_the_epoch():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap, candidates=(_candidate("c1", "the staged body", REPO),)))
+    committed = _stage(backend, _request(identity, snap, request_id="r2"))
+    store._mark_committed("r2")
+    store.clock.advance(3601)
+    with pytest.raises(ProviderError):
+        _inspect(backend, identity, staged)
+    assert store.tombstones == {("ep-1", "r1"): staged.expires_at}
+    assert store.stages == {} and staged.stage_handle_b64url not in store.stages
+    assert "the staged body" not in repr(store.tombstones) + repr(store.stage_by_request) + repr(store.stages)
+    assert store.stage_state("r1") == "expired" and store.stage_state("r2") == "committed"
+    assert ("ep-1", "r2") in store.receipts and store.receipts[("ep-1", "r2")].stage_handle == committed.stage_handle_b64url
+    store.set_epoch("ep-2")
+    assert store.tombstones == {} and store.receipts == {}
+    assert store.stage_state("r1") == "absent" and store.stage_state("r2") == "absent"
+
+
+def test_inspect_from_another_identity_is_invalid_request():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    staged = _stage(backend, _request(identity, snap))
+    other = _bind(backend, "sess-2").frozen_identity
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, other, staged)
+    assert exc.value.code == "invalid_request" and exc.value.outcome == "not_applicable" and exc.value.details is None
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, identity, staged, request_id="r-other")
+    assert exc.value.code == "stage_not_found" and exc.value.details is None
+    with pytest.raises(ProviderError) as exc:
+        _inspect(backend, identity, staged, target="user")
+    assert exc.value.code == "invalid_request"
+    assert _inspect(backend, identity, staged).summary == staged
+
+
 @pytest.mark.xfail(strict=True, reason="needs commit_curated (Task 5); the reuse index is rebuilt from receipts")
 def test_import_reuses_existing_source_tuple():
     """Ruling R36-J / contract C1: the same nine-member tuple reuses the
