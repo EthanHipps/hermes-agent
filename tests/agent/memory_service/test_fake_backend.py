@@ -336,3 +336,164 @@ def test_requests_and_results_are_strictly_decoded():
     with pytest.raises(w.WireError, match="user_write_scope"):
         _bind(backend, "sess-2")
     assert _bind(backend, "sess-3").user_write_scope == PG  # the corruption was consumed
+
+
+# --- Task 2: load, hidden preservation, revisions, ambiguous_policy ---
+
+
+def _seed_mixed(store):
+    """One record of every kind the memory snapshot must partition."""
+    general = store.seed_general(REPO, "general policy", policy_key="k-general")
+    evidence = store.seed_record(REPO, "memory", "visible evidence")
+    raw = store.seed_record(REPO, "memory", "hidden raw body", lane="raw")
+    superseded = store.seed_record(REPO, "memory", "old superseded", lifecycle="superseded")
+    user = store.seed_record(PG, "user", "user profile line", lane="trusted_instruction", policy_key="profile:u1")
+    return general, evidence, raw, superseded, user
+
+
+def test_load_memory_snapshot_is_complete_and_channel_specific():
+    store = _store()
+    general, evidence, raw, superseded, user = _seed_mixed(store)
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend)
+    snap = _load(backend, bound.frozen_identity, "memory")
+    snap.validate()
+    assert snap.status == "ok" and snap.target == "memory" and snap.api_version == 1
+    assert snap.frozen_identity == bound.frozen_identity
+    assert [e.id for e in snap.mutation_entries] == [evidence.id]
+    assert all(e.record_channel == "hermes_memory" and e.target == "memory" and e.lifecycle == "active" for e in snap.mutation_entries)
+    assert [e.id for e in snap.delivery_entries] == [general.id, evidence.id]  # general first (ruling R36-K)
+    assert snap.delivery_entries[0].record_channel == "general" and snap.delivery_entries[0].target is None
+    assert snap.delivery_entries[0].delivery_tier == "repository"
+    text = w.canonical_json(snap.to_wire()).decode()
+    for hidden in (raw, superseded, user):
+        assert hidden.id not in text and hidden.text not in text
+    assert [r.scope for r in snap.revision.scope_revisions] == list(bound.visible_scopes) == [REPO, PROJ, PG]
+    assert snap.revision.provider_epoch == "ep-1"
+    assert list(snap.complete_for_scopes) == list(snap.eligible_write_scopes) == [REPO, PROJ]
+    assert snap.default_write_scope == REPO and list(snap.visible_scopes) == [REPO, PROJ, PG]
+    assert snap.limits == store.curated_limits
+    assert snap.hidden_preservation_state.target == "memory" and list(snap.hidden_preservation_state.complete_for_scopes) == [REPO, PROJ]
+
+
+def test_load_user_snapshot_delivers_only_hermes_user():
+    store = _store()
+    general, evidence, raw, superseded, user = _seed_mixed(store)
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend)
+    snap = _load(backend, bound.frozen_identity, "user")
+    snap.validate()
+    assert snap.status == "ok" and snap.target == "user"
+    assert [e.id for e in snap.mutation_entries] == [user.id] and snap.mutation_entries[0].record_channel == "hermes_user"
+    assert [e.id for e in snap.delivery_entries] == [user.id] and snap.delivery_entries[0].target == "user"
+    assert snap.delivery_entries[0].lane == "trusted_instruction" and snap.delivery_entries[0].policy_key == "profile:u1"
+    assert snap.default_write_scope == PG and list(snap.eligible_write_scopes) == [PG] == list(snap.complete_for_scopes)
+    text = w.canonical_json(snap.to_wire()).decode()
+    for absent in (general, evidence, raw, superseded):
+        assert absent.id not in text and absent.text not in text
+
+
+def test_degraded_binding_loads_degraded_global_only_for_memory_and_ok_for_user():
+    store = _store()
+    general, evidence, raw, superseded, user = _seed_mixed(store)
+    pg_general = store.seed_general(PG, "global policy")
+    pg_memory = store.seed_record(PG, "memory", "global evidence")
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend, context=_context(resolution_source="explicit_ids", canonical_directory=None))
+    memory = _load(backend, bound.frozen_identity, "memory")
+    memory.validate()
+    assert memory.status == "degraded_global_only"
+    assert list(memory.visible_scopes) == [PG] and memory.default_write_scope is None
+    assert memory.eligible_write_scopes == () and memory.complete_for_scopes == () and memory.mutation_entries == ()
+    assert [e.id for e in memory.delivery_entries] == [pg_general.id, pg_memory.id]
+    assert [r.scope for r in memory.revision.scope_revisions] == [PG]
+    text = w.canonical_json(memory.to_wire()).decode()
+    assert general.id not in text and evidence.id not in text and raw.text not in text
+    user_snap = _load(backend, bound.frozen_identity, "user")
+    user_snap.validate()
+    assert user_snap.status == "ok" and list(user_snap.visible_scopes) == [PG]
+    assert user_snap.default_write_scope == PG and list(user_snap.eligible_write_scopes) == [PG]
+    assert [e.id for e in user_snap.mutation_entries] == [user.id]
+
+
+def test_hidden_token_is_random_stable_per_revision_and_superseded_by_publication():
+    store = _store()
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend)
+    handle = bound.frozen_identity.opaque_binding_b64url
+    first = _load(backend, bound.frozen_identity)
+    second = _load(backend, bound.frozen_identity)
+    assert first.hidden_preservation_state == second.hidden_preservation_state
+    token = first.hidden_preservation_state.opaque_state_b64url
+    assert _b64_len(token) == 32
+    assert store.token_for(handle, "memory") == token
+    repo_revision = lambda snap: [r.revision for r in snap.revision.scope_revisions if r.scope == REPO][0]  # noqa: E731
+    store.external_write(REPO, "memory", "x")
+    third = _load(backend, bound.frozen_identity)
+    assert third.hidden_preservation_state.opaque_state_b64url != token
+    assert repo_revision(third) != repo_revision(first)
+    assert store.token_for(handle, "memory") == third.hidden_preservation_state.opaque_state_b64url
+    assert [k for k in store.tokens if k[0] == handle] == [(handle, "memory")]
+    other = _bind(backend, "sess-2")
+    other_snap = _load(backend, other.frozen_identity)
+    assert other_snap.revision == third.revision
+    assert other_snap.hidden_preservation_state.opaque_state_b64url != third.hidden_preservation_state.opaque_state_b64url
+    user_snap = _load(backend, bound.frozen_identity, "user")
+    assert user_snap.hidden_preservation_state.opaque_state_b64url != third.hidden_preservation_state.opaque_state_b64url
+    assert store.token_for(handle, "user") == user_snap.hidden_preservation_state.opaque_state_b64url
+
+
+def test_revision_components_bump_independently():
+    store = _store()
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend)
+
+    def parts(snap):
+        return snap.revision.provider_epoch, snap.revision.visibility_revision, {r.scope: r.revision for r in snap.revision.scope_revisions}
+
+    epoch, visibility, scopes = parts(_load(backend, bound.frozen_identity))
+    store.external_write(PROJ, "memory", "project evidence")
+    epoch2, visibility2, scopes2 = parts(_load(backend, bound.frozen_identity))
+    assert epoch2 == epoch and visibility2 == visibility
+    assert scopes2[PROJ] != scopes[PROJ] and scopes2[REPO] == scopes[REPO] and scopes2[PG] == scopes[PG]
+    store.hidden_change(REPO, "memory")
+    epoch3, visibility3, scopes3 = parts(_load(backend, bound.frozen_identity))
+    assert scopes3[REPO] != scopes2[REPO] and scopes3[PROJ] == scopes2[PROJ] and visibility3 == visibility2 and epoch3 == epoch
+    store.visibility_change()
+    epoch4, visibility4, scopes4 = parts(_load(backend, bound.frozen_identity))
+    assert visibility4 != visibility3 and scopes4 == scopes3 and epoch4 == epoch
+    assert epoch == "ep-1"
+
+
+def test_ambiguous_policy_on_required_load_carries_legal_details_and_no_snapshot():
+    store = _store()
+    store.seed_general(REPO, "the body of the conflicting instruction", policy_key="k")
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend)
+    store.add_policy_conflict("k", 3)
+    events_before = len(store.events)
+    with pytest.raises(ProviderError) as exc:
+        _load(backend, bound.frozen_identity)
+    assert exc.value.code == "ambiguous_policy" and exc.value.outcome == "not_applicable"
+    details = w.decode_error_details("ambiguous_policy", exc.value.details)
+    assert details.ambiguities[0].policy_key == "k" and details.ambiguities[0].candidate_count == 3 and details.ambiguities[0].tier == "dependency"
+    assert store.events[events_before:] == [("load_curated", "ambiguous_policy", False)]
+    assert "conflicting instruction" not in w.canonical_json(exc.value.details).decode()  # body-free: the key, not the text
+
+
+def test_load_never_returns_version_conflict_natively():
+    store = _store()
+    backend = FakeAuthoritativeBackend(store)
+    bound = _bind(backend)
+    _load(backend, bound.frozen_identity)
+    store.external_write(REPO, "memory", "x")
+    store.hidden_change(REPO, "memory")
+    store.visibility_change()
+    store.block_store("git_dirty")
+    assert _load(backend, bound.frozen_identity).status == "ok"
+    assert _load(backend, bound.frozen_identity, "user").status == "ok"
+    assert all(code != "version_conflict" for _, code, _ in store.events)
+    store.fail_typed("load_curated", "version_conflict", details=None)  # only a scripted (adapter-simulated) conflict can appear on load
+    with pytest.raises(ProviderError) as exc:
+        _load(backend, bound.frozen_identity)
+    assert exc.value.code == "version_conflict" and exc.value.details is None

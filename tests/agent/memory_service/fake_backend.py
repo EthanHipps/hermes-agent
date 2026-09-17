@@ -681,7 +681,78 @@ class FakeAuthoritativeBackend:
         return w.ValidateSessionResult(valid=True, frozen_identity=request.frozen_identity, visible_scopes=handle.visible_scopes)
 
     def _do_load(self, request: w.LoadRequest, handle: HandleRecord) -> w.CuratedSnapshot:
-        raise NotImplementedError("load_curated lands in Task 2")
+        self._check_policy_conflicts("load_curated")
+        return self._snapshot(handle, request.target)
+
+    # -- snapshots, records, tokens -------------------------------------------
+
+    def _check_policy_conflicts(self, operation: str) -> None:
+        conflicts = self._store.policy_conflicts
+        if conflicts:
+            self._raise(operation, "ambiguous_policy", {"ambiguities": [{"policy_key": key, "tier": "dependency", "candidate_count": count} for key, count in conflicts.items()]})
+
+    def _scopes_for(self, handle: HandleRecord, target: str):
+        """(status, visible, default, eligible) for one target of one handle."""
+        if target == "memory":
+            status = "degraded_global_only" if handle.degraded else "ok"
+            return status, handle.visible_scopes, handle.default_scope, handle.eligible_scopes
+        return "ok", handle.visible_scopes, handle.user_scope, (handle.user_scope,)
+
+    def _ordered(self, records: List[FakeRecord], visible: Tuple[w.ScopeRef, ...]) -> List[FakeRecord]:
+        """Ruling R36-K: visible-scope order, then id. Not ygg's §8 order."""
+        order = {_scope_key(s): i for i, s in enumerate(visible)}
+        return sorted((r for r in records if _scope_key(r.origin_scope) in order), key=lambda r: (order[_scope_key(r.origin_scope)], r.id))
+
+    @staticmethod
+    def _stored(record: FakeRecord) -> w.StoredEntry:
+        return w.StoredEntry(id=record.id, text=record.text, origin_scope=record.origin_scope, target=record.target, record_channel=record.record_channel, lane=record.lane, lifecycle="active", policy_key=record.policy_key, provenance=record.provenance)
+
+    @staticmethod
+    def _delivered(record: FakeRecord) -> w.DeliveredEntry:
+        return w.DeliveredEntry(id=record.id, text=record.text, origin_scope=record.origin_scope, target=record.target, record_channel=record.record_channel, lane=record.lane, delivery_tier=record.origin_scope.kind, policy_key=record.policy_key, provenance=record.provenance)
+
+    def _mutation_records(self, handle: HandleRecord, target: str) -> List[FakeRecord]:
+        _, visible, _, eligible = self._scopes_for(handle, target)
+        channel = _CHANNEL[target]
+        addressable = {_scope_key(s) for s in eligible}
+        return self._ordered([r for r in self._store.records.values() if r.record_channel == channel and not r.hidden and _scope_key(r.origin_scope) in addressable], visible)
+
+    def _delivery_records(self, handle: HandleRecord, target: str) -> List[FakeRecord]:
+        _, visible, _, _ = self._scopes_for(handle, target)
+        active = [r for r in self._store.records.values() if not r.hidden]
+        if target == "memory":
+            general = self._ordered([r for r in active if r.record_channel == "general"], visible)
+            return general + self._ordered([r for r in active if r.record_channel == "hermes_memory"], visible)
+        return self._ordered([r for r in active if r.record_channel == "hermes_user"], visible)
+
+    def _mint_or_reuse_token(self, handle: HandleRecord, target: str, revision: w.CompositeRevision) -> str:
+        key = (handle.identity.opaque_binding_b64url, target)
+        current = self._store.tokens.get(key)
+        if current is not None and current[1] == revision:
+            return current[0]
+        token = _b64url(secrets.token_bytes(32))
+        self._store.tokens[key] = (token, revision)
+        return token
+
+    def _snapshot(self, handle: HandleRecord, target: str) -> w.CuratedSnapshot:
+        status, visible, default, eligible = self._scopes_for(handle, target)
+        revision = self._store._composite(visible)
+        token = self._mint_or_reuse_token(handle, target, revision)
+        return w.CuratedSnapshot(
+            api_version=1,
+            status=status,
+            frozen_identity=handle.identity,
+            target=target,
+            visible_scopes=visible,
+            default_write_scope=default,
+            eligible_write_scopes=eligible,
+            complete_for_scopes=eligible,
+            revision=revision,
+            limits=self._store.curated_limits,
+            mutation_entries=tuple(self._stored(r) for r in self._mutation_records(handle, target)),
+            delivery_entries=tuple(self._delivered(r) for r in self._delivery_records(handle, target)),
+            hidden_preservation_state=w.HiddenPreservationState(target=target, complete_for_scopes=eligible, opaque_state_b64url=token),
+        )
 
     def _do_stage(self, request: w.StageRequest, handle: HandleRecord) -> w.StageResult:
         raise NotImplementedError("stage_curated lands in Task 3")
