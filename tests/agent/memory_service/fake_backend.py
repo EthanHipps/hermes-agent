@@ -316,6 +316,15 @@ class Stage:
 
 
 @dataclass
+class StagedRequest:
+    """The ``(epoch, request_id)`` index entry; it outlives the live stage."""
+
+    fingerprint: bytes
+    stage_handle: str
+    result: w.StageResult
+
+
+@dataclass
 class Receipt:
     handle: str
     stage_handle: str
@@ -354,7 +363,7 @@ class FakeProviderStore:
         self.visibility_revision = 1
         self.tokens: Dict[Tuple[str, str], Tuple[str, w.CompositeRevision]] = {}
         self.stages: Dict[str, Stage] = {}
-        self.stage_by_request: Dict[Tuple[str, str], str] = {}
+        self.stage_by_request: Dict[Tuple[str, str], StagedRequest] = {}
         self.receipts: Dict[Tuple[str, str], Receipt] = {}
         self.tombstones: Dict[Tuple[str, str], str] = {}
         self.bind_receipts: Dict[Tuple[str, str], Tuple[bytes, w.BindResult]] = {}
@@ -479,8 +488,8 @@ class FakeProviderStore:
     def stage_state(self, request_id: str) -> str:
         with self.lock:
             key = (self.epoch, request_id)
-            stage_handle = self.stage_by_request.get(key)
-            if stage_handle is not None and stage_handle in self.stages:
+            staged = self.stage_by_request.get(key)
+            if staged is not None and staged.stage_handle in self.stages:
                 return "live"
             if key in self.receipts:
                 return "committed"
@@ -489,6 +498,24 @@ class FakeProviderStore:
             return "absent"
 
     # -- internals shared by every backend ----------------------------------
+
+    def _mark_committed(self, request_id: str) -> None:
+        """Test hook (until commit_curated lands): turn a live stage into a receipt."""
+        with self.lock:
+            key = (self.epoch, request_id)
+            staged = self.stage_by_request[key]
+            stage = self.stages.pop(staged.stage_handle)
+            self.receipts[key] = Receipt(handle=stage.handle, stage_handle=staged.stage_handle, fingerprint=b"", tx_id="tx-" + secrets.token_hex(8), admissions=stage.result.admissions, identity=stage.identity, stage_result=stage.result, target=stage.request.target)
+
+    def _expire_stages(self) -> None:
+        """TTL: replace expired stage bytes with a content-free tombstone (§9.3 L1356)."""
+        now = self.clock.now()
+        for stage_handle, stage in list(self.stages.items()):
+            if stage.expires_at <= now:
+                del self.stages[stage_handle]
+                key = (self.epoch, stage.request.request_id)
+                self.stage_by_request.pop(key, None)
+                self.tombstones[key] = timestamp(stage.expires_at)
 
     def _add_record(self, scope, target, channel, text, *, lane, policy_key, lifecycle) -> FakeRecord:
         with self.lock:
@@ -755,7 +782,163 @@ class FakeAuthoritativeBackend:
         )
 
     def _do_stage(self, request: w.StageRequest, handle: HandleRecord) -> w.StageResult:
-        raise NotImplementedError("stage_curated lands in Task 3")
+        op = "stage_curated"
+        store = self._store
+        target = request.target
+        store._expire_stages()
+        key = (store.epoch, request.request_id)
+        fingerprint = w.canonical_json(request.to_wire())
+        # replay lookup by (epoch, request_id): reads only, writes nothing
+        if key in store.tombstones:
+            self._raise(op, "stage_expired", None)
+        staged = store.stage_by_request.get(key)
+        if staged is not None:
+            if staged.fingerprint != fingerprint:
+                self._raise(op, "idempotency_mismatch", None)
+            return staged.result
+        if store.store_state != "normal":
+            self._raise(op, "store_blocked", {"reason": store.store_state})
+        self._scan(op, fingerprint, [c.text for c in request.candidate_entries])
+        current = self._snapshot(handle, target)
+        # limits
+        limits, curated = store.limits, store.curated_limits
+        if len(fingerprint) > limits.max_request_bytes:
+            self._raise(op, "limit_exceeded", {"limit": "max_request_bytes"})
+        if sum(len(c.text.encode("utf-8")) for c in request.candidate_entries) > limits.max_stage_bytes:
+            self._raise(op, "limit_exceeded", {"limit": "max_stage_bytes"})
+        if any(len(c.text) > curated.max_entry_chars for c in request.candidate_entries):
+            self._raise(op, "limit_exceeded", {"limit": "max_entry_chars"})
+        retiring = sum(1 for d in request.mutation_delta if d.action in ("retire", "supersede"))
+        if len(current.mutation_entries) - retiring + len(request.candidate_entries) > curated.max_entries:
+            self._raise(op, "limit_exceeded", {"limit": "max_entries"})
+        # scope resolution and eligibility (§9.2 L970, §9.3 L1289)
+        if target == "memory" and handle.degraded:
+            self._raise(op, "scope_unresolved", None)
+        _, _, default, eligible = self._scopes_for(handle, target)
+        eligible_keys = {_scope_key(s) for s in eligible}
+        affected: List[w.ScopeRef] = []
+
+        def touch(scope: w.ScopeRef) -> None:
+            if scope not in affected:
+                affected.append(scope)
+
+        for cand in request.candidate_entries:
+            if _scope_key(cand.destination_scope) not in eligible_keys:
+                self._raise(op, "unauthorized_scope", None)
+            touch(cand.destination_scope)
+        reset_scopes = tuple(request.intent.reset_scopes or ()) if request.intent.kind == "reset" else ()
+        for scope in reset_scopes:
+            if _scope_key(scope) not in eligible_keys:
+                self._raise(op, "unauthorized_scope", None)
+            touch(scope)
+        # CAS before token (contract C2, D-R10-2)
+        if request.expected_revision != current.revision:
+            self._raise(op, "version_conflict", {"current_snapshot": current.to_wire()})
+        if request.hidden_preservation_state != current.hidden_preservation_state:
+            self._raise(op, "invalid_request", None)
+        # delta IDs are confined to the exact snapshot (§9.3 L1293)
+        by_id = {e.id: e for e in current.mutation_entries}
+        by_ref = {c.client_ref: c for c in request.candidate_entries}
+        superseded: Dict[str, str] = {}
+        retire_ids: List[str] = []
+        for item in request.mutation_delta:
+            old_id = item.record_id if item.action == "retire" else item.old_record_id if item.action == "supersede" else None
+            if old_id is None:
+                continue
+            old = by_id.get(old_id)
+            if old is None:
+                self._raise(op, "invalid_request", None)
+            if item.action == "supersede":
+                if by_ref[item.replacement_client_ref].destination_scope != old.origin_scope:
+                    self._raise(op, "invalid_request", None)
+                superseded[item.replacement_client_ref] = old_id
+            retire_ids.append(old_id)
+            touch(old.origin_scope)
+        # reset: mechanically enumerate hidden state, body-free (§9.3 L1293)
+        hidden_retire_ids: List[str] = []
+        hidden_effects: List[w.HiddenEffect] = []
+        if reset_scopes:
+            reset_keys = {_scope_key(s) for s in reset_scopes}
+            counts: Dict[Tuple[Any, ...], int] = {}
+            for record in store.records.values():
+                if record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
+                    continue
+                if record.hidden:
+                    hidden_retire_ids.append(record.id)
+                    group = (record.origin_scope, record.record_channel, record.lane)
+                    counts[group] = counts.get(group, 0) + 1
+                else:
+                    retire_ids.append(record.id)
+            order = {_scope_key(s): i for i, s in enumerate(reset_scopes)}
+            for scope, channel, lane in sorted(counts, key=lambda g: (order[_scope_key(g[0])], g[1], g[2])):
+                hidden_effects.append(w.HiddenEffect(scope=scope, target=target, record_channel=channel, lane=lane, action="retire", count=counts[(scope, channel, lane)]))
+        # admissions: one decision per candidate
+        admissions: List[w.AdmissionDecision] = []
+        hashes: List[w.CandidateHash] = []
+        for cand in request.candidate_entries:
+            sha = hashlib.sha256(cand.text.encode("utf-8")).hexdigest()
+            hashes.append(w.CandidateHash(client_ref=cand.client_ref, canonical_sha256=sha))
+            disposition = store.admission_classifier(cand) if store.admission_classifier else _DEFAULT_DISPOSITION[target]
+            effect = "create_record"
+            assigned = "r" + secrets.token_hex(12)
+            if request.intent.kind == "import" and ENABLE_IMPORT_SOURCE_INDEX:
+                reused = store.import_index.get(self._import_tuple(handle, cand, sha))
+                if reused is not None:
+                    effect, assigned = "reuse_existing_import", reused
+            old_id = superseded.get(cand.client_ref)
+            if disposition == "withheld_raw":
+                policy_key = None
+            elif target == "user":
+                inherited = store.records[old_id].policy_key if old_id else None
+                policy_key = cand.proposed_policy_key or inherited or f"profile:{assigned}"
+            else:
+                policy_key = cand.proposed_policy_key
+            admissions.append(w.AdmissionDecision(client_ref=cand.client_ref, assigned_id=assigned, target=target, record_channel=_CHANNEL[target], origin_scope=cand.destination_scope, disposition=disposition, publication_effect=effect, superseded_id=old_id, policy_key=policy_key))
+        # approval requirements, mechanically and in §9.3 L1326 order
+        requirements: List[str] = []
+        if target == "user":
+            requirements.append("target_user")
+        if any(scope != default for scope in affected):
+            requirements.append("non_default_scope")
+        for kind in ("bulk_edit", "reset", "import"):
+            if request.intent.kind == kind:
+                requirements.append(kind)
+        if request.provenance.threat_decision_id is not None:
+            requirements.append("threat")
+        expires_at = store.clock.now() + timedelta(seconds=limits.stage_ttl_seconds)
+        stage_handle = _b64url(secrets.token_bytes(32))
+        unsigned = w.StageResult(stage_handle_b64url=stage_handle, request_id=request.request_id, target=target, expected_revision=request.expected_revision, requested_write_scopes=request.requested_write_scopes, eligible_write_scopes=eligible, expires_at=timestamp(expires_at), approval_binding_sha256="0" * 64, approval_requirements=tuple(requirements), candidate_hashes=tuple(hashes), admissions=tuple(admissions), hidden_effects=tuple(hidden_effects))
+        result = replace(unsigned, approval_binding_sha256=approval_binding_sha256(unsigned, request))
+        # persist: the one point where request_id-keyed state is written (ruling R36-L)
+        if store._stage_persistence_failures > 0:
+            store._stage_persistence_failures -= 1
+            self._raise(op, APPROVAL_STORE_FAILURE_CODE, None)
+        store.stages[stage_handle] = Stage(handle=handle.identity.opaque_binding_b64url, request=request, result=result, fingerprint=fingerprint, expires_at=expires_at, base_snapshot=current, identity=request.frozen_identity, retire_ids=tuple(retire_ids), hidden_retire_ids=tuple(hidden_retire_ids), affected_scopes=tuple(affected))
+        store.stage_by_request[key] = StagedRequest(fingerprint=fingerprint, stage_handle=stage_handle, result=result)
+        self._fault_during(op)
+        return result
+
+    def _import_tuple(self, handle: HandleRecord, cand: w.CandidateEntry, sha: str) -> Tuple[Any, ...]:
+        """§9.3 L1335 uniqueness tuple."""
+        ident = cand.import_source_identity
+        return (self._store.epoch, handle.identity.principal_id, ident.source_kind, ident.parser_version, ident.source_id, ident.item_key, cand.target, _scope_key(cand.destination_scope), sha)
+
+    def _scan(self, operation: str, container: bytes, texts: List[str]) -> None:
+        """§5.4 order: the whole container first, then each content field (fixture seam)."""
+        detector = self._store.secret_detector
+        if detector is None:
+            return
+        for candidate in [container.decode("utf-8"), *texts]:
+            code = detector(candidate)
+            if code:
+                self._raise(operation, "secret_rejected", {"event_id": _b64url(secrets.token_bytes(16)), "detector_code": code})
+
+    def _fault_during(self, operation: str) -> None:
+        """A crash after the durable write and before the response is built."""
+        reason = self._store._pop_transport_fault(operation, "during")
+        if reason is not None:
+            self._store.events.append((operation, "transport", True))
+            raise ProviderTransportError(reason=reason, operation=operation, mutation_outcome_unknown=operation in MUTATION_OPERATIONS)
 
     def _do_inspect(self, request: w.InspectStageRequest, handle: HandleRecord) -> w.StageInspection:
         raise NotImplementedError("inspect_staged lands in Task 4")
