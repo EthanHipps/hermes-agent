@@ -8,6 +8,11 @@ the success envelope so the service can enforce epoch continuity. The service
 also tolerates a :class:`~agent.memory_service.wire.WireError` escaping a
 backend, treating it the same as a :class:`ProviderTransportError` for
 malformed output.
+
+Backends validate their own request and result envelopes with the wire codecs,
+and validate typed failure envelopes with ``WireFailure`` and
+``decode_error_details`` before raising ``ProviderError``. The service relies
+on that boundary; its correlation checks do not replace envelope validation.
 """
 
 from __future__ import annotations

@@ -205,7 +205,7 @@ class ProviderAuthoritativeMemoryService(MemoryService):
             raise CapabilityUnavailableError("provider did not negotiate recall_context")
         wire_request = w.RecallRequest(expected_provider_epoch=self._state.provider_epoch, frozen_identity=self._state.identity.to_wire(), target=query.target, source_revision=query.source_revision, query=query.query, include_channels=tuple(query.include_channels), exclude_entry_ids=tuple(query.exclude_entry_ids), budget=query.budget)
         wire_request.validate()
-        return self._call("recall_context", wire_request).result
+        return self._call("recall_context", wire_request, non_blocking=True).result
 
     def capture_continuity(self, capture: ContinuityCapture) -> w.ContinuityResult:
         self._require_bound()

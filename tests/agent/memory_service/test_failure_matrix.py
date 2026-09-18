@@ -4,7 +4,7 @@ stateful fake (R36).
 
 Row 17 (backup/status surfaces) is R41/R44's: only the fault knobs are
 exercised here. The Additive column is R48's except row 1 (ruling R36-D).
-Row 7 asserts ruling R36-A = (b) and is RED until Task 9 lands it.
+Row 7 asserts ruling R36-A = (b): optional recall failures do not latch.
 """
 
 import logging
