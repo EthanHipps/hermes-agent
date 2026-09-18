@@ -197,7 +197,7 @@ def test_blocked_load_exposes_typed_code_and_provider_error(tmp_path):
     ambiguous_policy from unavailable without parsing str(err) or __cause__."""
     backend = StubBackend()
     service = _select(tmp_path, backend)
-    backend.fail_typed("load_curated", "ambiguous_policy")
+    backend.fail_typed("load_curated", "ambiguous_policy", details={"ambiguities": [{"policy_key": "k", "tier": "dependency", "candidate_count": 2}]})
     with pytest.raises(MemoryBlockedError) as excinfo:
         service.load_curated("memory")
     err = excinfo.value
