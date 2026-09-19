@@ -783,6 +783,7 @@ class FakeAuthoritativeBackend:
         )
 
     def _do_stage(self, request: w.StageRequest, handle: HandleRecord) -> w.StageResult:
+        """Checks run in a fixed order, so the first failing check names the error."""
         op = "stage_curated"
         store = self._store
         target = request.target
@@ -790,21 +791,55 @@ class FakeAuthoritativeBackend:
         key = (store.epoch, request.request_id)
         fingerprint = w.canonical_json(request.to_wire())
         fingerprint_digest = hashlib.sha256(fingerprint).digest()
-        # replay lookup by (epoch, request_id): reads only, writes nothing
-        if key in store.tombstones:
-            self._raise(op, "stage_expired", None)
-        staged = store.stage_by_request.get(key)
-        if staged is not None:
-            if staged.fingerprint != fingerprint_digest:
-                self._raise(op, "idempotency_mismatch", None)
-            return staged.result
+        replayed = self._replayed_stage(op, key, fingerprint_digest)
+        if replayed is not None:
+            return replayed
         if store.store_state != "normal":
             self._raise(op, "store_blocked", {"reason": store.store_state})
         self._scan(op, fingerprint, [c.text for c in request.candidate_entries])
         current = self._snapshot(handle, target)
-        # limits
-        limits, curated = store.limits, store.curated_limits
-        if len(fingerprint) > limits.max_request_bytes:
+        self._check_stage_limits(op, request, current, len(fingerprint))
+        reset_scopes = self._check_stage_scopes(op, request, handle)
+        # CAS before token (contract C2, D-R10-2)
+        if request.expected_revision != current.revision:
+            self._raise(op, "version_conflict", {"current_snapshot": current.to_wire()})
+        if request.hidden_preservation_state != current.hidden_preservation_state:
+            self._raise(op, "invalid_request", None)
+        superseded, retire_ids, delta_scopes = self._resolve_delta(op, request, current)
+        reset_visible_ids, hidden_retire_ids, hidden_effects = self._enumerate_reset(target, reset_scopes)
+        admissions, hashes = self._admit(op, request, handle, superseded)
+        affected = tuple(dict.fromkeys(reset_scopes + delta_scopes))
+        if affected != request.requested_write_scopes:
+            self._raise(op, "invalid_request", None)
+        _, _, default, eligible = self._scopes_for(handle, target)
+        expires_at = store.clock.now() + timedelta(seconds=store.limits.stage_ttl_seconds)
+        stage_handle = _b64url(secrets.token_bytes(32))
+        unsigned = w.StageResult(stage_handle_b64url=stage_handle, request_id=request.request_id, target=target, expected_revision=request.expected_revision, requested_write_scopes=request.requested_write_scopes, eligible_write_scopes=eligible, expires_at=timestamp(expires_at), approval_binding_sha256="0" * 64, approval_requirements=self._approval_requirements(request, affected, default), candidate_hashes=hashes, admissions=admissions, hidden_effects=hidden_effects)
+        result = replace(unsigned, approval_binding_sha256=approval_binding_sha256(unsigned, request))
+        # persist: the one point where request_id-keyed state is written (ruling R36-L)
+        if store._stage_persistence_failures > 0:
+            store._stage_persistence_failures -= 1
+            self._raise(op, APPROVAL_STORE_FAILURE_CODE, None)
+        store.stages[stage_handle] = Stage(handle=handle.identity.opaque_binding_b64url, request=request, result=result, fingerprint=fingerprint_digest, expires_at=expires_at, base_snapshot=current, identity=request.frozen_identity, retire_ids=retire_ids + reset_visible_ids, hidden_retire_ids=hidden_retire_ids, affected_scopes=affected)
+        store.stage_by_request[key] = StagedRequest(fingerprint=fingerprint_digest, stage_handle=stage_handle, result=result)
+        self._fault_during(op)
+        return result
+
+    def _replayed_stage(self, op: str, key: Tuple[str, str], digest: bytes) -> Optional[w.StageResult]:
+        """Replay lookup by (epoch, request_id): reads only, writes nothing."""
+        store = self._store
+        if key in store.tombstones:
+            self._raise(op, "stage_expired", None)
+        staged = store.stage_by_request.get(key)
+        if staged is None:
+            return None
+        if staged.fingerprint != digest:
+            self._raise(op, "idempotency_mismatch", None)
+        return staged.result
+
+    def _check_stage_limits(self, op: str, request: w.StageRequest, current: w.CuratedSnapshot, request_bytes: int) -> None:
+        limits, curated = self._store.limits, self._store.curated_limits
+        if request_bytes > limits.max_request_bytes:
             self._raise(op, "limit_exceeded", {"limit": "max_request_bytes"})
         if sum(len(c.text.encode("utf-8")) for c in request.candidate_entries) > limits.max_stage_bytes:
             self._raise(op, "limit_exceeded", {"limit": "max_stage_bytes"})
@@ -813,38 +848,34 @@ class FakeAuthoritativeBackend:
         retiring = sum(1 for d in request.mutation_delta if d.action in ("retire", "supersede"))
         if len(current.mutation_entries) - retiring + len(request.candidate_entries) > curated.max_entries:
             self._raise(op, "limit_exceeded", {"limit": "max_entries"})
-        # scope resolution and eligibility (§9.2 L970, §9.3 L1289)
-        if target == "memory" and handle.degraded:
+
+    def _check_stage_scopes(self, op: str, request: w.StageRequest, handle: HandleRecord) -> Tuple[w.ScopeRef, ...]:
+        """Scope resolution and eligibility (§9.2 L970, §9.3 L1289); returns the reset scopes."""
+        if request.target == "memory" and handle.degraded:
             self._raise(op, "scope_unresolved", None)
-        _, _, default, eligible = self._scopes_for(handle, target)
+        _, _, _, eligible = self._scopes_for(handle, request.target)
         eligible_keys = {_scope_key(s) for s in eligible}
-        affected: List[w.ScopeRef] = []
-
-        def touch(scope: w.ScopeRef) -> None:
-            if scope not in affected:
-                affected.append(scope)
-
-        for cand in request.candidate_entries:
-            if _scope_key(cand.destination_scope) not in eligible_keys:
-                self._raise(op, "unauthorized_scope", None)
+        if any(_scope_key(c.destination_scope) not in eligible_keys for c in request.candidate_entries):
+            self._raise(op, "unauthorized_scope", None)
         reset_scopes = tuple(request.intent.reset_scopes or ()) if request.intent.kind == "reset" else ()
-        for scope in reset_scopes:
-            if _scope_key(scope) not in eligible_keys:
-                self._raise(op, "unauthorized_scope", None)
-            touch(scope)
-        # CAS before token (contract C2, D-R10-2)
-        if request.expected_revision != current.revision:
-            self._raise(op, "version_conflict", {"current_snapshot": current.to_wire()})
-        if request.hidden_preservation_state != current.hidden_preservation_state:
-            self._raise(op, "invalid_request", None)
-        # delta IDs are confined to the exact snapshot (§9.3 L1293)
+        if any(_scope_key(s) not in eligible_keys for s in reset_scopes):
+            self._raise(op, "unauthorized_scope", None)
+        return reset_scopes
+
+    def _resolve_delta(self, op: str, request: w.StageRequest, current: w.CuratedSnapshot) -> Tuple[Dict[str, str], Tuple[str, ...], Tuple[w.ScopeRef, ...]]:
+        """Delta IDs are confined to the exact snapshot (§9.3 L1293).
+
+        Returns the replacement-to-superseded map, the retired ids, and the
+        scopes the delta touches, in delta order.
+        """
         by_id = {e.id: e for e in current.mutation_entries}
         by_ref = {c.client_ref: c for c in request.candidate_entries}
         superseded: Dict[str, str] = {}
         retire_ids: List[str] = []
+        scopes: List[w.ScopeRef] = []
         for item in request.mutation_delta:
             if item.action == "add":
-                touch(by_ref[item.client_ref].destination_scope)
+                scopes.append(by_ref[item.client_ref].destination_scope)
                 continue
             old_id = item.record_id if item.action == "retire" else item.old_record_id if item.action == "supersede" else None
             if old_id is None:
@@ -857,26 +888,38 @@ class FakeAuthoritativeBackend:
                     self._raise(op, "invalid_request", None)
                 superseded[item.replacement_client_ref] = old_id
             retire_ids.append(old_id)
-            touch(old.origin_scope)
-        # reset: mechanically enumerate hidden state, body-free (§9.3 L1293)
-        hidden_retire_ids: List[str] = []
-        hidden_effects: List[w.HiddenEffect] = []
-        if reset_scopes:
-            reset_keys = {_scope_key(s) for s in reset_scopes}
-            counts: Dict[Tuple[Any, ...], int] = {}
-            for record in self._epoch_records():
-                if record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
-                    continue
-                if record.hidden:
-                    hidden_retire_ids.append(record.id)
-                    group = (record.origin_scope, record.record_channel, record.lane)
-                    counts[group] = counts.get(group, 0) + 1
-                else:
-                    retire_ids.append(record.id)
-            order = {_scope_key(s): i for i, s in enumerate(reset_scopes)}
-            for scope, channel, lane in sorted(counts, key=lambda g: (order[_scope_key(g[0])], g[1], g[2])):
-                hidden_effects.append(w.HiddenEffect(scope=scope, target=target, record_channel=channel, lane=lane, action="retire", count=counts[(scope, channel, lane)]))
-        # admissions: one decision per candidate
+            scopes.append(old.origin_scope)
+        return superseded, tuple(retire_ids), tuple(scopes)
+
+    def _enumerate_reset(self, target: str, reset_scopes: Tuple[w.ScopeRef, ...]) -> Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[w.HiddenEffect, ...]]:
+        """Reset mechanically enumerates hidden state, body-free (§9.3 L1293).
+
+        Returns the visible ids, the hidden ids, and the per-group hidden effects.
+        """
+        if not reset_scopes:
+            return (), (), ()
+        reset_keys = {_scope_key(s) for s in reset_scopes}
+        visible_ids: List[str] = []
+        hidden_ids: List[str] = []
+        counts: Dict[Tuple[Any, ...], int] = {}
+        for record in self._epoch_records():
+            if record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
+                continue
+            if record.hidden:
+                hidden_ids.append(record.id)
+                group = (record.origin_scope, record.record_channel, record.lane)
+                counts[group] = counts.get(group, 0) + 1
+            else:
+                visible_ids.append(record.id)
+        order = {_scope_key(s): i for i, s in enumerate(reset_scopes)}
+        groups = sorted(counts, key=lambda g: (order[_scope_key(g[0])], g[1], g[2]))
+        effects = tuple(w.HiddenEffect(scope=scope, target=target, record_channel=channel, lane=lane, action="retire", count=counts[(scope, channel, lane)]) for scope, channel, lane in groups)
+        return tuple(visible_ids), tuple(hidden_ids), effects
+
+    def _admit(self, op: str, request: w.StageRequest, handle: HandleRecord, superseded: Dict[str, str]) -> Tuple[Tuple[w.AdmissionDecision, ...], Tuple[w.CandidateHash, ...]]:
+        """One admission decision per candidate."""
+        store = self._store
+        target = request.target
         admissions: List[w.AdmissionDecision] = []
         hashes: List[w.CandidateHash] = []
         new_import_tuples: set = set()
@@ -906,31 +949,20 @@ class FakeAuthoritativeBackend:
             else:
                 policy_key = cand.proposed_policy_key
             admissions.append(w.AdmissionDecision(client_ref=cand.client_ref, assigned_id=assigned, target=target, record_channel=_CHANNEL[target], origin_scope=cand.destination_scope, disposition=disposition, publication_effect=effect, superseded_id=old_id, policy_key=policy_key))
-        if tuple(affected) != request.requested_write_scopes:
-            self._raise(op, "invalid_request", None)
-        # approval requirements, mechanically and in §9.3 L1326 order
+        return tuple(admissions), tuple(hashes)
+
+    @staticmethod
+    def _approval_requirements(request: w.StageRequest, affected: Tuple[w.ScopeRef, ...], default: Optional[w.ScopeRef]) -> Tuple[str, ...]:
+        """Approval requirements, mechanically and in §9.3 L1326 order."""
         requirements: List[str] = []
-        if target == "user":
+        if request.target == "user":
             requirements.append("target_user")
         if any(scope != default for scope in affected):
             requirements.append("non_default_scope")
-        for kind in ("bulk_edit", "reset", "import"):
-            if request.intent.kind == kind:
-                requirements.append(kind)
+        requirements.extend(kind for kind in ("bulk_edit", "reset", "import") if request.intent.kind == kind)
         if request.provenance.threat_decision_id is not None:
             requirements.append("threat")
-        expires_at = store.clock.now() + timedelta(seconds=limits.stage_ttl_seconds)
-        stage_handle = _b64url(secrets.token_bytes(32))
-        unsigned = w.StageResult(stage_handle_b64url=stage_handle, request_id=request.request_id, target=target, expected_revision=request.expected_revision, requested_write_scopes=request.requested_write_scopes, eligible_write_scopes=eligible, expires_at=timestamp(expires_at), approval_binding_sha256="0" * 64, approval_requirements=tuple(requirements), candidate_hashes=tuple(hashes), admissions=tuple(admissions), hidden_effects=tuple(hidden_effects))
-        result = replace(unsigned, approval_binding_sha256=approval_binding_sha256(unsigned, request))
-        # persist: the one point where request_id-keyed state is written (ruling R36-L)
-        if store._stage_persistence_failures > 0:
-            store._stage_persistence_failures -= 1
-            self._raise(op, APPROVAL_STORE_FAILURE_CODE, None)
-        store.stages[stage_handle] = Stage(handle=handle.identity.opaque_binding_b64url, request=request, result=result, fingerprint=fingerprint_digest, expires_at=expires_at, base_snapshot=current, identity=request.frozen_identity, retire_ids=tuple(retire_ids), hidden_retire_ids=tuple(hidden_retire_ids), affected_scopes=tuple(affected))
-        store.stage_by_request[key] = StagedRequest(fingerprint=fingerprint_digest, stage_handle=stage_handle, result=result)
-        self._fault_during(op)
-        return result
+        return tuple(requirements)
 
     def _import_tuple(self, handle: HandleRecord, cand: w.CandidateEntry, sha: str) -> Tuple[Any, ...]:
         """§9.3 L1335 uniqueness tuple."""
