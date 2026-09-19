@@ -344,6 +344,32 @@ def test_requests_and_results_are_strictly_decoded():
     assert _bind(backend, "sess-3").user_write_scope == PG  # the corruption was consumed
 
 
+@pytest.mark.parametrize("script", [
+    lambda s: s.fail_transport("load_curate"),
+    lambda s: s.fail_transport("load_curated", phase="during"),
+    lambda s: s.fail_typed("recall", "unavailable"),
+    lambda s: s.corrupt_result("bind", drop_key("user_write_scope")),
+    lambda s: s.envelope_epoch_override("validate", "ep-2"),
+], ids=["unknown-transport-op", "during-without-durable-write", "unknown-typed-op", "unknown-corruption-op", "unknown-override-op"])
+def test_faults_the_fake_can_never_fire_are_refused_when_scripted(script):
+    """A fault queued under a name no call consumes would let a failure test pass vacuously."""
+    with pytest.raises(ValueError):
+        script(_store())
+
+
+def test_an_undecodable_reply_consumes_its_whole_fault_plan():
+    """A call takes its corruption, envelope epoch and after_publish fault
+    together, so a reply that fails to decode leaves none for the next call."""
+    store, backend, identity = _session()
+    store.corrupt_result("load_curated", drop_key("revision"))
+    store.envelope_epoch_override("load_curated", "ep-other")
+    store.fail_transport("load_curated", phase="after_publish")
+    with pytest.raises(w.WireError, match="revision"):
+        _load(backend, identity)
+    reply = backend.load_curated(w.LoadRequest(expected_provider_epoch="ep-1", frozen_identity=identity, target="memory"))
+    assert reply.provider_epoch == "ep-1"
+
+
 # --- Task 2: load, hidden preservation, revisions, ambiguous_policy ---
 
 

@@ -387,9 +387,18 @@ class FakeProviderStore:
 
     # -- knobs ---------------------------------------------------------------
 
+    @staticmethod
+    def _check_operation(operation: str) -> None:
+        """A fault queued under a name no call consumes would never fire."""
+        if operation not in w.OPERATIONS:
+            raise ValueError(f"unknown operation {operation!r}")
+
     def fail_transport(self, operation: str, reason: str = "timeout", *, times: int = 1, phase: str = "before") -> None:
+        self._check_operation(operation)
         if phase not in ("before", "during", "after_publish"):
             raise ValueError(f"unknown fault phase {phase!r}")
+        if phase == "during" and operation not in MUTATION_OPERATIONS:
+            raise ValueError(f"{operation} makes no durable write for a 'during' fault to follow")
         self._transport_faults.setdefault((operation, phase), []).extend([reason] * times)
 
     def fail_stage_persistence(self, *, times: int = 1) -> None:
@@ -399,12 +408,15 @@ class FakeProviderStore:
         self._receipt_persistence_failures += times
 
     def fail_typed(self, operation: str, code: str, *, outcome: Optional[str] = None, details: Optional[dict] = None, times: int = 1) -> None:
+        self._check_operation(operation)
         self._typed_faults.setdefault(operation, []).extend([(code, outcome, details)] * times)
 
     def corrupt_result(self, operation: str, mutate: Callable[[dict], dict], *, times: int = 1) -> None:
+        self._check_operation(operation)
         self._corruptions.setdefault(operation, []).extend([mutate] * times)
 
     def envelope_epoch_override(self, operation: str, epoch: str, *, times: int = 1) -> None:
+        self._check_operation(operation)
         self._epoch_overrides.setdefault(operation, []).extend([epoch] * times)
 
     def set_epoch(self, new_epoch: str) -> None:
@@ -546,8 +558,9 @@ class FakeAuthoritativeBackend:
 
     Operation order inside every call: ``_receive`` (strict decode, record the
     call) → scripted transport (``before``) or typed fault → epoch check →
-    handle check (contract C7 order) → operation body → ``_send`` (strict
-    re-decode, optional corruption, envelope epoch, ``after_publish`` fault).
+    handle check (contract C7 order) → operation body → ``_send`` (take the
+    reply-side faults, apply any corruption, strictly re-decode, then raise the
+    ``after_publish`` fault or return under the scripted envelope epoch).
     Everything up to and including the body runs under ``store.lock``.
     """
 
@@ -632,13 +645,15 @@ class FakeAuthoritativeBackend:
 
     def _send(self, operation: str, result: Any) -> ProviderResult:
         store = self._store
-        encoded = json.loads(w.canonical_json(result.to_wire()))
+        # Take the whole reply-side plan before decoding, so an undecodable
+        # corruption cannot strand the rest for the next call.
         mutate = store._pop_corruption(operation)
+        override = store._pop_epoch_override(operation)
+        reason = store._pop_transport_fault(operation, "after_publish")
+        encoded = json.loads(w.canonical_json(result.to_wire()))
         if mutate is not None:
             encoded = mutate(encoded)
         decoded = w.RESULT_TYPES[operation].from_wire(encoded, "$.result")
-        override = store._pop_epoch_override(operation)
-        reason = store._pop_transport_fault(operation, "after_publish")
         if reason is not None:
             raise ProviderTransportError(reason=reason, operation=operation, mutation_outcome_unknown=operation in MUTATION_OPERATIONS)
         return ProviderResult(decoded, override if override is not None else store.epoch)
