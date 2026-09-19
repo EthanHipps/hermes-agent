@@ -1250,9 +1250,27 @@ def test_fix_reset_only_retires_current_epoch_records():
     snap = _load(backend, current, epoch="ep-2")
     staged = _stage(backend, _request(current, snap, epoch="ep-2", intent=w.MutationIntent(kind="reset", reset_scopes=(REPO,)), candidates=(), delta=(), scopes=(REPO,)))
     assert staged.hidden_effects == (w.HiddenEffect(scope=REPO, target="memory", record_channel="hermes_memory", lane="raw", action="retire", count=1),)
-    _commit(backend, current, staged, epoch="ep-2", authorization=_approved(staged))
+    committed = _commit(backend, current, staged, epoch="ep-2", authorization=_approved(staged))
     assert store.records[historical_visible.id].lifecycle == store.records[historical_raw.id].lifecycle == "active"
     assert store.records[current_visible.id].lifecycle == store.records[current_raw.id].lifecycle == "retired"
+    assert committed.snapshot.mutation_entries == () and committed.snapshot.delivery_entries == ()
+
+
+def test_older_epoch_records_are_absent_from_every_new_epoch_view():
+    """An epoch change leaves records it did not re-acknowledge out of the new
+    epoch, so they reach no snapshot, recall, or mutation delta."""
+    store, backend, old = _session()
+    historical = store.seed_record(REPO, "memory", "historical note")
+    store.set_epoch("ep-2")
+    identity = _bind(backend, intent="explicit_rebind", prior=old, epoch="ep-2").frozen_identity
+    current = store.seed_record(REPO, "memory", "current note")
+    snap = _load(backend, identity, epoch="ep-2")
+    assert [e.id for e in snap.mutation_entries] == [e.id for e in snap.delivery_entries] == [current.id]
+    recalled = _recall(backend, identity, snap, epoch="ep-2")
+    assert [e.id for e in recalled.trusted_instructions + recalled.scoped_evidence] == [current.id]
+    with pytest.raises(ProviderError) as exc:
+        _stage(backend, _request(identity, snap, epoch="ep-2", intent=w.MutationIntent(kind="remove", matched_entry_id=historical.id), candidates=(), delta=(w.MutationDeltaItem(action="retire", record_id=historical.id),), scopes=(REPO,)))
+    assert exc.value.code == "invalid_request"
 
 
 @pytest.mark.parametrize("source_kind,parser_version", [("native_memory", "hermes-native-v0.20.6"), ("legacy_archive", "hermes-legacy-archive-v1")])

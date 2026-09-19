@@ -731,15 +731,20 @@ class FakeAuthoritativeBackend:
     def _delivered(record: FakeRecord) -> w.DeliveredEntry:
         return w.DeliveredEntry(id=record.id, text=record.text, origin_scope=record.origin_scope, target=record.target, record_channel=record.record_channel, lane=record.lane, delivery_tier=record.origin_scope.kind, policy_key=record.policy_key, provenance=record.provenance)
 
+    def _epoch_records(self) -> List[FakeRecord]:
+        """Records the current epoch acknowledges; an epoch change leaves the rest out of every view."""
+        epoch = self._store.epoch
+        return [r for r in self._store.records.values() if r.epoch == epoch]
+
     def _mutation_records(self, handle: HandleRecord, target: str) -> List[FakeRecord]:
         _, visible, _, eligible = self._scopes_for(handle, target)
         channel = _CHANNEL[target]
         addressable = {_scope_key(s) for s in eligible}
-        return self._ordered([r for r in self._store.records.values() if r.record_channel == channel and not r.hidden and _scope_key(r.origin_scope) in addressable], visible)
+        return self._ordered([r for r in self._epoch_records() if r.record_channel == channel and not r.hidden and _scope_key(r.origin_scope) in addressable], visible)
 
     def _delivery_records(self, handle: HandleRecord, target: str) -> List[FakeRecord]:
         _, visible, _, _ = self._scopes_for(handle, target)
-        active = [r for r in self._store.records.values() if not r.hidden]
+        active = [r for r in self._epoch_records() if not r.hidden]
         if target == "memory":
             general = self._ordered([r for r in active if r.record_channel == "general"], visible)
             return general + self._ordered([r for r in active if r.record_channel == "hermes_memory"], visible)
@@ -856,8 +861,8 @@ class FakeAuthoritativeBackend:
         if reset_scopes:
             reset_keys = {_scope_key(s) for s in reset_scopes}
             counts: Dict[Tuple[Any, ...], int] = {}
-            for record in store.records.values():
-                if record.epoch != store.epoch or record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
+            for record in self._epoch_records():
+                if record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
                     continue
                 if record.hidden:
                     hidden_retire_ids.append(record.id)
@@ -1084,7 +1089,7 @@ class FakeAuthoritativeBackend:
         channels = set(request.include_channels)
         excluded = set(request.exclude_entry_ids)
         needle = request.query.lower()
-        matches = sorted((r for r in store.records.values() if not r.hidden and r.record_channel in channels and _scope_key(r.origin_scope) in visible_keys and r.id not in excluded and (needle == "" or needle in r.text.lower())), key=lambda r: r.id)
+        matches = sorted((r for r in self._epoch_records() if not r.hidden and r.record_channel in channels and _scope_key(r.origin_scope) in visible_keys and r.id not in excluded and (needle == "" or needle in r.text.lower())), key=lambda r: r.id)
         budget = request.budget
         trusted: List[w.DeliveredEntry] = []
         evidence: List[w.DeliveredEntry] = []
