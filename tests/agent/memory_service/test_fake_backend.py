@@ -20,7 +20,6 @@ from tests.agent.memory_service.fake_backend import (
     COMMIT_SCOPE_MISMATCH_CODE,
     DEFAULT_CURATED_LIMITS,
     DEFAULT_LIMITS,
-    EPOCH_BINDING_OUTCOME_ON_MUTATION,
     FakeAuthoritativeBackend,
     FakeClock,
     FakeProviderStore,
@@ -260,7 +259,7 @@ def test_registry_change_revokes_known_handles_on_older_revisions():
     stage = w.StageRequest(expected_provider_epoch="ep-1", frozen_identity=old, target="memory", expected_revision=revision, hidden_preservation_state=hidden, request_id="r1", requested_write_scopes=(REPO,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text="x", destination_scope=REPO, target="memory", proposed_policy_key=None, import_source_identity=None),), provenance=PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         backend.stage_curated(stage)
-    assert exc.value.code == "binding_revoked" and exc.value.outcome == EPOCH_BINDING_OUTCOME_ON_MUTATION
+    assert exc.value.code == "binding_revoked" and exc.value.outcome == "not_committed"
     unknown = replace(old, opaque_binding_b64url=base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode())
     with pytest.raises(ProviderError) as exc:
         _validate(backend, unknown)
@@ -296,10 +295,10 @@ def test_epoch_change_is_typed_with_details_and_voids_state():
     stage = w.StageRequest(expected_provider_epoch="ep-1", frozen_identity=old, target="memory", expected_revision=revision, hidden_preservation_state=hidden, request_id="r1", requested_write_scopes=(REPO,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text="x", destination_scope=REPO, target="memory", proposed_policy_key=None, import_source_identity=None),), provenance=PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         backend.stage_curated(stage)
-    assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == EPOCH_BINDING_OUTCOME_ON_MUTATION and exc.value.details == expected_details
+    assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == "not_committed" and exc.value.details == expected_details
     with pytest.raises(ProviderError) as exc:
         backend.commit_curated(_commit_request(old, epoch="ep-1"))
-    assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == EPOCH_BINDING_OUTCOME_ON_MUTATION
+    assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == "not_committed"
     with pytest.raises(ProviderError) as exc:
         _bind(backend, "sess-2", epoch="ep-1")
     assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == "not_applicable"

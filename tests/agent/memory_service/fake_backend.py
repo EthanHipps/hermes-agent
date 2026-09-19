@@ -41,7 +41,7 @@ import hashlib
 import json
 import secrets
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -50,15 +50,8 @@ from agent.memory_service.backend import ProviderResult
 from agent.memory_service.errors import ProviderError, ProviderTransportError
 
 MUTATION_OPERATIONS = ("stage_curated", "commit_curated")
-#: Ruling R36-E: provider_epoch_changed / binding_* on a stage or commit that
-#: published nothing carry not_committed (§9.3 L1020 is per-operation).
-EPOCH_BINDING_OUTCOME_ON_MUTATION = "not_committed"
 #: Ruling R36-F: authorized_write_scopes differs from the staged requested set.
 COMMIT_SCOPE_MISMATCH_CODE = "unauthorized_scope"
-#: Ruling R36-H: store_blocked refuses stage and a first commit only.
-SERVE_READS_WHILE_BLOCKED = True
-#: Ruling R36-J: the import-source tuple index is modelled minimally.
-ENABLE_IMPORT_SOURCE_INDEX = True
 #: Ruling R36-L: a failure of the store that holds staged bytes and receipts
 #: (§9.5 L1539) is stage_integrity_error, the one v1 code naming stage-store
 #: integrity; outcome is not_committed because nothing was published.
@@ -189,13 +182,12 @@ class FakeRegistry:
     at an older revision is ``binding_revoked`` on its next validation.
     """
 
-    def __init__(self, principal_id: str = "ethan", owner_principal_id: Optional[str] = None, directories: Optional[Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]]] = None, projects: Optional[Dict[str, Optional[str]]] = None, workspaces: Optional[Dict[str, Tuple[str, Optional[str], Optional[str], Optional[str]]]] = None, grants: Tuple[Any, ...] = ()) -> None:
+    def __init__(self, principal_id: str = "ethan", owner_principal_id: Optional[str] = None, directories: Optional[Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]]] = None, projects: Optional[Dict[str, Optional[str]]] = None, workspaces: Optional[Dict[str, Tuple[str, Optional[str], Optional[str], Optional[str]]]] = None) -> None:
         self.principal_id = principal_id
         self.owner_principal_id = owner_principal_id or principal_id
         self.directories = dict(directories) if directories is not None else {"C:\\work\\repo": ("repo-1", "proj-1", None)}
         self.projects = dict(projects) if projects is not None else {"proj-1": None}
         self.workspaces = dict(workspaces) if workspaces is not None else {}
-        self.grants = tuple(grants)
         self._revision = 1
 
     @property
@@ -327,13 +319,10 @@ class StagedRequest:
 
 @dataclass
 class Receipt:
-    handle: str
     stage_handle: str
     fingerprint: bytes  # commit request fingerprint
     tx_id: str
     admissions: Tuple[w.AdmissionDecision, ...]
-    identity: w.FrozenIdentityWire
-    stage_result: w.StageResult
     target: str
 
 
@@ -371,7 +360,6 @@ class FakeProviderStore:
         self.continuity: Dict[Tuple[str, str], ContinuityBuffer] = {}
         self.continuity_directory_bytes: Optional[int] = None
         self.import_index: Dict[Tuple[Any, ...], str] = {}
-        self.import_acknowledgements: List[Tuple[str, str]] = []  # (tx_id, assigned_id), body-free
         self.store_state = "normal"
         self.policy_conflicts: Dict[str, int] = {}
         self.events: List[Tuple[str, str, bool]] = []
@@ -898,7 +886,7 @@ class FakeAuthoritativeBackend:
             disposition = store.admission_classifier(cand) if store.admission_classifier else _DEFAULT_DISPOSITION[target]
             effect = "create_record"
             assigned = "r" + secrets.token_hex(12)
-            if request.intent.kind == "import" and ENABLE_IMPORT_SOURCE_INDEX:
+            if request.intent.kind == "import":
                 import_tuple = self._import_tuple(handle, cand, sha)
                 reused = store.import_index.get(import_tuple)
                 if reused is not None:
@@ -1079,17 +1067,16 @@ class FakeAuthoritativeBackend:
         provenance = self._accepted_provenance(request, tx_id)
         for admission in result.admissions:
             if admission.publication_effect == "reuse_existing_import":
-                store.import_acknowledgements.append((tx_id, admission.assigned_id))
                 continue
             cand = by_ref[admission.client_ref]
             lane = "raw" if admission.disposition == "withheld_raw" else admission.disposition
             store.records[admission.assigned_id] = FakeRecord(id=admission.assigned_id, text=cand.text, target=admission.target, record_channel=admission.record_channel, lane=lane, lifecycle="active", origin_scope=admission.origin_scope, policy_key=admission.policy_key, provenance=provenance, epoch=store.epoch)
-            if request.intent.kind == "import" and ENABLE_IMPORT_SOURCE_INDEX:
+            if request.intent.kind == "import":
                 sha = next(h.canonical_sha256 for h in result.candidate_hashes if h.client_ref == admission.client_ref)
                 store.import_index[self._import_tuple(store.handles[stage.handle], cand, sha)] = admission.assigned_id
         for scope in stage.affected_scopes:
             store._bump(scope)
-        store.receipts[(store.epoch, request.request_id)] = Receipt(handle=stage.handle, stage_handle=result.stage_handle_b64url, fingerprint=commit_fingerprint, tx_id=tx_id, admissions=result.admissions, identity=stage.identity, stage_result=result, target=request.target)
+        store.receipts[(store.epoch, request.request_id)] = Receipt(stage_handle=result.stage_handle_b64url, fingerprint=commit_fingerprint, tx_id=tx_id, admissions=result.admissions, target=request.target)
         del store.stages[result.stage_handle_b64url]
 
     def _do_recall(self, request: w.RecallRequest, handle: HandleRecord) -> w.TypedRecall:
@@ -1162,10 +1149,7 @@ __all__ = [
     "CONTINUITY_TTL_SECONDS",
     "DEFAULT_CURATED_LIMITS",
     "DEFAULT_LIMITS",
-    "ENABLE_IMPORT_SOURCE_INDEX",
-    "EPOCH_BINDING_OUTCOME_ON_MUTATION",
     "MUTATION_OPERATIONS",
-    "SERVE_READS_WHILE_BLOCKED",
     "ContinuityBuffer",
     "FakeAuthoritativeBackend",
     "FakeClock",

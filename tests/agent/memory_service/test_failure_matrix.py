@@ -649,7 +649,7 @@ def test_row14_envelope_epoch_change_latches_the_same_way(tmp_path):
 def test_row15_fail_closed_session_resumes_on_the_same_binding(tmp_path):
     store = _store()
     service, factory = _select(tmp_path, store)
-    snap = service.load_curated("memory")
+    service.load_curated("memory")
     store.fail_transport("load_curated", times=2)
     for _ in range(2):
         with pytest.raises(MemoryBlockedError):
