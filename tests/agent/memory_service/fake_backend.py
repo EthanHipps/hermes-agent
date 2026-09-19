@@ -274,6 +274,7 @@ class FakeRegistry:
 @dataclass
 class HandleRecord:
     identity: w.FrozenIdentityWire
+    epoch: str
     visible_scopes: Tuple[w.ScopeRef, ...]
     default_scope: Optional[w.ScopeRef]
     eligible_scopes: Tuple[w.ScopeRef, ...]
@@ -662,7 +663,7 @@ class FakeAuthoritativeBackend:
         record = self._store.handles.get(identity.opaque_binding_b64url)
         if record is None or record.identity != identity:
             self._raise(operation, "binding_invalid", None)
-        if record.revoked or record.binding_revision != self._store.registry.revision:
+        if record.revoked or record.epoch != self._store.epoch or record.binding_revision != self._store.registry.revision:
             self._raise(operation, "binding_revoked", None)
         return record
 
@@ -691,7 +692,7 @@ class FakeAuthoritativeBackend:
         ctx = request.requested_context
         handle = _b64url(secrets.token_bytes(32))
         identity = w.FrozenIdentityWire(provider=self.provider, provider_mode="authoritative", principal_id=ctx.principal_id, profile_id=ctx.profile_id, logical_session_id=ctx.logical_session_id, org_id=resolved.org_id, project_id=resolved.project_id, repo_id=resolved.repo_id, workspace_id=resolved.workspace_id, platform=ctx.platform, binding_revision=store.registry.revision, opaque_binding_b64url=handle)
-        store.handles[handle] = HandleRecord(identity=identity, visible_scopes=resolved.visible_scopes, default_scope=resolved.default_scope, eligible_scopes=resolved.eligible_scopes, user_scope=resolved.user_scope, revoked=False, degraded=resolved.degraded, binding_revision=store.registry.revision)
+        store.handles[handle] = HandleRecord(identity=identity, epoch=store.epoch, visible_scopes=resolved.visible_scopes, default_scope=resolved.default_scope, eligible_scopes=resolved.eligible_scopes, user_scope=resolved.user_scope, revoked=False, degraded=resolved.degraded, binding_revision=store.registry.revision)
         result = w.BindResult(frozen_identity=identity, visible_scopes=resolved.visible_scopes, memory_default_write_scope=resolved.default_scope, memory_eligible_write_scopes=resolved.eligible_scopes, user_write_scope=resolved.user_scope)
         store.bind_receipts[(store.epoch, request.binding_request_id)] = (fingerprint, result)
         return result
@@ -780,12 +781,13 @@ class FakeAuthoritativeBackend:
         store._expire_stages()
         key = (store.epoch, request.request_id)
         fingerprint = w.canonical_json(request.to_wire())
+        fingerprint_digest = hashlib.sha256(fingerprint).digest()
         # replay lookup by (epoch, request_id): reads only, writes nothing
         if key in store.tombstones:
             self._raise(op, "stage_expired", None)
         staged = store.stage_by_request.get(key)
         if staged is not None:
-            if staged.fingerprint != fingerprint:
+            if staged.fingerprint != fingerprint_digest:
                 self._raise(op, "idempotency_mismatch", None)
             return staged.result
         if store.store_state != "normal":
@@ -817,7 +819,6 @@ class FakeAuthoritativeBackend:
         for cand in request.candidate_entries:
             if _scope_key(cand.destination_scope) not in eligible_keys:
                 self._raise(op, "unauthorized_scope", None)
-            touch(cand.destination_scope)
         reset_scopes = tuple(request.intent.reset_scopes or ()) if request.intent.kind == "reset" else ()
         for scope in reset_scopes:
             if _scope_key(scope) not in eligible_keys:
@@ -834,6 +835,9 @@ class FakeAuthoritativeBackend:
         superseded: Dict[str, str] = {}
         retire_ids: List[str] = []
         for item in request.mutation_delta:
+            if item.action == "add":
+                touch(by_ref[item.client_ref].destination_scope)
+                continue
             old_id = item.record_id if item.action == "retire" else item.old_record_id if item.action == "supersede" else None
             if old_id is None:
                 continue
@@ -853,7 +857,7 @@ class FakeAuthoritativeBackend:
             reset_keys = {_scope_key(s) for s in reset_scopes}
             counts: Dict[Tuple[Any, ...], int] = {}
             for record in store.records.values():
-                if record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
+                if record.epoch != store.epoch or record.target != target or record.lifecycle == "retired" or _scope_key(record.origin_scope) not in reset_keys:
                     continue
                 if record.hidden:
                     hidden_retire_ids.append(record.id)
@@ -867,6 +871,7 @@ class FakeAuthoritativeBackend:
         # admissions: one decision per candidate
         admissions: List[w.AdmissionDecision] = []
         hashes: List[w.CandidateHash] = []
+        new_import_tuples: set = set()
         for cand in request.candidate_entries:
             sha = hashlib.sha256(cand.text.encode("utf-8")).hexdigest()
             hashes.append(w.CandidateHash(client_ref=cand.client_ref, canonical_sha256=sha))
@@ -874,10 +879,17 @@ class FakeAuthoritativeBackend:
             effect = "create_record"
             assigned = "r" + secrets.token_hex(12)
             if request.intent.kind == "import" and ENABLE_IMPORT_SOURCE_INDEX:
-                reused = store.import_index.get(self._import_tuple(handle, cand, sha))
+                import_tuple = self._import_tuple(handle, cand, sha)
+                reused = store.import_index.get(import_tuple)
                 if reused is not None:
                     effect, assigned = "reuse_existing_import", reused
+                elif import_tuple in new_import_tuples:
+                    self._raise(op, "invalid_request", None)
+                else:
+                    new_import_tuples.add(import_tuple)
             old_id = superseded.get(cand.client_ref)
+            if target == "user" and old_id is None and cand.proposed_policy_key is not None:
+                self._raise(op, "invalid_request", None)
             if disposition == "withheld_raw":
                 policy_key = None
             elif target == "user":
@@ -886,6 +898,8 @@ class FakeAuthoritativeBackend:
             else:
                 policy_key = cand.proposed_policy_key
             admissions.append(w.AdmissionDecision(client_ref=cand.client_ref, assigned_id=assigned, target=target, record_channel=_CHANNEL[target], origin_scope=cand.destination_scope, disposition=disposition, publication_effect=effect, superseded_id=old_id, policy_key=policy_key))
+        if tuple(affected) != request.requested_write_scopes:
+            self._raise(op, "invalid_request", None)
         # approval requirements, mechanically and in §9.3 L1326 order
         requirements: List[str] = []
         if target == "user":
@@ -905,8 +919,8 @@ class FakeAuthoritativeBackend:
         if store._stage_persistence_failures > 0:
             store._stage_persistence_failures -= 1
             self._raise(op, APPROVAL_STORE_FAILURE_CODE, None)
-        store.stages[stage_handle] = Stage(handle=handle.identity.opaque_binding_b64url, request=request, result=result, fingerprint=fingerprint, expires_at=expires_at, base_snapshot=current, identity=request.frozen_identity, retire_ids=tuple(retire_ids), hidden_retire_ids=tuple(hidden_retire_ids), affected_scopes=tuple(affected))
-        store.stage_by_request[key] = StagedRequest(fingerprint=fingerprint, stage_handle=stage_handle, result=result)
+        store.stages[stage_handle] = Stage(handle=handle.identity.opaque_binding_b64url, request=request, result=result, fingerprint=fingerprint_digest, expires_at=expires_at, base_snapshot=current, identity=request.frozen_identity, retire_ids=tuple(retire_ids), hidden_retire_ids=tuple(hidden_retire_ids), affected_scopes=tuple(affected))
+        store.stage_by_request[key] = StagedRequest(fingerprint=fingerprint_digest, stage_handle=stage_handle, result=result)
         self._fault_during(op)
         return result
 

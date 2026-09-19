@@ -669,10 +669,10 @@ def test_eligibility_and_scope_rules():
     with pytest.raises(ProviderError) as exc:
         _stage(backend, _request(identity, user, request_id="r3", target="user", candidates=(_candidate("c1", "y", REPO, target="user"),)))
     assert exc.value.code == "unauthorized_scope"
-    # requested_write_scopes grants nothing (§9.3 L1289): the fake computes eligibility itself and echoes the field
-    odd = _stage(backend, _request(identity, memory, request_id="r4", candidates=(_candidate("c1", "z", REPO),), scopes=(REPO, PROJ)))
-    assert list(odd.requested_write_scopes) == [REPO, PROJ] and odd.admissions[0].origin_scope == REPO
-    assert store.stage_state("r4") == "live"
+    # Stage scopes must name exactly the ordered affected set.
+    with pytest.raises(ProviderError) as exc:
+        _stage(backend, _request(identity, memory, request_id="r4", candidates=(_candidate("c1", "z", REPO),), scopes=(REPO, PROJ)))
+    assert exc.value.code == "invalid_request" and store.stage_state("r4") == "absent"
     degraded = _bind(backend, "sess-deg", context=_context("sess-deg", resolution_source="explicit_ids", canonical_directory=None)).frozen_identity
     degraded_snap = _load(backend, degraded)
     with pytest.raises(ProviderError) as exc:
@@ -1226,6 +1226,114 @@ def test_reset_commit_retires_hidden_and_visible_atomically():
     assert [e.id for e in committed.snapshot.mutation_entries] == [project.id]
     text = w.canonical_json(committed.to_wire()).decode()
     assert raw.text not in text and superseded.text not in text and visible.text not in text
+
+
+def test_fix_old_epoch_handle_requires_explicit_rebind():
+    store, backend, old = _session()
+    store.set_epoch("ep-2")
+    for operation in (lambda: _validate(backend, old, epoch="ep-2"), lambda: _load(backend, old, epoch="ep-2")):
+        with pytest.raises(ProviderError) as exc:
+            operation()
+        assert exc.value.code == "binding_revoked"
+    rebound = _bind(backend, intent="explicit_rebind", prior=old, epoch="ep-2")
+    assert _validate(backend, rebound.frozen_identity, epoch="ep-2").valid
+
+
+def test_fix_reset_only_retires_current_epoch_records():
+    store, backend, old = _session()
+    historical_visible = store.seed_record(REPO, "memory", "historical visible")
+    historical_raw = store.seed_record(REPO, "memory", "historical raw", lane="raw")
+    store.set_epoch("ep-2")
+    current = _bind(backend, intent="explicit_rebind", prior=old, epoch="ep-2").frozen_identity
+    current_visible = store.seed_record(REPO, "memory", "current visible")
+    current_raw = store.seed_record(REPO, "memory", "current raw", lane="raw")
+    snap = _load(backend, current, epoch="ep-2")
+    staged = _stage(backend, _request(current, snap, epoch="ep-2", intent=w.MutationIntent(kind="reset", reset_scopes=(REPO,)), candidates=(), delta=(), scopes=(REPO,)))
+    assert staged.hidden_effects == (w.HiddenEffect(scope=REPO, target="memory", record_channel="hermes_memory", lane="raw", action="retire", count=1),)
+    _commit(backend, current, staged, epoch="ep-2", authorization=_approved(staged))
+    assert store.records[historical_visible.id].lifecycle == store.records[historical_raw.id].lifecycle == "active"
+    assert store.records[current_visible.id].lifecycle == store.records[current_raw.id].lifecycle == "retired"
+
+
+@pytest.mark.parametrize("source_kind,parser_version", [("native_memory", "hermes-native-v0.20.6"), ("legacy_archive", "hermes-legacy-archive-v1")])
+def test_fix_duplicate_new_import_tuple_rejected_before_persistence(source_kind, parser_version):
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    source = w.ImportSourceIdentity(source_kind=source_kind, parser_version=parser_version, source_id="legacy", item_key="item-1")
+    candidates = (_candidate("c1", "same body", REPO, import_identity=source), _candidate("c2", "same body", REPO, import_identity=source))
+    request = _request(identity, snap, intent=w.MutationIntent(kind="import", import_run_id="run-1", source_kind=source_kind), candidates=candidates)
+    with pytest.raises(ProviderError) as exc:
+        _stage(backend, request)
+    assert exc.value.code == "invalid_request" and exc.value.outcome == "not_committed"
+    assert store.stage_state("r1") == "absent" and store.stages == {} and store.import_index == {}
+
+
+def test_fix_duplicate_already_accepted_import_reuses_original_id():
+    store, backend, identity = _session()
+    source = w.ImportSourceIdentity(source_kind="native_memory", parser_version="hermes-native-v0.20.6", source_id="legacy", item_key="item-1")
+    snap = _load(backend, identity)
+    first = _stage(backend, _request(identity, snap, intent=w.MutationIntent(kind="import", import_run_id="run-1", source_kind="native_memory"), candidates=(_candidate("c1", "accepted body", REPO, import_identity=source),)))
+    original = first.admissions[0].assigned_id
+    _commit(backend, identity, first, authorization=_approved(first))
+    fresh = _load(backend, identity)
+    candidates = (_candidate("c2", "accepted body", REPO, import_identity=source), _candidate("c3", "accepted body", REPO, import_identity=source))
+    reused = _stage(backend, _request(identity, fresh, request_id="r2", intent=w.MutationIntent(kind="import", import_run_id="run-2", source_kind="native_memory"), candidates=candidates))
+    assert [(a.client_ref, a.assigned_id, a.publication_effect) for a in reused.admissions] == [("c2", original, "reuse_existing_import"), ("c3", original, "reuse_existing_import")]
+    _commit(backend, identity, reused, authorization=_approved(reused))
+    assert list(store.records) == [original]
+
+
+@pytest.mark.parametrize("kind", ["add", "import"])
+def test_fix_new_user_policy_proposal_is_rejected(kind):
+    store, backend, identity = _session()
+    snap = _load(backend, identity, "user")
+    source = w.ImportSourceIdentity(source_kind="native_memory", parser_version="hermes-native-v0.20.6", source_id="legacy", item_key="item-1") if kind == "import" else None
+    intent = w.MutationIntent(kind="import", import_run_id="run-1", source_kind="native_memory") if kind == "import" else w.MutationIntent(kind="add")
+    request = _request(identity, snap, target="user", intent=intent, candidates=(_candidate("c1", "new slot", PG, target="user", policy_key="profile:chosen", import_identity=source),))
+    with pytest.raises(ProviderError) as exc:
+        _stage(backend, request)
+    assert exc.value.code == "invalid_request" and store.stage_state("r1") == "absent"
+
+
+def test_fix_user_replacement_can_change_policy_key():
+    store, backend, identity = _session()
+    old = store.seed_record(PG, "user", "old profile", lane="trusted_instruction", policy_key="profile:old")
+    snap = _load(backend, identity, "user")
+    delta = (w.MutationDeltaItem(action="supersede", old_record_id=old.id, replacement_client_ref="c1"),)
+    request = _request(identity, snap, target="user", intent=w.MutationIntent(kind="replace", matched_entry_id=old.id), delta=delta, candidates=(_candidate("c1", "replacement", PG, target="user", policy_key="profile:approved"),))
+    staged = _stage(backend, request)
+    assert staged.admissions[0].policy_key == "profile:approved"
+    _commit(backend, identity, staged, authorization=_approved(staged), target="user")
+    assert store.records[staged.admissions[0].assigned_id].policy_key == "profile:approved"
+
+
+def test_fix_stage_scopes_equal_ordered_affected_set():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    candidates = (_candidate("c1", "repository", REPO), _candidate("c2", "project", PROJ))
+    for request_id, scopes in (("missing", (REPO,)), ("reordered", (PROJ, REPO))):
+        with pytest.raises(ProviderError) as exc:
+            _stage(backend, _request(identity, snap, request_id=request_id, intent=w.MutationIntent(kind="bulk_edit"), candidates=candidates, scopes=scopes))
+        assert exc.value.code == "invalid_request" and store.stage_state(request_id) == "absent"
+    exact = _stage(backend, _request(identity, snap, request_id="exact", intent=w.MutationIntent(kind="bulk_edit"), candidates=candidates, scopes=(REPO, PROJ)))
+    assert exact.requested_write_scopes == (REPO, PROJ)
+    reversed_delta = (w.MutationDeltaItem(action="add", client_ref="c2"), w.MutationDeltaItem(action="add", client_ref="c1"))
+    delta_ordered = _stage(backend, _request(identity, snap, request_id="delta-order", intent=w.MutationIntent(kind="bulk_edit"), candidates=candidates, delta=reversed_delta, scopes=(PROJ, REPO)))
+    assert delta_ordered.requested_write_scopes == (PROJ, REPO)
+
+
+def test_fix_committed_replay_metadata_has_no_candidate_body():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    request = _request(identity, snap, candidates=(_candidate("c1", "distinctive candidate body", REPO),))
+    staged = _stage(backend, request)
+    _commit(backend, identity, staged)
+    replay = store.stage_by_request[("ep-1", "r1")]
+    assert b"distinctive candidate body" not in replay.fingerprint and len(replay.fingerprint) == 32
+    assert _stage(backend, request) == staged
+    with pytest.raises(ProviderError) as exc:
+        _stage(backend, replace(request, candidate_entries=(_candidate("c1", "changed candidate body", REPO),)))
+    assert exc.value.code == "idempotency_mismatch"
 
 
 def test_withheld_raw_body_never_returns_and_replacement_reports_supersession():
