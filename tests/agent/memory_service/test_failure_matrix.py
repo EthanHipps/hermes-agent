@@ -176,7 +176,7 @@ def test_row3_startup_failure_blocks_or_starts_stateless(tmp_path, caplog, polic
                 boot()
             backend = factory.backend
             assert backend.shutdown_calls == 1
-            calls = len(backend.calls)
+            assert backend.calls[-1][0] == operation  # startup stopped at the failed call
             return
         service, _ = boot()
     backend = factory.backend

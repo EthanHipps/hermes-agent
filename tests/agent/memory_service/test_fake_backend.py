@@ -1176,6 +1176,20 @@ def test_commit_fault_phases(phase):
     assert [r.text for r in store.records_for(REPO, "memory")] == ["fault body"]
 
 
+def test_stage_reply_lost_after_persistence_replays_the_persisted_stage():
+    store, backend, identity = _session()
+    snap = _load(backend, identity)
+    request = _request(identity, snap, candidates=(_candidate("c1", "lost reply", REPO),))
+    store.fail_transport("stage_curated", reason="crash", phase="during")
+    with pytest.raises(ProviderTransportError) as exc:
+        _stage(backend, request)
+    assert exc.value.mutation_outcome_unknown is True and store.stage_state("r1") == "live"
+    (persisted,) = store.stages
+    retry = _stage(backend, request)
+    assert retry.stage_handle_b64url == persisted and list(store.stages) == [persisted]
+    assert _commit(backend, identity, retry).outcome == "committed_audit_clean"
+
+
 def test_corrupt_commit_reply_is_wire_legal_and_lands():
     """A wire-legal corruption decodes cleanly in the fake; the correlation
     WireError is the service's (authoritative.py _validate_response_correlation)."""

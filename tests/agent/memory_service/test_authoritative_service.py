@@ -668,3 +668,16 @@ def test_recall_identity_loss_still_blocks_mutations_until_rebind(tmp_path, code
     with pytest.raises(MemoryBlockedError, match="rebind"):
         service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, staged.approval_binding_sha256, (REPO,), w.ApprovalAuthorization(kind="not_required")))
     assert len(backend.calls) == calls and backend.entries["memory"] == []
+
+
+def test_recall_is_refused_while_mutations_await_a_fresh_load(tmp_path):
+    """Recall failures no longer set the block, but recall still honours one."""
+    backend = StubBackend(recall=True)
+    service = _select(tmp_path, backend)
+    snapshot = service.load_curated("memory")
+    backend.fail_transport("load_curated")
+    with pytest.raises(MemoryBlockedError):
+        service.load_curated("memory")
+    with pytest.raises(MemoryBlockedError):
+        service.recall_context(RecallQuery("memory", snapshot.revision, "q", ("hermes_memory",), (), w.RecallBudget(0, 3000, 20)))
+    assert backend.count("recall_context") == 0
