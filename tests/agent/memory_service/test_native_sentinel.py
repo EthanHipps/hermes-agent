@@ -128,3 +128,34 @@ def test_realpath_normalizes_a_junction_alias_of_the_watched_directory(tmp_path)
     with native_memory_sentinel(real_dir) as sentinel:
         (link_dir / "MEMORY.md").read_text(encoding="utf-8")
     assert sentinel.accesses, "access via a junction alias of the watched directory went unrecorded"
+
+
+def test_one_access_records_exactly_one_entry(native_dir):
+    """Reentrancy guard: the sentinel must not record its own path resolution."""
+    with native_memory_sentinel(native_dir) as sentinel:
+        (native_dir / "MEMORY.md").exists()
+    assert len(sentinel.accesses) == 1, f"expected 1 record, got {len(sentinel.accesses)}"
+
+
+@pytest.mark.require_symlinks
+def test_realpath_reentrancy_guard_survives_a_dangling_relative_symlink(native_dir):
+    """ntpath.realpath's non-strict fallback (used when _getfinalpathname can't
+    resolve a path, e.g. a dangling symlink) walks
+    _getfinalpathname_nonstrict -> _readlink_deep -> ntpath.islink, and
+    islink() calls os.lstat directly -- exactly the function this module
+    patches. A *relative* dangling symlink forces that fallback: without a
+    reentrancy guard, _covers()'s own realpath() call on that same path
+    re-enters os.lstat -> record() -> _covers() -> realpath() -> ... for the
+    one access below (measured pre-fix on this build: 141 duplicate os.lstat
+    entries under the default recursion limit, not a RecursionError).
+    """
+    link = native_dir / "dangling_link"
+    os.symlink("nonexistent_target.md", str(link))
+    with native_memory_sentinel(native_dir) as sentinel:
+        os.path.realpath(str(link))
+    lstat_records = [a for a in sentinel.accesses if a[0] == "os.lstat"]
+    assert len(lstat_records) == 1, (
+        f"expected exactly 1 os.lstat record for one realpath() call, got "
+        f"{len(lstat_records)} -- realpath's own symlink-resolution internals "
+        f"recorded themselves"
+    )

@@ -37,6 +37,19 @@ preserved (``hermes_cli/profiles.py:1694-1701``, #82581 junction follow-up) --
 ``abspath`` would treat two spellings of the same physical directory as
 unrelated paths and let an access through the other spelling slip the guard.
 
+``realpath`` is reentrant against this module's own guards for a dangling
+*relative* symlink: on Windows, ``ntpath.realpath``'s non-strict fallback
+(taken when ``_getfinalpathname`` cannot resolve the path) walks
+``_getfinalpathname_nonstrict -> _readlink_deep -> ntpath.islink``, and
+``islink()`` calls ``os.lstat`` directly -- exactly the function this module
+patches. Without a guard, one ``os.path.realpath()`` call from inside
+``_covers()`` re-enters ``record()`` for the same path (measured: 141
+duplicate entries for a single access, under the default recursion limit --
+not a clean ``RecursionError``). ``record()`` is therefore gated on
+``_IN_RECORD``: while its own ``_covers()`` call is resolving a path, any
+further ``record()`` call is a side effect of that resolution, not a new
+access, and is dropped.
+
 The audit hook is installed once per process and cannot be removed, so it is
 gated on ``_ARMED``: disarmed, its first operation is a bool check.
 ``scripts/run_tests_parallel.py`` isolates per file, confining the cost.
@@ -65,6 +78,9 @@ _HOOK_INSTALLED = False
 _REAL_STAT = os.stat
 _REAL_LSTAT = os.lstat
 _REAL_ACCESS = os.access
+# Module-level (not thread-local), consistent with _ARMED: this module already
+# requires callers to serialize access to a given sentinel instance.
+_IN_RECORD = False
 
 
 class NativeMemoryTouched(AssertionError):
@@ -88,12 +104,24 @@ class NativeMemorySentinel:
         return candidate == self._prefix or candidate.startswith(self._prefix + os.sep)
 
     def record(self, event: str, raw) -> None:
-        if not self._covers(raw):
+        global _IN_RECORD
+        if _IN_RECORD:
+            # Our own path resolution, not the code under test. realpath()
+            # reaches os.lstat through ntpath's non-strict fallback
+            # (_getfinalpathname_nonstrict -> _readlink_deep -> islink), which
+            # is a function we patch -- without this guard one realpath() call
+            # (via _covers() below) can record itself many times over.
             return
-        entry = (event, os.fsdecode(raw) if not isinstance(raw, str) else raw)
-        self.accesses.append(entry)
-        if self.deny:
-            raise NativeMemoryTouched(f"{event} on native memory path {entry[1]!r}")
+        _IN_RECORD = True
+        try:
+            if not self._covers(raw):
+                return
+            entry = (event, os.fsdecode(raw) if not isinstance(raw, str) else raw)
+            self.accesses.append(entry)
+            if self.deny:
+                raise NativeMemoryTouched(f"{event} on native memory path {entry[1]!r}")
+        finally:
+            _IN_RECORD = False
 
     def assert_untouched(self) -> None:
         if self.accesses:
