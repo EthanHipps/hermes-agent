@@ -67,3 +67,16 @@ def test_defaults_to_the_configured_native_memory_directory(tmp_path, monkeypatc
     with native_memory_sentinel() as sentinel:
         (target / "MEMORY.md").write_text("x", encoding="utf-8")
     assert sentinel.accesses
+
+
+def test_nested_sentinels_do_not_blind_the_outer_guard(native_dir, tmp_path):
+    """An inner context exiting must not strip the outer context's stat
+    interception -- 5 of the 12 watched verbs are caught only by that patch."""
+    other = tmp_path / "other"
+    other.mkdir()
+    with native_memory_sentinel(native_dir) as outer:
+        with native_memory_sentinel(other) as inner:
+            (other / "x.md").write_text("y", encoding="utf-8")
+        assert inner.accesses
+        (native_dir / "MEMORY.md").exists()   # stat route, outer must still see it
+    assert outer.accesses, "outer sentinel went stat-blind after the inner context exited"

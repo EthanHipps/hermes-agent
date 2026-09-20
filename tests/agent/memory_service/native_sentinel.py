@@ -116,10 +116,11 @@ def native_memory_sentinel(directory=None, *, deny: bool = False):
         _HOOK_INSTALLED = True
     sentinel = NativeMemorySentinel(Path(directory), deny)
     previous = _ARMED
+    previous_stat, previous_lstat = os.stat, os.lstat
     _ARMED = sentinel
     os.stat, os.lstat = _guarded_stat, _guarded_lstat
     try:
         yield sentinel
     finally:
         _ARMED = previous
-        os.stat, os.lstat = _REAL_STAT, _REAL_LSTAT
+        os.stat, os.lstat = previous_stat, previous_lstat
