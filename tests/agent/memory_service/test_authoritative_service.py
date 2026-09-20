@@ -197,7 +197,7 @@ def test_blocked_load_exposes_typed_code_and_provider_error(tmp_path):
     ambiguous_policy from unavailable without parsing str(err) or __cause__."""
     backend = StubBackend()
     service = _select(tmp_path, backend)
-    backend.fail_typed("load_curated", "ambiguous_policy")
+    backend.fail_typed("load_curated", "ambiguous_policy", details={"ambiguities": [{"policy_key": "k", "tier": "dependency", "candidate_count": 2}]})
     with pytest.raises(MemoryBlockedError) as excinfo:
         service.load_curated("memory")
     err = excinfo.value
@@ -552,13 +552,13 @@ def test_provider_replies_must_correlate_before_results_escape_or_loads_unblock(
     else:
         backend.corruption = (operation, path, replacement)
 
-    expected_error = ProviderTransportError if mutation or operation == "capture_continuity" else MemoryBlockedError
+    expected_error = ProviderTransportError if mutation or operation in ("capture_continuity", "recall_context") else MemoryBlockedError
     with pytest.raises(expected_error, match="malformed provider output") as exc:
         actions[operation]()
     if isinstance(exc.value, ProviderTransportError):
         assert exc.value.mutation_outcome_unknown is mutation
     assert not service.epoch_changed  # Only the envelope can change the session epoch.
-    assert service.blocked is (operation != "capture_continuity")
+    assert service.blocked is (operation not in ("capture_continuity", "recall_context"))
     backend.corruption = None
 
     if service.blocked:
@@ -598,11 +598,11 @@ def test_correlation_failures_preserve_publication_uncertainty_and_epoch_precede
     backend.corruption = (operation, path, "other-session-or-request")
     backend.reply_epoch = "ep-other" if changed_envelope else None
     mutation = operation in ("stage_curated", "commit_curated")
-    expected_error = MemoryBlockedError if changed_envelope or not (mutation or operation == "capture_continuity") else ProviderTransportError
+    expected_error = MemoryBlockedError if changed_envelope or not (mutation or operation in ("capture_continuity", "recall_context")) else ProviderTransportError
     with pytest.raises(expected_error) as exc:
         actions[operation]()
     assert service.epoch_changed is changed_envelope
-    assert service.blocked is (changed_envelope or operation != "capture_continuity")
+    assert service.blocked is (changed_envelope or operation not in ("capture_continuity", "recall_context"))
     if isinstance(exc.value, ProviderTransportError):
         assert exc.value.mutation_outcome_unknown is mutation
     if operation == "commit_curated":
@@ -626,3 +626,58 @@ def test_correlation_failures_preserve_publication_uncertainty_and_epoch_precede
     next_stage = service.stage_curated(_mutation(fresh, request_id="r2"))
     committed = service.commit_curated(CommitIntent("memory", "r2", next_stage.stage_handle_b64url, next_stage.approval_binding_sha256, (REPO,), w.ApprovalAuthorization(kind="not_required")))
     assert committed.snapshot.revision != next_stage.expected_revision
+
+
+@pytest.mark.parametrize("failure", ["transport", "malformed"])
+def test_recall_transport_failure_does_not_block_mutations(tmp_path, failure):
+    backend = _CorruptReplyBackend(recall=True)
+    service = _select(tmp_path, backend)
+    snapshot = service.load_curated("memory")
+    staged = service.stage_curated(_mutation(snapshot))
+    authorization = w.ApprovalAuthorization(
+        kind="approved", approval_id="ap-1", approved_by_principal_id="ethan",
+        approved_at="2026-09-03T12:00:00Z", expires_at=staged.expires_at,
+        approval_binding_sha256=staged.approval_binding_sha256,
+    )
+    if failure == "transport":
+        backend.fail_transport("recall_context")
+    else:
+        backend.corruption = ("recall_context", "frozen_identity.logical_session_id", "other-session")
+    with pytest.raises(ProviderTransportError) as exc:
+        service.recall_context(RecallQuery("memory", snapshot.revision, "q", ("hermes_memory",), (), w.RecallBudget(0, 3000, 20)))
+    assert exc.value.operation == "recall_context" and not exc.value.mutation_outcome_unknown
+    assert not service.blocked and service.degraded_warning() is None
+    committed = service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, staged.approval_binding_sha256, (REPO,), authorization))
+    assert committed.outcome == "committed_audit_clean"
+    assert backend.entries["memory"] == ["committed:r1"]
+
+
+@pytest.mark.parametrize("code", ["provider_epoch_changed", "binding_invalid", "binding_revoked"])
+def test_recall_identity_loss_still_blocks_mutations_until_rebind(tmp_path, code):
+    backend = StubBackend(recall=True)
+    service = _select(tmp_path, backend)
+    snapshot = service.load_curated("memory")
+    staged = service.stage_curated(_mutation(snapshot))
+    details = {"expected_provider_epoch": "ep-1", "current_provider_epoch": "ep-2"} if code == "provider_epoch_changed" else None
+    backend.fail_typed("recall_context", code, details=details)
+    with pytest.raises(MemoryBlockedError) as exc:
+        service.recall_context(RecallQuery("memory", snapshot.revision, "q", ("hermes_memory",), (), w.RecallBudget(0, 3000, 20)))
+    assert exc.value.code == code and service.blocked
+    assert service.epoch_changed is (code == "provider_epoch_changed")
+    calls = len(backend.calls)
+    with pytest.raises(MemoryBlockedError, match="rebind"):
+        service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, staged.approval_binding_sha256, (REPO,), w.ApprovalAuthorization(kind="not_required")))
+    assert len(backend.calls) == calls and backend.entries["memory"] == []
+
+
+def test_recall_is_refused_while_mutations_await_a_fresh_load(tmp_path):
+    """Recall failures no longer set the block, but recall still honours one."""
+    backend = StubBackend(recall=True)
+    service = _select(tmp_path, backend)
+    snapshot = service.load_curated("memory")
+    backend.fail_transport("load_curated")
+    with pytest.raises(MemoryBlockedError):
+        service.load_curated("memory")
+    with pytest.raises(MemoryBlockedError):
+        service.recall_context(RecallQuery("memory", snapshot.revision, "q", ("hermes_memory",), (), w.RecallBudget(0, 3000, 20)))
+    assert backend.count("recall_context") == 0
