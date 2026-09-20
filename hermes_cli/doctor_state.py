@@ -109,14 +109,36 @@ def _memory_store_flags(hermes_home: Path) -> tuple:
     return get_builtin_memory_store_flags({"memory": _doctor_memory_config(hermes_home)})
 
 
+def _doctor_authoritative_config(hermes_home: Path | None = None):
+    """The validated authoritative config, or ``None`` when this install is not
+    authoritative (or its config cannot be resolved). Never raises: doctor
+    diagnoses, it does not enforce."""
+    section = _doctor_memory_config(hermes_home)
+    if str(section.get("provider_mode", "")).strip() != "authoritative":
+        return None
+    try:
+        from agent.memory_service.config import resolve_memory_service_config
+        return resolve_memory_service_config({"memory": section})
+    except Exception:
+        return None
+
+
 @doctor_check()
 def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     """HERMES_HOME, expected subdirs, SOUL.md, and the enabled built-in memory files."""
     from hermes_cli.doctor import HERMES_HOME, _DHH
     hermes_home = HERMES_HOME
     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
-    _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
-    memory_on = bool(_memory_enabled or _user_profile_enabled)
+    _authoritative = _doctor_authoritative_config(hermes_home)
+    if _authoritative is not None:
+        # §9.1: in authoritative mode Hermes MUST NOT initialize, create, stat or
+        # read MEMORY.md / USER.md. Dormant files stay observationally irrelevant,
+        # so doctor does not stat the directory -- not even to report on it.
+        memory_on = False
+        _memory_enabled = _user_profile_enabled = False
+    else:
+        _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
+        memory_on = bool(_memory_enabled or _user_profile_enabled)
     # The built-in file store neither creates nor consumes memories/ when both targets are disabled.
     for subdir_name in ["cron", "sessions", "logs", "skills"] + (["memories"] if memory_on else []):
         ensure_dir(f, should_fix, hermes_home / subdir_name, f"{_DHH}/{subdir_name}/ exists",
@@ -140,6 +162,11 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     # Only enabled built-in stores: users can disable either legacy file target, and stale migration files
     # must not read as active memory usage.
     memories_dir = hermes_home / "memories"
+    if _authoritative is not None:
+        return check_info(
+            f"Curated memory is provider-managed ({_authoritative.provider}, authoritative) "
+            "— built-in memory files are dormant and not inspected"
+        )
     if not memory_on:
         return check_info("Built-in memory files disabled by config")
     existed = memories_dir.exists()
@@ -385,9 +412,32 @@ def _memory_provider_generic(name: str) -> None:
         check_warn(f"{name} plugin not found", "run: hermes memory setup")
 
 
+def _check_authoritative_provider(config) -> None:
+    """Probe the provider contract (§9.7 Doctor row) without touching native files.
+
+    Reachability and API shape only; typed mode/scope/health reporting is R41.
+    """
+    from pathlib import Path as _Path
+    check_ok(f"Curated memory authority: {config.provider} (authoritative)")
+    check_ok(f"Failure policy: {config.failure_policy.value}")
+    check_ok(f"Principal: {config.principal_id}")
+    executable = _Path(config.provider_executable or "")
+    if executable.is_file():
+        check_ok(f"Provider executable resolves ({executable})")
+    else:
+        check_warn(f"Provider executable not found: {executable}",
+                   "run: hermes memory status")
+    from agent.memory_service.config import PROVIDER_API_VERSION, REQUIRED_OPERATIONS
+    check_ok(f"Requires provider API v{PROVIDER_API_VERSION} "
+             f"with {len(REQUIRED_OPERATIONS)} required operations")
+
+
 @doctor_check()
 def _check_memory_provider(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import HERMES_HOME
+    _authoritative = _doctor_authoritative_config(HERMES_HOME)
+    if _authoritative is not None:
+        return _check_authoritative_provider(_authoritative)
     name = _doctor_memory_config(HERMES_HOME).get("provider", "")
     if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
