@@ -48,7 +48,7 @@ def test_authoritative_never_constructs_the_native_store(tmp_path):
     exe = tmp_path / "p.exe"
     exe.write_bytes(b"MZ")
     store = _Store()
-    config = {"memory": {"provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe)}}
+    config = {"memory": {"provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe), "principal_id": "ethan"}}
 
     def factory(cfg):
         raise AssertionError("backend factory reached; store must still not be built")
@@ -61,7 +61,7 @@ def test_authoritative_never_constructs_the_native_store(tmp_path):
 def test_authoritative_requires_a_backend_factory_or_plugin(tmp_path, monkeypatch):
     exe = tmp_path / "p.exe"
     exe.write_bytes(b"MZ")
-    config = {"memory": {"provider": "no-such-provider-xyz", "provider_mode": "authoritative", "provider_executable": str(exe)}}
+    config = {"memory": {"provider": "no-such-provider-xyz", "provider_mode": "authoritative", "provider_executable": str(exe), "principal_id": "ethan"}}
     with pytest.raises(MemoryConfigurationError, match="create_authoritative_backend"):
         select_memory_service(config, store_factory=_Store().factory)
 
@@ -115,7 +115,7 @@ def _install_plugin(tmp_path, monkeypatch, source, name, code):
 
 
 def _authoritative_config(name):
-    return {"memory": {"provider": name, "provider_mode": "authoritative", "provider_executable": sys.executable}}
+    return {"memory": {"provider": name, "provider_mode": "authoritative", "provider_executable": sys.executable, "principal_id": "ethan"}}
 
 
 @pytest.mark.parametrize("source", _PLUGIN_SOURCES)

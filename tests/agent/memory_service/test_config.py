@@ -53,12 +53,13 @@ def test_authoritative_requires_provider_and_absolute_existing_executable(tmp_pa
     exe = tmp_path / "provider.exe"
     exe.write_bytes(b"MZ")
     cfg = resolve_memory_service_config(
-        _cfg(provider="example", provider_mode="authoritative", provider_executable=str(exe))
+        _cfg(provider="example", provider_mode="authoritative", provider_executable=str(exe), principal_id="ethan")
     )
     assert cfg.provider_mode is MemoryMode.AUTHORITATIVE
     assert cfg.provider == "example"
     assert cfg.provider_executable == str(exe)
     assert cfg.failure_policy is FailurePolicy.FAIL_CLOSED
+    assert cfg.principal_id == "ethan"
 
 
 @pytest.mark.parametrize(
@@ -117,6 +118,7 @@ def test_stateless_policy_is_valid_only_with_authoritative(tmp_path):
             provider="example",
             provider_mode="authoritative",
             provider_executable=str(exe),
+            principal_id="ethan",
             authoritative_failure_policy="stateless",
         )
     )
@@ -144,3 +146,36 @@ def test_config_is_frozen():
     with pytest.raises(Exception):
         cfg.provider = "x"  # type: ignore[misc]
     assert isinstance(cfg, MemoryServiceConfig)
+
+
+def test_authoritative_requires_principal_id(tmp_path):
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    base = {"provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe)}
+    with pytest.raises(MemoryConfigurationError, match="principal_id"):
+        resolve_memory_service_config({"memory": base})
+
+
+def test_authoritative_rejects_blank_principal_id(tmp_path):
+    """A whitespace-only value is 'ambiguous', and §4.1 gives an ambiguous mapping no memory."""
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    base = {"provider": "example", "provider_mode": "authoritative",
+            "provider_executable": str(exe), "principal_id": "   "}
+    with pytest.raises(MemoryConfigurationError, match="principal_id"):
+        resolve_memory_service_config({"memory": base})
+
+
+def test_authoritative_principal_id_is_stripped_and_kept(tmp_path):
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    cfg = resolve_memory_service_config({"memory": {
+        "provider": "example", "provider_mode": "authoritative",
+        "provider_executable": str(exe), "principal_id": "  ethan  "}})
+    assert cfg.principal_id == "ethan"
+
+
+def test_additive_never_requires_principal_id():
+    """§9.10: absent provider_mode retains additive behavior — including not gaining a new required key."""
+    cfg = resolve_memory_service_config({"memory": {"provider": "honcho"}})
+    assert cfg.principal_id == ""

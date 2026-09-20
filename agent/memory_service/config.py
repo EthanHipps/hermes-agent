@@ -5,6 +5,7 @@
       provider_mode: additive | authoritative        # absent = additive
       authoritative_failure_policy: fail_closed | stateless
       provider_executable: <absolute path>            # authoritative only
+      principal_id: <stable principal>                # authoritative only
       memory_enabled: bool
       user_profile_enabled: bool
 
@@ -63,6 +64,7 @@ class MemoryServiceConfig:
     provider_mode: MemoryMode
     failure_policy: FailurePolicy
     provider_executable: Optional[str]
+    principal_id: str  # §4.2 authenticated/mapped principal; "" unless authoritative
     memory_enabled: bool
     user_profile_enabled: bool
 
@@ -116,6 +118,9 @@ def resolve_memory_service_config(config: Optional[Mapping[str, Any]]) -> Memory
             "memory.authoritative_failure_policy: stateless is valid only with provider_mode: authoritative"
         )
 
+    principal_raw = section.get("principal_id")
+    principal_id = principal_raw.strip() if isinstance(principal_raw, str) else ""
+
     executable_raw = section.get("provider_executable")
     executable = executable_raw.strip() if isinstance(executable_raw, str) else None
     if mode is MemoryMode.AUTHORITATIVE:
@@ -138,6 +143,12 @@ def resolve_memory_service_config(config: Optional[Mapping[str, Any]]) -> Memory
                 raise MemoryConfigurationError(
                     f"memory.{key}: caller-supplied provider arguments are not allowed; the argv suffix is fixed"
                 )
+        if not principal_id:
+            raise MemoryConfigurationError(
+                "memory.provider_mode: authoritative requires memory.principal_id "
+                "(the authenticated/mapped principal); there is no default, because an "
+                "unknown or ambiguous principal mapping gets no memory"
+            )
     elif not executable:
         executable = None
 
@@ -146,6 +157,7 @@ def resolve_memory_service_config(config: Optional[Mapping[str, Any]]) -> Memory
         provider_mode=mode,
         failure_policy=policy,
         provider_executable=executable,
+        principal_id=principal_id,
         memory_enabled=is_truthy_value(section.get("memory_enabled"), default=True),
         user_profile_enabled=is_truthy_value(section.get("user_profile_enabled"), default=True),
     )

@@ -25,7 +25,7 @@ def _never_built():
 def _config(tmp_path, **memory):
     exe = tmp_path / "provider.exe"
     exe.write_bytes(b"MZ")
-    base = {"provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe)}
+    base = {"provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe), "principal_id": "ethan"}
     base.update(memory)
     return {"memory": base}
 
