@@ -159,3 +159,24 @@ def test_realpath_reentrancy_guard_survives_a_dangling_relative_symlink(native_d
         f"{len(lstat_records)} -- realpath's own symlink-resolution internals "
         f"recorded themselves"
     )
+
+
+def test_record_is_not_reentrant_when_resolution_touches_a_watched_path(native_dir, monkeypatch):
+    """Portable pin for the guard itself, with no symlink privilege needed.
+
+    Reproduces the exact chain -- _covers() -> path resolution -> a guarded
+    function -> record() -- that ntpath.realpath's non-strict fallback causes
+    via _readlink_deep -> islink -> os.lstat. Without _IN_RECORD this recurses;
+    with it, the original access is recorded exactly once.
+    """
+    target = native_dir / "MEMORY.md"
+    real_realpath = os.path.realpath
+
+    def realpath_touching_a_watched_path(p, *a, **k):
+        os.lstat(str(target))          # the guarded function, mid-resolution
+        return real_realpath(p, *a, **k)
+
+    with native_memory_sentinel(native_dir) as sentinel:
+        monkeypatch.setattr(os.path, "realpath", realpath_touching_a_watched_path)
+        target.exists()
+    assert len(sentinel.accesses) == 1, f"expected 1 record, got {len(sentinel.accesses)}"
