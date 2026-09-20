@@ -61,3 +61,32 @@ def test_additive_doctor_still_checks_the_native_directory(doctor_home):
 
     _check_directory_structure(True)
     assert (doctor_home / "memories").exists(), "additive doctor must still ensure memories/"
+
+
+def test_authoritative_provider_probe_never_touches_the_native_directory(doctor_home, tmp_path):
+    """The probe's whole job is to check the provider contract WITHOUT touching
+    native memory. Prove it with the sentinel, not by reading the code."""
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    _write_config(doctor_home, {"provider": "example", "provider_mode": "authoritative",
+                                "provider_executable": str(exe), "principal_id": "ethan"})
+    memories = doctor_home / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("stale\n", encoding="utf-8")
+    (memories / "USER.md").write_text("stale\n", encoding="utf-8")
+    from hermes_cli.doctor_state import _check_memory_provider
+
+    with native_memory_sentinel(memories) as sentinel:
+        finding = _check_memory_provider(True)
+    sentinel.assert_untouched()
+    assert not finding.issues, "a valid authoritative config should raise no doctor issues"
+
+
+def test_malformed_authoritative_config_does_not_crash_doctor(doctor_home):
+    """doctor diagnoses, it does not enforce: an unresolvable authoritative
+    config must degrade to the existing reporting, never propagate."""
+    _write_config(doctor_home, {"provider_mode": "authoritative"})  # no executable, no principal_id
+    from hermes_cli.doctor_state import _check_directory_structure, _check_memory_provider
+
+    _check_memory_provider(True)        # must not raise
+    _check_directory_structure(True)    # must not raise
