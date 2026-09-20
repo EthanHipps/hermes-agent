@@ -20,13 +20,15 @@ Two mechanisms, because neither alone covers the verb list:
   ``_covers()``'s ``isinstance`` check, so scanning every argument does not
   risk false positives.
 * CPython raises **no audit event for stat, and none for access either**.
-  Measured on 3.11.16: ``os.stat``, ``Path.exists``, ``Path.stat``,
-  ``Path.is_file``, ``os.path.exists``, ``os.path.getsize`` and ``os.access``
-  all produce zero audit events -- and ``stat`` is named in L948 (doctor calls
-  ``.exists()`` today). ``os.access`` does not route through ``os.stat``
-  either, so it needs its own interception, installed and restored alongside
-  ``os.stat``/``os.lstat``. All five of the stat-family routes were measured
-  to funnel through ``os.stat``.
+  Measured on 3.11.16: ``os.stat``, ``os.lstat``, ``Path.exists``,
+  ``Path.stat``, ``Path.is_file``, ``os.path.exists``, ``os.path.getsize``
+  and ``os.access`` all produce zero audit events -- and ``stat`` is named in
+  L948 (doctor calls ``.exists()`` today). So ``os.stat`` and ``os.lstat`` are
+  both intercepted while armed; the five ``Path``/``os.path`` routes above
+  were measured to funnel through ``os.stat``. ``os.access`` shares the
+  "no audit event" problem but does NOT route through ``os.stat`` either
+  (measured separately), so it gets its own guard, installed and restored
+  alongside ``os.stat``/``os.lstat`` rather than folded into either.
 
 ``_covers()`` resolves both the watched directory and every candidate path
 with ``os.path.realpath`` rather than ``os.path.abspath``. HERMES_HOME may be
