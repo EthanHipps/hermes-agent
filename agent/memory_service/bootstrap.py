@@ -87,13 +87,13 @@ def init_memory_service(
     fail-closed provider failure, and a blocked session all propagate, because a
     session never switches mode because of failure (I1).
     """
-    from agent.memory_service.config import resolve_memory_service_config
+    from agent.memory_service.config import MemoryConfigurationError, resolve_memory_service_config
     from agent.memory_service.service import select_memory_service
 
     authoritative_requested = _requests_authoritative(raw_config)
     try:
         config = resolve_memory_service_config(raw_config)
-    except Exception as exc:
+    except MemoryConfigurationError as exc:
         if authoritative_requested:
             raise
         logger.warning("memory configuration is invalid; continuing with built-in memory: %s", exc)
