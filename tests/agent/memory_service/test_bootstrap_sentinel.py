@@ -131,3 +131,75 @@ def test_additive_still_loads_natively(tmp_path, native_dir):
     assert sentinel.accesses, "additive mode must still read the native store"
     assert agent._memory_store is not None
     assert agent._memory_service.disposition is MemoryDisposition.BUILTIN
+
+
+def test_disabled_additive_store_touches_nothing(tmp_path, native_dir):
+    """Regression (fix-round defect 1): a fully-disabled additive config must
+    leave agent._memory_store None and touch no native file.
+
+    The pre-router code only built a MemoryStore when ``memory_enabled or
+    user_profile_enabled``; a naive router wiring builds (and loads) one
+    unconditionally inside store_factory(), which would leave a live but
+    disabled store on agent._memory_store. That matters beyond this call:
+    agent/system_prompt.py's post-compression reload does ``if
+    agent._memory_store: agent._memory_store.load_from_disk()`` with no flag
+    check, so a non-None disabled store would start touching the native
+    directory on every later compression event in a session that had memory
+    fully disabled -- something a memory-*enabled* sentinel test can never
+    catch, since all the other tests in this file run with at least one flag
+    on.
+    """
+    agent = _agent()
+    cfg = {"memory": {"memory_enabled": False, "user_profile_enabled": False}}
+    with native_memory_sentinel(native_dir) as sentinel:
+        _init_memory(agent, cfg, False, "cli")
+    sentinel.assert_untouched()
+    assert agent._memory_store is None
+    assert agent._memory_service.disposition is MemoryDisposition.BUILTIN
+
+
+def test_malformed_additive_store_factory_failure_degrades_silently(tmp_path, native_dir):
+    """Regression (fix-round defect 2): an unexpected exception raised inside
+    store_factory() itself -- not a MemoryConfigurationError from config
+    resolution, which init_memory_service already handles -- must degrade
+    silently in additive mode, matching the pre-router "memory is optional --
+    don't break agent init" contract, rather than crash agent construction.
+
+    ``nudge_interval: "not-a-number"`` makes _build_native_store's
+    ``int(mem_config.get("nudge_interval", 10))`` raise ValueError; nothing
+    upstream of store_factory() validates that field. The failure happens
+    inside BuiltinMemoryService(cfg, store_factory())'s own construction, so
+    there is no partial service to salvage -- agent._memory_service stays
+    None, same as when init_memory_service returns (None, exc) for a
+    malformed config. That's the existing, accepted "degrade to no memory"
+    outcome; only "does it raise" is this defect's contract.
+    """
+    agent = _agent()
+    cfg = {"memory": {"nudge_interval": "not-a-number"}}
+    _init_memory(agent, cfg, False, "cli")  # must not raise
+    assert agent._memory_store is None
+    assert agent._memory_service is None
+
+
+def test_malformed_config_under_authoritative_mode_still_raises(tmp_path, native_dir, monkeypatch):
+    """Paired case for the regression above: the re-raise decision in
+    _init_memory is scoped by requests_authoritative_mode(_agent_cfg), not by
+    whether store_factory() happened to run.
+
+    nudge_interval is additive-only -- MemoryServiceConfig carries no such
+    field, and store_factory() is never invoked on the authoritative branch
+    (service.py:252-255) -- so it cannot by itself raise here the way it does
+    above; a real authoritative-path failure (the same broken-backend-factory
+    shape as test_provider_failure_fail_closed_never_falls_back_to_native) is
+    what exercises the exception path. Carrying the same malformed
+    nudge_interval field alongside it proves that field's presence doesn't
+    accidentally influence which branch of the new try/except fires.
+    """
+    def broken(cfg):
+        raise RuntimeError("provider unreachable")
+
+    monkeypatch.setattr("plugins.memory.load_authoritative_backend_factory", lambda name: broken)
+    agent = _agent()
+    cfg = _authoritative_cfg(tmp_path, nudge_interval="not-a-number")
+    with pytest.raises(Exception):
+        _init_memory(agent, cfg, False, "cli")

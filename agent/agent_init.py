@@ -1250,56 +1250,74 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     )
     if not skip_memory or _memory_toolset_requested:
         from agent.memory_service.bootstrap import init_memory_service, requests_authoritative_mode
-        from tools.memory_tool import (
-            MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
-        )
 
-        def _build_native_store():
-            """Deferred: reached only on the additive branch (§9.1 L925)."""
-            nonlocal mem_config
-            mem_config = get_builtin_memory_config(_agent_cfg)
-            agent._memory_enabled, agent._user_profile_enabled = get_builtin_memory_store_flags(_agent_cfg)
-            agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
-            store = MemoryStore(
-                memory_char_limit=mem_config.get("memory_char_limit", 2200),
-                user_char_limit=mem_config.get("user_char_limit", 1375),
-                memory_enabled=agent._memory_enabled,
-                user_profile_enabled=agent._user_profile_enabled,
-            )
-            # Same gate the pre-router code used: a fully disabled store is never loaded
-            # from disk and never exposed on agent._memory_store, so legacy consumers that
-            # branch on its truthiness without also checking the flags (e.g. the
-            # post-compression reload in agent/system_prompt.py) keep the "memory disabled
-            # -> zero native-file footprint" guarantee. select_memory_service's additive
-            # branch still needs a store object back from store_factory() either way.
-            if agent._memory_enabled or agent._user_profile_enabled:
-                store.load_from_disk()
-                agent._memory_store = store
-            return store
-
-        # An authoritative configuration error or fail-closed provider failure
-        # propagates: a session never switches mode because of failure (I1), and
-        # a bad authoritative config is never reinterpreted as additive
-        # (§9.1 L944). An additive failure keeps degrading as it always has —
-        # that includes a failure anywhere in store_factory() itself (e.g. a
-        # malformed nudge_interval), not just config resolution, so the whole
-        # call is guarded the same way the pre-router code guarded the entire
-        # native-store block ("Memory is optional — don't break agent init").
         _authoritative_requested = requests_authoritative_mode(_agent_cfg)
         try:
-            agent._memory_service, _swallowed = init_memory_service(
-                _agent_cfg,
-                logical_session_id=getattr(agent, "session_id", "") or "",
-                platform=platform,
-                store_factory=_build_native_store,
+            from tools.memory_tool import (
+                MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
             )
         except Exception:
+            # Branch-point parity: this import sat inside the block's blanket
+            # suppress(Exception), so an import failure degraded to a memory-less
+            # boot — it never skipped the external-provider block below, which
+            # isn't gated on this block at all (mem_config stays None either
+            # way). Authoritative mode cannot honour its config without these
+            # helpers (store_factory's fallback still needs MemoryStore), so it
+            # fails closed here instead of silently losing provider_mode:
+            # authoritative's I1 guarantee.
             if _authoritative_requested:
                 raise
-            # agent._memory_service is already None from the top of this function.
-        if agent._memory_service is None:
-            with suppress(Exception):
-                _build_native_store()
+        else:
+            def _build_native_store():
+                """Deferred: reached only on the additive branch (§9.1 L925)."""
+                nonlocal mem_config
+                mem_config = get_builtin_memory_config(_agent_cfg)
+                agent._memory_enabled, agent._user_profile_enabled = get_builtin_memory_store_flags(_agent_cfg)
+                agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
+                store = MemoryStore(
+                    memory_char_limit=mem_config.get("memory_char_limit", 2200),
+                    user_char_limit=mem_config.get("user_char_limit", 1375),
+                    memory_enabled=agent._memory_enabled,
+                    user_profile_enabled=agent._user_profile_enabled,
+                )
+                # Same gate the pre-router code used: a fully disabled store is never
+                # loaded from disk and never exposed on agent._memory_store, so legacy
+                # consumers that branch on its truthiness without also checking the
+                # flags (e.g. the post-compression reload in agent/system_prompt.py)
+                # keep the "memory disabled -> zero native-file footprint" guarantee.
+                # select_memory_service's additive branch (service.py:252-255) still
+                # needs a store object back from store_factory() either way, and never
+                # reads a disabled target off it: MemoryServiceConfig.target_enabled and
+                # get_builtin_memory_store_flags parse the same memory: section with the
+                # same is_truthy_value(..., default=True), so they cannot disagree about
+                # which targets are disabled.
+                if agent._memory_enabled or agent._user_profile_enabled:
+                    store.load_from_disk()
+                    agent._memory_store = store
+                return store
+
+            # An authoritative configuration error or fail-closed provider failure
+            # propagates: a session never switches mode because of failure (I1), and
+            # a bad authoritative config is never reinterpreted as additive
+            # (§9.1 L944). An additive failure keeps degrading as it always has —
+            # that includes a failure anywhere in store_factory() itself (e.g. a
+            # malformed nudge_interval), not just config resolution, so the whole
+            # call is guarded the same way the pre-router code guarded the entire
+            # native-store block ("Memory is optional — don't break agent init").
+            try:
+                agent._memory_service, _swallowed = init_memory_service(
+                    _agent_cfg,
+                    logical_session_id=getattr(agent, "session_id", "") or "",
+                    platform=platform,
+                    store_factory=_build_native_store,
+                )
+            except Exception:
+                if _authoritative_requested:
+                    raise
+                # agent._memory_service is already None from the top of this function.
+            if agent._memory_service is None:
+                with suppress(Exception):
+                    _build_native_store()
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None
