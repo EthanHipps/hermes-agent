@@ -144,7 +144,7 @@ def test_factory_only_package_is_selected_without_importing_other_providers(tmp_
     def native_store():
         raise AssertionError("authoritative selection must not construct native storage")
 
-    config = {"memory": {"provider": "standalone_authority", "provider_mode": "authoritative", "provider_executable": sys.executable}}
+    config = {"memory": {"provider": "standalone_authority", "provider_mode": "authoritative", "provider_executable": sys.executable, "principal_id": "ethan"}}
     context = w.RequestedContext(
         principal_id="ethan", profile_id="default", logical_session_id="factory-discovery", platform="cli",
         org_id=None, project_id=None, repo_id=None, workspace_id=None,
