@@ -66,3 +66,105 @@ def test_profile_id_defaults_to_the_active_profile(tmp_path):
     ctx = build_requested_context(cfg, logical_session_id="s", platform="cli",
                                   working_directory=str(tmp_path))
     assert ctx.profile_id  # non-empty; get_active_profile_name() never returns ""
+
+
+from agent.memory_service.bootstrap import init_memory_service
+from agent.memory_service.config import MemoryConfigurationError
+from agent.memory_service.errors import MemoryBlockedError
+from agent.memory_service.service import MemoryDisposition
+from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore
+
+
+class _StoreSpy:
+    def __init__(self):
+        self.built = 0
+
+    def __call__(self):
+        self.built += 1
+        from tools.memory_tool import MemoryStore
+        return MemoryStore()
+
+
+def _raw(tmp_path, **extra):
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    section = {"provider": "example", "provider_mode": "authoritative",
+               "provider_executable": str(exe), "principal_id": "ethan"}
+    section.update(extra)
+    return {"memory": section}
+
+
+def _fake_factory():
+    store = FakeProviderStore()
+    return lambda cfg: FakeAuthoritativeBackend(store, provider="example")
+
+
+def test_additive_selects_builtin_and_builds_the_store_once(tmp_path):
+    spy = _StoreSpy()
+    service, swallowed = init_memory_service(
+        {}, logical_session_id="s", platform="cli", store_factory=spy, working_directory=str(tmp_path))
+    assert service.disposition is MemoryDisposition.BUILTIN
+    assert spy.built == 1 and swallowed is None
+
+
+def test_authoritative_selects_provider_and_never_builds_the_store(tmp_path):
+    spy = _StoreSpy()
+    service, swallowed = init_memory_service(
+        _raw(tmp_path), logical_session_id="s", platform="cli", store_factory=spy,
+        # The fake's registry maps only this literal path (fake_backend.py:188); an
+        # unregistered directory is a hard bind failure, not a degraded resolution.
+        working_directory="C:\\work\\repo", backend_factory=_fake_factory())
+    assert service.disposition is MemoryDisposition.AUTHORITATIVE
+    assert spy.built == 0 and swallowed is None
+    assert service.identity is not None and service.identity.principal_id == "ethan"
+
+
+def test_authoritative_config_error_propagates(tmp_path):
+    """§9.1 L944: Hermes MUST NOT reinterpret a bad authoritative config as additive."""
+    spy = _StoreSpy()
+    raw = _raw(tmp_path)
+    del raw["memory"]["principal_id"]
+    with pytest.raises(MemoryConfigurationError, match="principal_id"):
+        init_memory_service(raw, logical_session_id="s", platform="cli", store_factory=spy,
+                            working_directory=str(tmp_path), backend_factory=_fake_factory())
+    assert spy.built == 0
+
+
+def test_additive_config_error_is_swallowed_not_raised(tmp_path):
+    """§9.10 first bullet: absent provider_mode retains today's degrade-and-boot behaviour."""
+    spy = _StoreSpy()
+    service, swallowed = init_memory_service(
+        {"memory": "not-a-mapping"}, logical_session_id="s", platform="cli",
+        store_factory=spy, working_directory=str(tmp_path))
+    assert service is None
+    assert isinstance(swallowed, MemoryConfigurationError)
+    assert spy.built == 0
+
+
+def test_provider_failure_fail_closed_raises_and_never_falls_back(tmp_path):
+    """I1: the session does not become additive because the provider failed."""
+    spy = _StoreSpy()
+
+    def broken(cfg):
+        raise RuntimeError("provider unreachable")
+
+    with pytest.raises(Exception) as exc:
+        init_memory_service(_raw(tmp_path), logical_session_id="s", platform="cli",
+                            store_factory=spy, working_directory=str(tmp_path),
+                            backend_factory=broken)
+    assert not isinstance(exc.value, MemoryConfigurationError)
+    assert spy.built == 0
+
+
+def test_provider_failure_stateless_degrades_and_never_falls_back(tmp_path):
+    spy = _StoreSpy()
+    store = FakeProviderStore()
+    store.fail_transport("negotiate")  # the knob lives on the STORE, not the backend
+    backend = FakeAuthoritativeBackend(store, provider="example")
+    service, swallowed = init_memory_service(
+        _raw(tmp_path, authoritative_failure_policy="stateless"),
+        logical_session_id="s", platform="cli", store_factory=spy,
+        working_directory=str(tmp_path), backend_factory=lambda cfg: backend)
+    assert service.disposition is MemoryDisposition.STATELESS
+    assert service.prompt_block("memory") is None
+    assert spy.built == 0 and swallowed is None

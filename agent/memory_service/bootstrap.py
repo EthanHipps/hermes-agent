@@ -50,3 +50,67 @@ def build_requested_context(
         resolution_source="directory",
         canonical_directory=os.path.realpath(directory),
     )
+
+
+def _requests_authoritative(raw_config: object) -> bool:
+    """Did the operator ask for authoritative mode? Must never raise.
+
+    This decides the ERROR REGIME, not the mode: the mode itself is decided by
+    the validated config. A malformed ``memory:`` section in additive mode must
+    keep degrading the way it does today (§9.10 first bullet), while a bad
+    authoritative config must surface (§9.1 L944).
+    """
+    try:
+        section = raw_config.get("memory")  # type: ignore[union-attr]
+        mode = section.get("provider_mode")  # type: ignore[union-attr]
+        return isinstance(mode, str) and mode.strip() == "authoritative"
+    except Exception:
+        return False
+
+
+def init_memory_service(
+    raw_config,
+    *,
+    logical_session_id: str,
+    platform: str,
+    store_factory,
+    profile_id: Optional[str] = None,
+    working_directory: Optional[str] = None,
+    backend_factory=None,
+):
+    """Select the memory service before any native store is constructed.
+
+    Returns ``(service, swallowed_error)``. ``service`` is ``None`` only when an
+    additive configuration was too malformed to resolve, in which case the error
+    is returned rather than raised so the caller can degrade exactly as it does
+    today. In authoritative mode nothing is swallowed: a configuration error, a
+    fail-closed provider failure, and a blocked session all propagate, because a
+    session never switches mode because of failure (I1).
+    """
+    from agent.memory_service.config import resolve_memory_service_config
+    from agent.memory_service.service import select_memory_service
+
+    authoritative_requested = _requests_authoritative(raw_config)
+    try:
+        config = resolve_memory_service_config(raw_config)
+    except Exception as exc:
+        if authoritative_requested:
+            raise
+        logger.warning("memory configuration is invalid; continuing with built-in memory: %s", exc)
+        return None, exc
+
+    context = None
+    if config.provider_mode.value == "authoritative":
+        context = build_requested_context(
+            config,
+            logical_session_id=logical_session_id,
+            platform=platform,
+            profile_id=profile_id,
+            working_directory=working_directory,
+        )
+    return select_memory_service(
+        raw_config,
+        store_factory=store_factory,
+        requested_context=context,
+        backend_factory=backend_factory,
+    ), None
