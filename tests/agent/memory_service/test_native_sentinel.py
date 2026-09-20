@@ -37,6 +37,10 @@ def test_silent_when_nothing_touches_the_directory(native_dir, tmp_path):
     ("is_file",  lambda d: (d / "MEMORY.md").is_file()),
     ("getsize",  lambda d: os.path.getsize(d / "MEMORY.md")),
     ("os_stat",  lambda d: os.stat(d / "MEMORY.md")),
+    ("access",   lambda d: os.access(d / "MEMORY.md", os.F_OK)),
+    ("chmod",    lambda d: os.chmod(d / "MEMORY.md", 0o644)),
+    ("utime",    lambda d: os.utime(d / "MEMORY.md", None)),
+    ("truncate", lambda d: os.truncate(d / "MEMORY.md", 0)),
 ])
 def test_sentinel_records_every_forbidden_verb(native_dir, label, action):
     with native_memory_sentinel(native_dir) as sentinel:
@@ -80,3 +84,47 @@ def test_nested_sentinels_do_not_blind_the_outer_guard(native_dir, tmp_path):
         assert inner.accesses
         (native_dir / "MEMORY.md").exists()   # stat route, outer must still see it
     assert outer.accesses, "outer sentinel went stat-blind after the inner context exited"
+
+
+def test_rename_into_the_native_directory_is_caught(native_dir, tmp_path):
+    """os.rename's audit args are (src, dst, ...): restoring a legacy file INTO
+    the dormant directory is a forbidden 'restore'/'mirror' and must not be
+    invisible just because the native path is args[1].
+
+    Unlike POSIX, Windows' os.rename refuses to overwrite an existing
+    destination (WinError 183), so the fixture's pre-existing MEMORY.md is
+    moved out of the way *before* the sentinel is armed -- that unlink is not
+    part of what this test is exercising and must not itself pad
+    ``sentinel.accesses``. The destination path is still inside native_dir
+    either way.
+    """
+    stale = tmp_path / "stale.md"
+    stale.write_text("legacy native memory", encoding="utf-8")
+    (native_dir / "MEMORY.md").unlink()
+    with native_memory_sentinel(native_dir) as sentinel:
+        os.rename(str(stale), str(native_dir / "MEMORY.md"))
+    assert sentinel.accesses, "a restore into the native directory went unrecorded"
+
+
+@pytest.mark.windows_only
+def test_realpath_normalizes_a_junction_alias_of_the_watched_directory(tmp_path):
+    """HERMES_HOME may be a junction/symlink alias of the platform default and
+    only the spelling is preserved (hermes_cli/profiles.py:1694-1701, #82581
+    junction follow-up) -- physically the same directory reached through a
+    second spelling must not slip the guard.
+    """
+    import subprocess
+
+    real_dir = tmp_path / "real_memories"
+    real_dir.mkdir()
+    (real_dir / "MEMORY.md").write_text("existing user memory\n", encoding="utf-8")
+    link_dir = tmp_path / "linked_memories"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link_dir), str(real_dir)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"junction creation failed: {result.stderr}"
+
+    with native_memory_sentinel(real_dir) as sentinel:
+        (link_dir / "MEMORY.md").read_text(encoding="utf-8")
+    assert sentinel.accesses, "access via a junction alias of the watched directory went unrecorded"

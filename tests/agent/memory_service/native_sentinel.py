@@ -7,16 +7,33 @@ import, restore and fallback on MEMORY.md / USER.md in authoritative mode.
 Two mechanisms, because neither alone covers the verb list:
 
 * ``sys.addaudithook`` sees ``open``, ``os.mkdir``, ``os.listdir``,
-  ``os.scandir``, ``os.remove`` and ``os.rename`` from ANY code path --
-  ``pathlib``, ``os``, ``io``, ``shutil``, and C-level callers alike. This is
-  what makes the guard a proof rather than a monkeypatch that a new call site
-  could route around.
-* CPython raises **no audit event for stat**. Measured on 3.11.16:
-  ``os.stat``, ``Path.exists``, ``Path.stat``, ``Path.is_file``,
-  ``os.path.exists`` and ``os.path.getsize`` all produce zero audit events --
-  and ``stat`` is named in L948 (doctor calls ``.exists()`` today). So
-  ``os.stat``/``os.lstat`` are intercepted while armed; all five of those
-  routes were measured to funnel through them.
+  ``os.scandir``, ``os.remove``, ``os.rename``, ``os.rmdir``, ``os.chmod``,
+  ``os.utime``, ``os.truncate``, ``os.link`` and ``os.symlink`` from ANY code
+  path -- ``pathlib``, ``os``, ``io``, ``shutil``, and C-level callers alike.
+  This is what makes the guard a proof rather than a monkeypatch that a new
+  call site could route around. Multi-path events carry more than one path
+  (``os.rename``'s audit args are ``(src, dst, src_dir_fd, dst_dir_fd)``), so
+  the hook inspects *every* argument, not just the first -- a "restore" that
+  renames a legacy file INTO the native directory is forbidden by L948 and
+  would otherwise be invisible because the watched path sits in ``args[1]``,
+  not ``args[0]``. Non-path members (mode/flag ints, dir_fds) are rejected by
+  ``_covers()``'s ``isinstance`` check, so scanning every argument does not
+  risk false positives.
+* CPython raises **no audit event for stat, and none for access either**.
+  Measured on 3.11.16: ``os.stat``, ``Path.exists``, ``Path.stat``,
+  ``Path.is_file``, ``os.path.exists``, ``os.path.getsize`` and ``os.access``
+  all produce zero audit events -- and ``stat`` is named in L948 (doctor calls
+  ``.exists()`` today). ``os.access`` does not route through ``os.stat``
+  either, so it needs its own interception, installed and restored alongside
+  ``os.stat``/``os.lstat``. All five of the stat-family routes were measured
+  to funnel through ``os.stat``.
+
+``_covers()`` resolves both the watched directory and every candidate path
+with ``os.path.realpath`` rather than ``os.path.abspath``. HERMES_HOME may be
+a junction/symlink alias of the platform default and only the *spelling* is
+preserved (``hermes_cli/profiles.py:1694-1701``, #82581 junction follow-up) --
+``abspath`` would treat two spellings of the same physical directory as
+unrelated paths and let an access through the other spelling slip the guard.
 
 The audit hook is installed once per process and cannot be removed, so it is
 gated on ``_ARMED``: disarmed, its first operation is a bool check.
@@ -38,12 +55,14 @@ from typing import List, Optional, Tuple
 
 _AUDIT_EVENTS = frozenset({
     "open", "os.mkdir", "os.listdir", "os.scandir", "os.remove", "os.rename", "os.rmdir",
+    "os.chmod", "os.utime", "os.truncate", "os.link", "os.symlink",
 })
 
 _ARMED: Optional["NativeMemorySentinel"] = None
 _HOOK_INSTALLED = False
 _REAL_STAT = os.stat
 _REAL_LSTAT = os.lstat
+_REAL_ACCESS = os.access
 
 
 class NativeMemoryTouched(AssertionError):
@@ -55,13 +74,13 @@ class NativeMemorySentinel:
         self.directory = directory
         self.deny = deny
         self.accesses: List[Tuple[str, str]] = []
-        self._prefix = os.path.normcase(os.path.abspath(str(directory)))
+        self._prefix = os.path.normcase(os.path.realpath(str(directory)))
 
     def _covers(self, raw) -> bool:
         if not isinstance(raw, (str, bytes, os.PathLike)):
             return False  # an int fd, or something we cannot resolve to a path
         try:
-            candidate = os.path.normcase(os.path.abspath(os.fsdecode(raw)))
+            candidate = os.path.normcase(os.path.realpath(os.fsdecode(raw)))
         except Exception:
             return False
         return candidate == self._prefix or candidate.startswith(self._prefix + os.sep)
@@ -87,7 +106,11 @@ def _audit_hook(event: str, args) -> None:
     sentinel = _ARMED
     if sentinel is None or event not in _AUDIT_EVENTS or not args:
         return
-    sentinel.record(event, args[0])
+    # Multi-path events carry (src, dst, ...): os.rename INTO the native
+    # directory is a forbidden "restore"/"mirror" and lives in args[1].
+    # Non-path members (dir_fd ints) are rejected by _covers().
+    for arg in args:
+        sentinel.record(event, arg)
 
 
 def _guarded_stat(path, *a, **k):
@@ -104,6 +127,13 @@ def _guarded_lstat(path, *a, **k):
     return _REAL_LSTAT(path, *a, **k)
 
 
+def _guarded_access(path, *a, **k):
+    sentinel = _ARMED
+    if sentinel is not None:
+        sentinel.record("os.access", path)
+    return _REAL_ACCESS(path, *a, **k)
+
+
 @contextmanager
 def native_memory_sentinel(directory=None, *, deny: bool = False):
     """Arm the sentinel around ``directory`` (default: the configured native memory dir)."""
@@ -116,11 +146,11 @@ def native_memory_sentinel(directory=None, *, deny: bool = False):
         _HOOK_INSTALLED = True
     sentinel = NativeMemorySentinel(Path(directory), deny)
     previous = _ARMED
-    previous_stat, previous_lstat = os.stat, os.lstat
+    previous_stat, previous_lstat, previous_access = os.stat, os.lstat, os.access
     _ARMED = sentinel
-    os.stat, os.lstat = _guarded_stat, _guarded_lstat
+    os.stat, os.lstat, os.access = _guarded_stat, _guarded_lstat, _guarded_access
     try:
         yield sentinel
     finally:
         _ARMED = previous
-        os.stat, os.lstat = previous_stat, previous_lstat
+        os.stat, os.lstat, os.access = previous_stat, previous_lstat, previous_access
