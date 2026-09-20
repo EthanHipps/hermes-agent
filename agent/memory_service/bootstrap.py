@@ -52,13 +52,16 @@ def build_requested_context(
     )
 
 
-def _requests_authoritative(raw_config: object) -> bool:
+def requests_authoritative_mode(raw_config: object) -> bool:
     """Did the operator ask for authoritative mode? Must never raise.
 
     This decides the ERROR REGIME, not the mode: the mode itself is decided by
     the validated config. A malformed ``memory:`` section in additive mode must
     keep degrading the way it does today (§9.10 first bullet), while a bad
-    authoritative config must surface (§9.1 L944).
+    authoritative config must surface (§9.1 L944). Public: ``_init_memory``
+    (agent_init.py) reuses this same predicate to decide whether a failure
+    *anywhere* in the additive path (not just config resolution) still
+    degrades silently, or must propagate.
     """
     try:
         section = raw_config.get("memory")  # type: ignore[union-attr]
@@ -90,7 +93,7 @@ def init_memory_service(
     from agent.memory_service.config import MemoryConfigurationError, resolve_memory_service_config
     from agent.memory_service.service import select_memory_service
 
-    authoritative_requested = _requests_authoritative(raw_config)
+    authoritative_requested = requests_authoritative_mode(raw_config)
     try:
         config = resolve_memory_service_config(raw_config)
     except MemoryConfigurationError as exc:

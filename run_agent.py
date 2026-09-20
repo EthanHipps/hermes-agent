@@ -863,6 +863,9 @@ class AIAgent(
             except Exception as e:
                 logger.warning("Memory provider on_session_end failed during shutdown: %s", e, exc_info=True)
             _quietly(lambda: self._memory_manager.shutdown_all())
+        _service = getattr(self, "_memory_service", None)
+        if _service is not None:
+            _quietly(_service.shutdown)
         _notify_context_engine_session_end(self, messages)
 
     def commit_memory_session(self, messages: list = None) -> None:
