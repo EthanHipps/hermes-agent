@@ -100,6 +100,18 @@ image-gen plugins (all in `plugins/AGENTS.md`). `agent/curator.py` + `curator_ba
 the skill curator (`skills/AGENTS.md`). Cron sessions pass `skip_memory=True` by default — memory
 providers intentionally do not run during cron.
 
+`agent/memory_service/` is the host-owned generic memory service: `agent_init._init_memory`
+selects the router via `bootstrap.init_memory_service` **before** any native `MemoryStore` is
+constructed, so an authoritative or stateless-fallback session never builds, stats, or reads
+`MEMORY.md`/`USER.md` — `agent._memory_store` stays `None` in that case. `agent._memory_service`
+is `None` when memory is skipped entirely (cron's `skip_memory=True` with no `memory` toolset
+requested, where the store is `None` too) or when *additive* service init fails, which degrades
+to the native store alone exactly as before the router existed. A configuration error or
+fail-closed provider failure in authoritative mode propagates out of init instead — a session
+never switches mode because of failure. `tests/agent/memory_service/
+native_sentinel.py` guards the native directory with an audit hook plus `os.stat`/`os.lstat`
+interception (CPython raises no audit event for stat) so "not used" is proven, not inferred.
+
 ## Tests
 
 Loop/phase tests go in `tests/agent/`; patch the binding the phase actually reads (siblings often
