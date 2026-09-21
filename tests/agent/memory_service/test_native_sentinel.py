@@ -138,6 +138,7 @@ def test_one_access_records_exactly_one_entry(native_dir):
 
 
 @pytest.mark.require_symlinks
+@pytest.mark.windows_only
 def test_realpath_reentrancy_guard_survives_a_dangling_relative_symlink(native_dir):
     """ntpath.realpath's non-strict fallback (used when _getfinalpathname can't
     resolve a path, e.g. a dangling symlink) walks

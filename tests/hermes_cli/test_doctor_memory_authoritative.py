@@ -9,11 +9,8 @@ from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 @pytest.fixture
 def doctor_home(tmp_path, monkeypatch):
-    # Import (and thus warm any load_config()-triggered ensure_hermes_home() skeleton
-    # creation, e.g. via env_loader's terminal-config bridge) BEFORE HERMES_HOME points
-    # at this test's fresh directory -- otherwise the first-ever import of
-    # hermes_cli.doctor in this process creates memories/ (and SOUL.md) under our own
-    # tmp_path as a side effect of module import, which the tests below must not see.
+    # These tests isolate the checks; test_memory_cold_startup covers imports
+    # and skeleton creation with the sentinel armed in a fresh interpreter.
     import hermes_cli.doctor as doctor
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -82,11 +79,25 @@ def test_authoritative_provider_probe_never_touches_the_native_directory(doctor_
     assert not finding.issues, "a valid authoritative config should raise no doctor issues"
 
 
-def test_malformed_authoritative_config_does_not_crash_doctor(doctor_home):
-    """doctor diagnoses, it does not enforce: an unresolvable authoritative
-    config must degrade to the existing reporting, never propagate."""
-    _write_config(doctor_home, {"provider_mode": "authoritative"})  # no executable, no principal_id
+@pytest.mark.parametrize("invalid", ["principal_id", "provider_executable"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_invalid_authoritative_config_is_reported_without_native_access(doctor_home, invalid, existing):
+    import sys
+
+    section = {"provider": "example", "provider_mode": "authoritative",
+               "provider_executable": sys.executable, "principal_id": "ethan"}
+    section[invalid] = "" if invalid == "principal_id" else str(doctor_home / "missing.exe")
+    _write_config(doctor_home, section)
+    memories = doctor_home / "memories"
+    if existing:
+        memories.mkdir()
+        (memories / "MEMORY.md").write_text("dormant memory", encoding="utf-8")
+        (memories / "USER.md").write_text("dormant profile", encoding="utf-8")
     from hermes_cli.doctor_state import _check_directory_structure, _check_memory_provider
 
-    _check_memory_provider(True)        # must not raise
-    _check_directory_structure(True)    # must not raise
+    with native_memory_sentinel(memories) as sentinel:
+        finding = _check_memory_provider(True)
+        _check_directory_structure(True)
+    sentinel.assert_untouched()
+    assert any(invalid in issue for issue in finding.issues)
+    assert memories.exists() is existing

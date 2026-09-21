@@ -37,7 +37,9 @@ def build_requested_context(
         from hermes_cli.profiles import get_active_profile_name
 
         profile_id = get_active_profile_name()
-    directory = working_directory if working_directory is not None else os.getcwd()
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    directory = working_directory if working_directory is not None else resolve_agent_cwd()
     return w.RequestedContext(
         principal_id=config.principal_id,
         profile_id=profile_id,
@@ -61,7 +63,8 @@ def requests_authoritative_mode(raw_config: object) -> bool:
     authoritative config must surface (§9.1 L944). Public: ``_init_memory``
     (agent_init.py) reuses this same predicate to decide whether a failure
     *anywhere* in the additive path (not just config resolution) still
-    degrades silently, or must propagate.
+    degrades silently, or must propagate. Home initialization and doctor also
+    use this predicate to keep native storage dormant even when validation fails.
     """
     try:
         section = raw_config.get("memory")  # type: ignore[union-attr]

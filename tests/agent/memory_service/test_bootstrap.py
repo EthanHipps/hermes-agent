@@ -54,6 +54,23 @@ def test_canonical_directory_is_fully_resolved(tmp_path):
     assert ctx.canonical_directory == os.path.realpath(str(nested))
 
 
+def test_explicit_directory_overrides_the_runtime_directory(tmp_path, monkeypatch):
+    from agent.runtime_cwd import clear_session_cwd, set_session_cwd
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setenv("TERMINAL_CWD", str(runtime))
+    set_session_cwd(str(runtime))
+    try:
+        ctx = build_requested_context(
+            _authoritative(tmp_path), logical_session_id="s", platform="cli",
+            profile_id="default", working_directory=str(tmp_path),
+        )
+        assert ctx.canonical_directory == os.path.realpath(tmp_path)
+    finally:
+        clear_session_cwd()
+
+
 def test_working_directory_defaults_to_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = _authoritative(tmp_path)
@@ -72,7 +89,7 @@ from agent.memory_service.bootstrap import init_memory_service
 from agent.memory_service.config import MemoryConfigurationError
 from agent.memory_service.errors import MemoryBlockedError
 from agent.memory_service.service import MemoryDisposition
-from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore
+from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
 
 
 class _StoreSpy:
@@ -94,8 +111,9 @@ def _raw(tmp_path, **extra):
     return {"memory": section}
 
 
-def _fake_factory():
-    store = FakeProviderStore()
+def _fake_factory(directory):
+    registry = FakeRegistry(directories={os.path.realpath(directory): ("repo-1", "proj-1", None)})
+    store = FakeProviderStore(registry=registry)
     return lambda cfg: FakeAuthoritativeBackend(store, provider="example")
 
 
@@ -111,9 +129,7 @@ def test_authoritative_selects_provider_and_never_builds_the_store(tmp_path):
     spy = _StoreSpy()
     service, swallowed = init_memory_service(
         _raw(tmp_path), logical_session_id="s", platform="cli", store_factory=spy,
-        # The fake's registry maps only this literal path (fake_backend.py:188); an
-        # unregistered directory is a hard bind failure, not a degraded resolution.
-        working_directory="C:\\work\\repo", backend_factory=_fake_factory())
+        working_directory=str(tmp_path), backend_factory=_fake_factory(tmp_path))
     assert service.disposition is MemoryDisposition.AUTHORITATIVE
     assert spy.built == 0 and swallowed is None
     assert service.identity is not None and service.identity.principal_id == "ethan"
@@ -126,7 +142,7 @@ def test_authoritative_config_error_propagates(tmp_path):
     del raw["memory"]["principal_id"]
     with pytest.raises(MemoryConfigurationError, match="principal_id"):
         init_memory_service(raw, logical_session_id="s", platform="cli", store_factory=spy,
-                            working_directory=str(tmp_path), backend_factory=_fake_factory())
+                            working_directory=str(tmp_path), backend_factory=_fake_factory(tmp_path))
     assert spy.built == 0
 
 

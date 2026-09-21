@@ -47,7 +47,7 @@ def fake_backend(monkeypatch, tmp_path):
     discovery path instead of bypassing it with a test-only global.
 
     The registry matters here. ``_init_memory`` passes no ``working_directory``,
-    so ``build_requested_context`` derives it from ``os.getcwd()`` --  and
+    so ``build_requested_context`` derives it from the runtime cwd resolver, and
     ``FakeRegistry.resolve`` is an EXACT dict lookup on
     ``canonical_directory`` (``fake_backend.py:219``), not a prefix match. The
     fake's default registry knows only the literal ``C:\\work\\repo``, so an
@@ -72,6 +72,46 @@ def test_clean_start_touches_nothing(tmp_path, native_dir, fake_backend):
     sentinel.assert_untouched()
     assert agent._memory_store is None
     assert agent._memory_service.disposition is MemoryDisposition.AUTHORITATIVE
+
+
+@pytest.mark.parametrize("source", ["session", "terminal", "scoped_terminal"])
+def test_binding_uses_the_session_runtime_directory(tmp_path, native_dir, monkeypatch, source):
+    from agent.runtime_cwd import clear_session_cwd, set_session_cwd
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+
+    launch = tmp_path / "launch"
+    selected = tmp_path / "selected"
+    launch.mkdir()
+    selected.mkdir()
+    monkeypatch.chdir(launch)
+    monkeypatch.setenv("TERMINAL_CWD", str(selected if source == "terminal" else launch))
+    set_session_cwd(str(selected) if source == "session" else None)
+    scope = set_terminal_scope({"TERMINAL_CWD": str(selected)} if source == "scoped_terminal" else None)
+    registry = FakeRegistry(directories={
+        os.path.realpath(launch): ("launch-repo", "proj-1", None),
+        os.path.realpath(selected): ("selected-repo", "proj-1", None),
+    })
+    backend = FakeAuthoritativeBackend(FakeProviderStore(registry=registry), provider="example")
+    monkeypatch.setattr("plugins.memory.load_authoritative_backend_factory", lambda name: lambda cfg: backend)
+    agent = _agent()
+    try:
+        with native_memory_sentinel(native_dir) as sentinel:
+            _init_memory(agent, _authoritative_cfg(tmp_path), False, "gui")
+        sentinel.assert_untouched()
+        assert agent._memory_service.identity.repo_id == "selected-repo"
+    finally:
+        clear_session_cwd()
+        reset_terminal_scope(scope)
+
+
+@pytest.mark.parametrize("platform", [None, "", "gui"])
+def test_default_platform_binds_without_disabling_memory(tmp_path, native_dir, fake_backend, platform):
+    agent = _agent()
+    with native_memory_sentinel(native_dir) as sentinel:
+        _init_memory(agent, _authoritative_cfg(tmp_path), False, platform)
+    sentinel.assert_untouched()
+    assert agent._memory_service.disposition is MemoryDisposition.AUTHORITATIVE
+    assert agent._memory_service.identity.platform == (platform or "cli")
 
 
 def test_existing_file_start_touches_nothing(tmp_path, native_dir, fake_backend):

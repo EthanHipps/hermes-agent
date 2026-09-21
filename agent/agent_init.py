@@ -1308,7 +1308,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
                 agent._memory_service, _swallowed = init_memory_service(
                     _agent_cfg,
                     logical_session_id=getattr(agent, "session_id", "") or "",
-                    platform=platform,
+                    platform=platform or "cli",
                     store_factory=_build_native_store,
                 )
             except Exception:

@@ -111,6 +111,10 @@ fail-closed provider failure in authoritative mode propagates out of init instea
 never switches mode because of failure. `tests/agent/memory_service/
 native_sentinel.py` guards the native directory with an audit hook plus `os.stat`/`os.lstat`
 interception (CPython raises no audit event for stat) so "not used" is proven, not inferred.
+Home skeleton initialization and doctor suppress native storage based on the requested
+authority mode, even when provider validation fails. Cold-process tests arm the sentinel
+before imports/config loading. Bootstrap binds to `runtime_cwd.resolve_agent_cwd()` (unless
+an explicit working directory is supplied), and the default agent platform binds as `cli`.
 
 ## Tests
 
