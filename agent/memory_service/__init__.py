@@ -10,6 +10,7 @@ import logging
 
 from agent.memory_service import wire
 from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
+from agent.memory_service.bootstrap import build_requested_context, init_memory_service
 from agent.memory_service.builtin import BuiltinMemoryService
 from agent.memory_service.config import (
     PROVIDER_API_VERSION,
@@ -76,5 +77,7 @@ __all__ = [
     "RecallQuery",
     "ServiceCapabilities",
     "StatelessMemoryService",
+    "build_requested_context",
+    "init_memory_service",
     "select_memory_service",
 ]
