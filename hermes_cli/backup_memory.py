@@ -108,6 +108,60 @@ def root_pruning_ignore(
     return _ignore
 
 
+_TERMINAL_MIGRATION_STATES = frozenset({"completed", "rolled_back"})
+
+
+class MigrationInProgressError(ValueError):
+    """§9.8 L1637: backup/export/clone refuse while a memory migration is active.
+
+    A ValueError so existing profile entry points (CLI, slash, REST 400, TUI 4062)
+    already report it as a refused request (D-R44-c). The message is content-free.
+    """
+
+    code = MIGRATION_IN_PROGRESS
+
+    def __init__(self, manifests: Iterable[Path]) -> None:
+        self.manifests = tuple(manifests)
+        super().__init__(
+            f"{MIGRATION_IN_PROGRESS}: {len(self.manifests)} memory migration(s) in progress. Finish or "
+            "roll back the migration before archiving; an archive would omit its restart state.")
+
+
+def active_migration_manifests(home: Path) -> List[Path]:
+    """Migration files under *home* not provably compacted (ruling R44-9: top-level ``state``).
+
+    Cross-repository contract C9, pinned in the ygg ledger as K-9: R45's writer and
+    ygg R55's purge inventory must keep ``state`` in {active, completed, rolled_back}.
+    Every provider subdirectory is scanned, never just ``memory.provider``'s, so an
+    active manifest stays visible after the operator renames the configured provider.
+    Anything not provably terminal blocks, because §9.9 L1647 says missing or corrupt
+    state blocks resume — an archive of it would omit the restart state.
+    """
+    root = Path(home) / MIGRATION_STATE_DIRNAME
+    if not root.is_dir():
+        return []
+    try:
+        candidates = sorted(root.glob("*/*/*.json"))
+    except OSError:
+        return [root]  # unlistable state cannot prove "no active migration" (§9.9 L1647)
+    active: List[Path] = []
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if not (isinstance(data, dict) and data.get("state") in _TERMINAL_MIGRATION_STATES):
+            active.append(path)
+    return active
+
+
+def refuse_if_migration_in_progress(homes: Iterable[Path]) -> None:
+    """Raise :class:`MigrationInProgressError` if any of *homes* has an active migration."""
+    active = [manifest for home in homes for manifest in active_migration_manifests(home)]
+    if active:
+        raise MigrationInProgressError(active)
+
+
 def disposition_line(home: Path, *, kind: str) -> Optional[str]:
     """The §9.8 L1637 sentence for *home*, or ``None`` in additive mode (nothing is printed)."""
     disposition = home_disposition(home)

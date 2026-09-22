@@ -83,3 +83,62 @@ def test_disposition_line_is_none_for_additive_and_says_not_included_otherwise(t
     assert m.disposition_line(additive, kind="archive") is None
     assert "authoritative ygg memory is provider-managed and not included" in m.disposition_line(
         authoritative, kind="archive")
+
+
+def _state(home, state=None, *, provider="example", epoch="ep-1", run="run-1", raw=None):
+    path = home / "migrations" / provider / epoch / f"{run}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw if raw is not None else json.dumps(
+        {"schema": "ygg.hermes-migration/v1", "state": state}), encoding="utf-8")
+    return path
+
+
+def test_no_migration_directory_means_nothing_in_progress(tmp_path):
+    assert _mod().active_migration_manifests(tmp_path) == []
+
+
+@pytest.mark.parametrize("state", ["completed", "rolled_back"])
+def test_compacted_receipts_do_not_block(tmp_path, state):
+    _state(tmp_path, state)
+    assert _mod().active_migration_manifests(tmp_path) == []
+
+
+def test_an_active_manifest_blocks(tmp_path):
+    path = _state(tmp_path, "active")
+    assert _mod().active_migration_manifests(tmp_path) == [path]
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[]", "{}", '{"state": "paused"}', '{"state": null}'])
+def test_corrupt_missing_or_unknown_state_blocks(tmp_path, raw):  # §9.9 L1647, fail closed
+    # The manifest must exist BEFORE the scan: `a == b` evaluates `a` first, so inlining
+    # _state() on the right would scan an empty home and pass for the wrong reason.
+    path = _state(tmp_path, raw=raw)
+    assert _mod().active_migration_manifests(tmp_path) == [path]
+
+
+def test_every_provider_directory_is_scanned(tmp_path):  # R44-9: never keyed on memory.provider
+    path = _state(tmp_path, "active", provider="some-other-provider")
+    assert _mod().active_migration_manifests(tmp_path) == [path]
+
+
+def test_non_manifest_files_are_ignored(tmp_path):
+    lock = tmp_path / "migrations" / "example" / "ep-1" / "migration.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+    (lock.parent / "run-1.json.tmp").write_text("{", encoding="utf-8")
+    assert _mod().active_migration_manifests(tmp_path) == []
+
+
+def test_refusal_is_a_value_error_carrying_the_spec_code_and_no_path(tmp_path):
+    m = _mod()
+    _state(tmp_path, "active")
+    with pytest.raises(ValueError) as exc:
+        m.refuse_if_migration_in_progress([tmp_path])
+    assert isinstance(exc.value, m.MigrationInProgressError)
+    assert exc.value.code == "MIGRATION_IN_PROGRESS" and str(exc.value).startswith("MIGRATION_IN_PROGRESS")
+    assert str(tmp_path) not in str(exc.value)
+
+
+def test_no_active_manifest_means_no_refusal(tmp_path):
+    _state(tmp_path, "completed")
+    assert _mod().refuse_if_migration_in_progress([tmp_path]) is None
