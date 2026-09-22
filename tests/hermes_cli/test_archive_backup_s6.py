@@ -222,3 +222,102 @@ def test_archives_never_construct_a_provider_backend(tmp_path, env, monkeypatch)
     _backup().run_backup(Namespace(output=str(tmp_path / "out.zip")))
     assert _backup().create_quick_snapshot(hermes_home=home) is not None
     assert _backup().create_pre_update_backup(hermes_home=home) is not None
+
+
+# --- Task 6: hermes import ---
+
+def _legacy_zip(path: Path, config_yaml: str, *, native=True, external=False) -> Path:
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("config.yaml", config_yaml)
+        zf.writestr(".env", "KEY=value\n")
+        if native:
+            zf.writestr("memories/MEMORY.md", "legacy memory\n")
+            zf.writestr("memories/USER.md", "legacy profile\n")
+        if external:
+            zf.writestr("_external/.legacyprov/config.json", "{}")
+    return path
+
+
+def test_restore_of_an_authoritative_archive_restores_configuration_and_disposition_only(tmp_path, env, capsys):
+    source = env(_home(tmp_path / "src", provider="ygg"))
+    _dormant(source)
+    _backup().run_backup(Namespace(output=str(tmp_path / "a.zip")))
+    target = env(tmp_path / "dst")
+    target.mkdir()
+    capsys.readouterr()
+    with native_memory_sentinel(target / "memories") as sentinel:
+        _backup().run_import(Namespace(zipfile=str(tmp_path / "a.zip"), force=True))
+    sentinel.assert_untouched()
+    assert not (target / "memories").exists()
+    assert "provider_mode: authoritative" in (target / "config.yaml").read_text(encoding="utf-8")
+    record = yaml.safe_load((target / DISPOSITION_RECORD_NAME).read_text(encoding="utf-8"))
+    assert record == {"curated_memory": SPEC_BLOCK}
+    out = capsys.readouterr().out
+    assert "reconnect-provider" in out and "was not restored" in out
+    assert "memory-provider file" not in out
+
+
+def test_legacy_archive_native_and_external_files_stay_in_the_archive(tmp_path, env, capsys):  # R44-6
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    archive = _legacy_zip(tmp_path / "legacy.zip", _authoritative_yaml(exe, "example"), external=True)
+    target = env(tmp_path / "dst")
+    target.mkdir()
+    with native_memory_sentinel(target / "memories") as sentinel:
+        _backup().run_import(Namespace(zipfile=str(archive), force=True))
+    sentinel.assert_untouched()
+    assert not (target / "memories").exists()
+    assert not (tmp_path / ".legacyprov" / "config.json").exists()
+    out = capsys.readouterr().out
+    assert "2 legacy native memory file(s)" in out and "migration" in out
+
+
+def test_additive_archive_restore_is_unchanged(tmp_path, env):
+    archive = _legacy_zip(tmp_path / "old.zip", "model:\n  provider: openrouter\n")
+    target = env(tmp_path / "dst")
+    target.mkdir()
+    _backup().run_import(Namespace(zipfile=str(archive), force=True))
+    assert (target / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "legacy memory\n"
+    assert not (target / DISPOSITION_RECORD_NAME).exists()
+
+
+def test_restore_that_switches_authoritative_to_additive_warns_native_is_stale(tmp_path, env, capsys):  # R44-7
+    target = env(_home(tmp_path / "dst", provider="example"))
+    archive = _legacy_zip(tmp_path / "old.zip", "model:\n  provider: openrouter\n", native=False)
+    _backup().run_import(Namespace(zipfile=str(archive), force=True))
+    out = capsys.readouterr().out
+    assert "authoritative to additive" in out and "stale" in out
+
+
+@pytest.mark.parametrize("config_yaml", ["model:\n  provider: openrouter\n", None])  # additive and authoritative
+def test_host_session_state_members_are_never_restored(tmp_path, env, config_yaml):
+    """Ruling X-1 (a): a hand-built or pre-R44 archive may carry them; a restore withholds them in every mode."""
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    archive = tmp_path / "with-state.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("config.yaml", config_yaml if config_yaml else _authoritative_yaml(exe, "example"))
+        zf.writestr("memory_service/sessions/" + "aa" * 32 + ".json", '{"schema": "hermes.memory-host-session/v1"}')
+    target = env(tmp_path / "dst")
+    target.mkdir()
+    _backup().run_import(Namespace(zipfile=str(archive), force=True))
+    assert not (target / "memory_service").exists()
+    assert (target / "config.yaml").exists()
+
+
+def test_profile_subtree_restore_follows_the_profiles_own_config(tmp_path, env):  # R44-2
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    archive = tmp_path / "multi.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("config.yaml", "model:\n  provider: openrouter\n")
+        zf.writestr("memories/MEMORY.md", "root additive memory\n")
+        zf.writestr("profiles/coder/config.yaml", _authoritative_yaml(exe, "example"))
+        zf.writestr("profiles/coder/memories/MEMORY.md", "legacy coder memory\n")
+    target = env(tmp_path / "dst")
+    target.mkdir()
+    with native_memory_sentinel(target / "profiles" / "coder" / "memories") as sentinel:
+        _backup().run_import(Namespace(zipfile=str(archive), force=True))
+    sentinel.assert_untouched()
+    assert (target / "memories" / "MEMORY.md").exists()
+    assert not (target / "profiles" / "coder" / "memories").exists()

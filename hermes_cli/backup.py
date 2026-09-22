@@ -996,6 +996,28 @@ def _import_members(
     return restored, restored_external, errors, skipped_runtime, db_shrunk
 
 
+def _print_restore_disposition(plan) -> None:
+    """Say what a restore did NOT restore, and why (§9.8 L1637-1641, rulings R44-6, R44-7, X-1)."""
+    if plan.withheld_native:
+        ext = (f" and {len(plan.withheld_external)} memory-provider file(s)"
+               if plan.withheld_external else "")
+        print(f"\n  Left {len(plan.withheld_native)} legacy native memory file(s){ext} in the archive: "
+              "the restored configuration is authoritative, so they stay dormant. "
+              "Importing them requires the explicit memory migration procedure.")
+    for label, disposition in plan.dispositions:
+        where = f"[{label.rstrip('/')}] " if label else ""
+        print(f"\n  {where}{disposition.restore_message()}")
+    for label in plan.switched_to_additive:
+        print(f"\n  Warning: this restore switches {label.rstrip('/') or 'this home'} from authoritative to "
+              "additive memory. Its dormant MEMORY.md/USER.md are stale; authoritative changes are not in them.")
+    if plan.withheld_host_state:
+        # Deliberately not printed: host session state is Hermes's own transport state, not
+        # memory content, and no archive reachable at 5c583156f7 can contain it -- a printed
+        # line would change additive output for a state that cannot occur (§9.10 L1668).
+        logger.info("hermes import: withheld %d host session-state file(s) (spec 9.8)",
+                    len(plan.withheld_host_state))
+
+
 def run_import(args) -> None:
     """Restore a Hermes backup from a zip file."""
     zip_path = Path(args.zipfile).expanduser().resolve()
@@ -1023,11 +1045,16 @@ def run_import(args) -> None:
             return
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
+        # §9.8 L1639: a restore restores Hermes configuration and the disposition record only.
+        # Planned BEFORE the first write, so withheld members are never created (R44-6, X-1 (a)).
+        from hermes_cli.backup_memory import plan_restore
+        plan = plan_restore(zf, members, prefix, hermes_root, external_prefix=_EXTERNAL_PREFIX)
         t0 = time.monotonic()
         restored, restored_external, errors, skipped_runtime, db_shrunk = _import_members(
-            zf, members, prefix, hermes_root, file_count)
+            zf, plan.restore, prefix, hermes_root, len(plan.restore))
         elapsed = time.monotonic() - t0
         print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
+        _print_restore_disposition(plan)
         if restored_external:
             print(f"\n  Restored {restored_external} memory-provider file(s) to "
                   f"their original location(s) outside {display_hermes_home()}.")

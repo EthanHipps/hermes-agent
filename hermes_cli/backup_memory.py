@@ -162,6 +162,122 @@ def refuse_if_migration_in_progress(homes: Iterable[Path]) -> None:
         raise MigrationInProgressError(active)
 
 
+class RestorePlan(NamedTuple):
+    """What a restore writes, what it withholds, and what it must say (§9.8 L1639-1641)."""
+
+    restore: List[str]                                   # members to hand to _import_members
+    withheld_native: List[str]
+    withheld_external: List[str]
+    dispositions: List[Tuple[str, object]]               # (home label, ArchiveDisposition) restored authoritative
+    switched_to_additive: List[str]                      # home labels flipped authoritative -> additive
+    withheld_host_state: List[str]                       # X-1 (a): <prefix>memory_service/** in EVERY mode
+
+
+def _archive_home_disposition(zf, member: str):
+    """The disposition an archived ``config.yaml`` member declares, or ``None``. Never raises."""
+    from agent.memory_service.archive import archive_disposition
+    try:
+        from hermes_cli.config import _expand_env_vars
+        from hermes_cli.managed_scope import apply_managed_overlay
+        from utils import fast_safe_load
+        data = fast_safe_load(zf.read(member).decode("utf-8")) or {}
+        return archive_disposition(apply_managed_overlay(_expand_env_vars(data)))
+    except Exception:
+        return None
+
+
+def plan_restore(zf, members: List[str], prefix: str, target_root: Path, *, external_prefix: str) -> RestorePlan:
+    """Decide every member's fate BEFORE anything is written (§9.8 L1639).
+
+    Each home's mode comes from that home's own ``config.yaml`` *inside the archive*,
+    falling back to the target's current config when the archive carries none
+    (ruling R44-2). Planning ahead of the first write is what makes the sentinel's
+    "never created" provable: an authoritative home's native members are never
+    handed to ``_import_members`` at all, rather than written and removed.
+    """
+    rels = {member: (member[len(prefix):] if prefix and member.startswith(prefix) else member)
+            for member in members}
+
+    home_prefixes = [""]
+    for rel in rels.values():
+        parts = rel.split("/")
+        if len(parts) > 2 and parts[0] == "profiles" and parts[1]:
+            candidate = f"profiles/{parts[1]}/"
+            if candidate not in home_prefixes:
+                home_prefixes.append(candidate)
+    # Longest first, so a profile member is never attributed to the root home.
+    ordered = sorted(home_prefixes, key=len, reverse=True)
+
+    after_by_home = {}
+    dispositions: List[Tuple[str, object]] = []
+    switched: List[str] = []
+    for home_prefix in home_prefixes:
+        config_member = f"{prefix}{home_prefix}config.yaml"
+        has_config = config_member in rels
+        before = home_disposition(Path(target_root) / home_prefix)
+        after = _archive_home_disposition(zf, config_member) if has_config else before
+        after_by_home[home_prefix] = after
+        if after is not None:
+            dispositions.append((home_prefix, after))
+        elif before is not None and has_config:
+            # §9.9 L1662: an explicit rollback to additive must warn that the dormant
+            # native files are stale. R44-7 (a) allows the flip; it does not hide it.
+            switched.append(home_prefix)
+
+    restore: List[str] = []
+    withheld_native: List[str] = []
+    withheld_external: List[str] = []
+    withheld_host_state: List[str] = []
+    for member, rel in rels.items():
+        if rel.startswith(external_prefix):
+            # §9.8 L1639 forbids reporting memory restoration, and _external/ restore prints
+            # exactly that line, so an authoritative root withholds provider state too (R44-6).
+            (withheld_external if after_by_home[""] is not None else restore).append(member)
+            continue
+        home_prefix = next((h for h in ordered if rel.startswith(h)), "")
+        if _is_under(rel, home_prefix, HOST_STATE_DIRNAME):
+            # X-1 (a): host session state never restores, in EVERY mode. §9.8 L1639 lets a
+            # restored configuration reach the provider only through a new ``new_session``.
+            withheld_host_state.append(member)
+        elif after_by_home[home_prefix] is not None and _is_under(rel, home_prefix, NATIVE_MEMORY_DIRNAME):
+            withheld_native.append(member)
+        else:
+            restore.append(member)
+    return RestorePlan(restore, withheld_native, withheld_external, dispositions, switched, withheld_host_state)
+
+
+def _is_under(rel: str, home_prefix: str, dirname: str) -> bool:
+    base = f"{home_prefix}{dirname}"
+    return rel == base or rel.startswith(base + "/")
+
+
+def withhold_native_memory(staged_home: Path) -> bool:
+    """Drop ``memories/`` from an authoritative *staged* copy before it is published (R44-6).
+
+    Only ever called on a temporary staging directory, never on a live home.
+    """
+    if home_disposition(staged_home) is None:
+        return False
+    native = Path(staged_home) / NATIVE_MEMORY_DIRNAME
+    if not native.is_dir():
+        return False
+    shutil.rmtree(native, ignore_errors=True)
+    return True
+
+
+def withhold_host_state(staged_home: Path) -> bool:
+    """Drop ``memory_service/`` from a *staged* copy in EVERY mode (ruling X-1 (a), contract C3).
+
+    No ``home_disposition`` check: host session state never restores, whatever the mode
+    (§9.8 L1639). Only ever called on a temporary staging directory.
+    """
+    host_state = Path(staged_home) / HOST_STATE_DIRNAME
+    if not host_state.is_dir():
+        return False
+    shutil.rmtree(host_state, ignore_errors=True)
+    return True
+
+
 def disposition_line(home: Path, *, kind: str) -> Optional[str]:
     """The §9.8 L1637 sentence for *home*, or ``None`` in additive mode (nothing is printed)."""
     disposition = home_disposition(home)
