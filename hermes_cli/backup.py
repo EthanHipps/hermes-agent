@@ -1258,9 +1258,19 @@ def _create_quick_snapshot_locked(
         "total_size": sum(manifest.values()), "files": manifest,
         "failed_dbs": failed_dbs, "oversized_skipped": oversized_skipped,
     }
+    # R44-8 (a): quick snapshots are EXEMPT from the migration refusal -- their fixed file
+    # list never holds migration state, and an in-place overlay restore cannot lose a
+    # manifest. They still declare the disposition (§9.8 L1627). _QUICK_STATE_FILES is
+    # deliberately untouched (hermes_cli/AGENTS.md: never a partial/tiered snapshot set).
+    from hermes_cli.backup_memory import home_disposition
+    disposition = home_disposition(home)
+    if disposition is not None:
+        meta["curated_memory"] = disposition.as_mapping()
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     os.replace(staging_dir, root / snap_id)
+    if disposition is not None:
+        print(f"  {disposition.archive_message(what='snapshot')}.")
     # Auto-prune (pre-update callers pass a smaller keep so state.db copies don't accumulate).
     # Skip when a DB failed to capture OR was skipped for size (#68805): the snapshot is
     # incomplete and the older one may hold the only recoverable database.
@@ -1615,6 +1625,19 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
 
 
 def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional[Path]:
+    from agent.memory_service.archive import DISPOSITION_RECORD_NAME
+    from hermes_cli.backup_memory import (
+        MigrationInProgressError, archive_homes, home_disposition, refuse_if_migration_in_progress)
+    homes = archive_homes(hermes_root)
+    try:
+        refuse_if_migration_in_progress(home for _, home in homes)
+    except MigrationInProgressError as exc:
+        # R44-8 (a): automatic zips are SKIPPED, never raised. Their "never raises, the update
+        # continues" contract holds, and the printed reason says why the safety net is missing.
+        logger.warning("Full-zip backup skipped: %s", exc)
+        print(f"  ⚠ Backup skipped: {exc}")
+        return None
+    dispositions = [(label, d) for label, home in homes if (d := home_disposition(home)) is not None]
     scan_started = time.monotonic()
     logger.info("automatic backup phase=scan status=started")
     try:
@@ -1640,6 +1663,8 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
                 on_error=lambda rel, exc: logger.debug("Skipping %s in zip backup: %s", rel, exc),
                 on_progress=lambda i: logger.info(
                     "automatic backup phase=archive status=progress completed=%d total=%d", i, len(files_to_add)))
+            for label, disposition in dispositions:  # written fresh per archive (R44-5)
+                zf.writestr(f"{label}{DISPOSITION_RECORD_NAME}", disposition.record_text())
     except (OSError, _SQLiteSnapshotError) as exc:
         # The hidden partial is already gone; ``out_path`` may be a previous valid backup: keep it.
         logger.warning("Full-zip backup: zip write failed: %s", exc)
@@ -1647,6 +1672,9 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     logger.info("automatic backup phase=archive status=complete duration_ms=%.1f files=%d bytes=%d",
                 (time.monotonic() - archive_started) * 1000, len(files_to_add),
                 out_path.stat().st_size)
+    for label, disposition in dispositions:  # no stdout: automatic zips are not a human-facing path
+        logger.info("automatic backup: %s%s", f"[{label.rstrip('/')}] " if label else "",
+                    disposition.archive_message())
     return out_path
 
 

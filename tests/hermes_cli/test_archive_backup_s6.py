@@ -165,3 +165,60 @@ def test_host_session_state_never_enters_a_backup(tmp_path, env, provider):
     _backup().run_backup(Namespace(output=str(tmp_path / "out.zip")))
     with zipfile.ZipFile(tmp_path / "out.zip") as zf:
         assert not [n for n in zf.namelist() if n == "memory_service" or n.startswith("memory_service/")]
+
+
+# --- Task 5: automatic full zips and quick snapshots ---
+
+def test_pre_update_zip_is_dormant_and_carries_the_record(tmp_path, env):
+    home = env(_home(tmp_path / ".hermes", provider="example"))
+    native = _dormant(home)
+    with native_memory_sentinel(native) as sentinel:
+        out = _backup().create_pre_update_backup(hermes_home=home)
+    sentinel.assert_untouched()
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        assert yaml.safe_load(zf.read(DISPOSITION_RECORD_NAME)) == {
+            "curated_memory": {**SPEC_BLOCK, "provider": "example"}}
+    assert not [n for n in names if n.startswith("memories")]
+
+
+@pytest.mark.parametrize("helper", ["create_pre_update_backup", "create_pre_migration_backup"])
+def test_automatic_zips_are_skipped_during_an_active_migration(tmp_path, env, capsys, helper):  # R44-8(a)
+    home = env(_home(tmp_path / ".hermes"))
+    _migration(home, "active")
+    assert getattr(_backup(), helper)(hermes_home=home) is None
+    assert not list((home / "backups").glob("*.zip"))
+    assert "MIGRATION_IN_PROGRESS" in capsys.readouterr().out
+
+
+def test_quick_snapshot_manifest_carries_the_disposition(tmp_path, env, capsys):
+    home = env(_home(tmp_path / ".hermes", provider="example"))
+    snap = _backup().create_quick_snapshot(hermes_home=home)
+    manifest = json.loads((home / "state-snapshots" / snap / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["curated_memory"] == {**SPEC_BLOCK, "provider": "example"}
+    assert "provider-managed and not included" in capsys.readouterr().out
+
+
+def test_additive_quick_snapshot_manifest_has_no_disposition(tmp_path, env):
+    home = env(_home(tmp_path / ".hermes"))
+    snap = _backup().create_quick_snapshot(hermes_home=home)
+    manifest = json.loads((home / "state-snapshots" / snap / "manifest.json").read_text(encoding="utf-8"))
+    assert "curated_memory" not in manifest
+
+
+def test_quick_snapshot_is_not_refused_by_an_active_migration(tmp_path, env):  # R44-8(a)
+    home = env(_home(tmp_path / ".hermes", provider="example"))
+    _migration(home, "active")
+    assert _backup().create_quick_snapshot(hermes_home=home) is not None
+
+
+def test_archives_never_construct_a_provider_backend(tmp_path, env, monkeypatch):  # R44-10, §9.6 L1584
+    home = env(_home(tmp_path / ".hermes", provider="example"))
+
+    def refuse(name):
+        raise AssertionError("an archive operation contacted the provider")
+
+    monkeypatch.setattr("plugins.memory.load_authoritative_backend_factory", refuse)
+    _backup().run_backup(Namespace(output=str(tmp_path / "out.zip")))
+    assert _backup().create_quick_snapshot(hermes_home=home) is not None
+    assert _backup().create_pre_update_backup(hermes_home=home) is not None
