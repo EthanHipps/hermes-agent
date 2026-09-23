@@ -103,6 +103,30 @@ def record_curated_prompt(agent: Any, prompt: str) -> None:
         save_host_state(replace(record, prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest()))
 
 
+def curated_request_gate(agent: Any) -> Optional[str]:
+    """A fresh successful load per enabled target before this model request (§9.6 L1564).
+
+    Returns ``None`` to proceed or a content-free block message. Ruling R40-2 (a):
+    the load gates; it never re-renders the byte-stable prompt. Ruling R40-1 (c):
+    a load made while rendering the prompt for this same request satisfies it once.
+    """
+    if _disposition(agent) != "provider_authoritative":
+        return None
+    if getattr(agent, "_curated_fresh_for_next_request", False):
+        agent._curated_fresh_for_next_request = False          # ruling R40-1 (c)
+        return None
+    service = agent._memory_service
+    try:
+        for target in ("memory", "user"):
+            if service.target_enabled(target):
+                service.load_curated(target)
+    except MemoryBlockedError:
+        logger.warning("model request blocked: curated memory unavailable")
+        return ("Curated memory is unavailable, so this request was not sent to the model. "
+                + (service.degraded_warning() or ""))
+    return None
+
+
 def curated_prompt_reusable(agent: Any, stored_prompt: str) -> bool:
     """Reuse a stored prompt only if this disposition built exactly those bytes (ruling R40-4d).
 
