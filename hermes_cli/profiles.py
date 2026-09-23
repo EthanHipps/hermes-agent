@@ -1524,6 +1524,13 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     force-redacted first. Returns the output file path."""
     import tempfile
     canon, profile_dir = _existing_profile_dir(name)
+    from agent.memory_service.archive import DISPOSITION_RECORD_NAME
+    from hermes_cli.backup_memory import (
+        archive_prune_names, home_disposition, refuse_if_migration_in_progress, root_pruning_ignore)
+    # §9.8 L1637: refuse before any archive exists, so a half-written export cannot
+    # outlive an interrupted migration (R44-8).
+    refuse_if_migration_in_progress([profile_dir])
+    disposition = home_disposition(profile_dir)
     # Archive base name without extension (.tar.gz appended by the writer).
     base = str(Path(output_path)).removesuffix(".tar.gz").removesuffix(".tgz")
 
@@ -1533,7 +1540,11 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     def _ignore_credentials(directory: str, contents: list) -> set:
         return _EXPORT_CREDENTIAL_FILES & set(contents)
 
-    ignore = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
+    inner = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
+    # Drop the archive-policy names at the profile root BEFORE copytree descends, so an
+    # authoritative home's memories/ is never listed or stat'd (§9.1 L948), and migrations/,
+    # the record and memory_service/ never leave in any mode (R44-5, X-1 (a)).
+    ignore = root_pruning_ignore(profile_dir, archive_prune_names(profile_dir), inner)
     with tempfile.TemporaryDirectory() as tmpdir:
         staged = Path(tmpdir) / canon
         shutil.copytree(profile_dir, staged, symlinks=True, ignore=ignore)
@@ -1542,6 +1553,10 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         _scrub_export_secrets(staged)
+        if disposition is not None:
+            # After the scrub: force-redaction rewrites .yaml files and must never
+            # alter the spec block (D-R44-g).
+            (staged / DISPOSITION_RECORD_NAME).write_text(disposition.record_text(), encoding="utf-8")
         return Path(make_targz(base, tmpdir, canon))
 
 
@@ -1584,6 +1599,15 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
         if archive_root != canon:
             final_source = staging_root / canon
             extracted.rename(final_source)
+        # Withheld on the STAGED copy, so nothing is ever created in the live profile
+        # (§9.1 L948 forbids "restore into"; §9.10 L1669 requires no native touch).
+        from hermes_cli.backup_memory import withhold_host_state, withhold_native_memory
+        if withhold_native_memory(final_source):
+            logger.warning(
+                "profile import %s: legacy native memory left in the archive "
+                "(authoritative configuration; spec 9.8)", canon)
+        if withhold_host_state(final_source):  # every mode (ruling X-1 (a))
+            logger.info("profile import %s: withheld host session state (spec 9.8)", canon)
         shutil.move(str(final_source), str(profile_dir))
     return profile_dir
 
