@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.memory_service.errors import MemoryBlockedError
+from agent.memory_service.lifecycle import curated_prompt_reusable
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.message_sanitization import _repair_tool_call_arguments, _sanitize_surrogates
@@ -673,7 +674,11 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                 agent.session_id, exc,
             )
 
-    if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
+    # curated_prompt_reusable is True for an additive or absent service; in
+    # authoritative or stateless mode it demands the exact disposition-plus-digest
+    # match of ruling R40-4d, so a prompt another disposition built is rebuilt below.
+    if (stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt)
+            and curated_prompt_reusable(agent, stored_prompt)):
         if _bot_chat_prompt_stale(agent, stored_prompt):
             logger.info(
                 "Bot Chat capability epoch changed for session %s; rebuilding system prompt to "

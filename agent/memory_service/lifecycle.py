@@ -58,6 +58,28 @@ def record_curated_prompt(agent: Any, prompt: str) -> None:
         save_host_state(replace(record, prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest()))
 
 
+def curated_prompt_reusable(agent: Any, stored_prompt: str) -> bool:
+    """Reuse a stored prompt only if this disposition built exactly those bytes (ruling R40-4d).
+
+    A stored prompt from an additive-era session carries native ``MEMORY.md`` text;
+    reusing it in an authoritative or stateless session would inject native data
+    (§9.1 L948). A whole-prompt digest needs no heuristic, and the guard is a no-op
+    for an additive or absent service.
+    """
+    disposition = _disposition(agent)
+    if disposition not in _SERVICE_RENDERED:
+        return True
+    from agent.memory_service.errors import BindingInvalidError
+    from agent.memory_service.host_state import load_host_state
+
+    try:
+        record = load_host_state(agent.session_id)
+    except BindingInvalidError:
+        return False
+    return (record is not None and record.disposition == disposition
+            and record.prompt_sha256 == hashlib.sha256(stored_prompt.encode("utf-8")).hexdigest())
+
+
 def memory_guidance_flags(agent: Any) -> Optional[Tuple[bool, bool]]:
     """The stable-tier memory-tool guidance flags (contract C7; ruling X-2 (c)).
 

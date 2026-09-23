@@ -185,3 +185,77 @@ def test_guidance_is_absent_when_the_memory_tool_is_not_loaded(agent_env_factory
     assert "memory" not in env.agent.valid_tool_names
     block = _tool_guidance_block(env.agent)
     assert block is None or "persistent memory" not in block
+
+
+# ---- ruling R40-4d: the stored-prompt reuse guard ---------------------------------------------
+
+
+def _persist_prompt(env, session_id, prompt):
+    """Store a system prompt on the session row, the way a finished turn does."""
+    env.db.create_session(session_id, "cli")
+    env.db.update_system_prompt(session_id, prompt)
+
+
+def test_resumed_session_reuses_its_own_stored_prompt_verbatim(agent_env):
+    """§9.7 L1597: the byte-stable prompt survives a rebuilt agent for the same session."""
+    from agent.conversation_loop import _restore_or_build_system_prompt
+
+    agent_env.store.seed_record(REPO_SCOPE, "memory", "MEMORY-FACT")
+    first = agent_env.agent._build_system_prompt(None)
+    _persist_prompt(agent_env, agent_env.agent.session_id, first)
+    second_agent = agent_env.build_agent(agent_env.agent.session_id)
+    _restore_or_build_system_prompt(second_agent, None, [{"role": "user", "content": "hi"}])
+    assert second_agent._cached_system_prompt == first
+
+
+def test_additive_era_stored_prompt_is_rebuilt_in_an_authoritative_session(agent_env):
+    """A stored prompt carrying native MEMORY.md text must not be injected (§9.1 L948)."""
+    from agent.conversation_loop import _restore_or_build_system_prompt
+
+    agent_env.store.seed_record(REPO_SCOPE, "memory", "MEMORY-FACT")
+    native_era = agent_env.agent._build_system_prompt(None) + "\n\nMemory\n- NATIVE-FACT"
+    _persist_prompt(agent_env, agent_env.agent.session_id, native_era)
+    agent = agent_env.build_agent(agent_env.agent.session_id)
+    _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
+    assert "NATIVE-FACT" not in agent._cached_system_prompt
+    assert "MEMORY-FACT" in agent._cached_system_prompt
+
+
+def test_stateless_session_rebuilds_a_prompt_it_did_not_build(agent_env_factory):
+    """A prompt an authoritative session built carries curated memory a stateless
+    session must not serve; only the digest recorded for THIS disposition reuses."""
+    from agent.conversation_loop import _restore_or_build_system_prompt
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+
+    env = agent_env_factory()
+    env.store.seed_record(REPO_SCOPE, "memory", "AUTHORITATIVE-ERA-FACT")
+    authoritative_prompt = env.agent._build_system_prompt(None)
+    assert "AUTHORITATIVE-ERA-FACT" in authoritative_prompt
+
+    save_host_state(HostStateRecord("stateless-3", "stateless", None))
+    agent = env.build_agent("stateless-3")
+    _persist_prompt(env, "stateless-3", authoritative_prompt)
+    _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
+    assert "AUTHORITATIVE-ERA-FACT" not in agent._cached_system_prompt
+
+
+def test_additive_stored_prompt_reuse_is_unchanged(tmp_path):
+    """§9.10 L1668: the guard is True for an additive or absent service, and touches nothing."""
+    from types import SimpleNamespace
+
+    from agent.memory_service.host_state import host_state_dir
+    from agent.memory_service.lifecycle import curated_prompt_reusable
+
+    agent = SimpleNamespace(_memory_service=None, session_id="s-1")
+    assert curated_prompt_reusable(agent, "anything") is True
+    assert not host_state_dir().exists()
+
+
+def test_a_corrupt_record_never_reuses_a_stored_prompt(agent_env):
+    from agent.memory_service.host_state import host_state_dir
+    from agent.memory_service.lifecycle import curated_prompt_reusable
+
+    prompt = agent_env.agent._build_system_prompt(None)
+    assert curated_prompt_reusable(agent_env.agent, prompt) is True
+    next(host_state_dir().glob("*.json")).write_text("{not json", encoding="utf-8")
+    assert curated_prompt_reusable(agent_env.agent, prompt) is False
