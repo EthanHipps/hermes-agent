@@ -149,6 +149,39 @@ def curated_prompt_reusable(agent: Any, stored_prompt: str) -> bool:
             and record.prompt_sha256 == hashlib.sha256(stored_prompt.encode("utf-8")).hexdigest())
 
 
+def configure_compaction_text(compressor: Any, service: Any) -> None:
+    """Ruling R40-5 (a): only the built-in compressor, only non-additive sessions.
+
+    An external context engine owns its own compaction text, and an additive session
+    keeps SUMMARY_PREFIX and _COMPRESSION_NOTE byte-for-byte (§9.10 L1668).
+    """
+    from agent.context_compressor import (
+        CURATED_MEMORY_COMPRESSION_NOTE, CURATED_MEMORY_SUMMARY_PREFIX, ContextCompressor,
+    )
+
+    disposition = getattr(getattr(service, "disposition", None), "value", None)
+    if isinstance(compressor, ContextCompressor) and disposition in _SERVICE_RENDERED:
+        compressor.summary_prefix = CURATED_MEMORY_SUMMARY_PREFIX
+        compressor.compression_note = CURATED_MEMORY_COMPRESSION_NOTE
+
+
+def on_compression_boundary(agent: Any, *, compressed: list, old_session_id: Optional[str],
+                            session_commit_succeeded: bool) -> None:
+    """D-R40-2 / D-R40-3: carry the identity to a rotated id; then continuity.
+
+    Compression never binds and never reads the working directory: the record is
+    copied to the child session id with the frozen identity unchanged (§9.3 L1233).
+    An aborted commit carries nothing.
+    """
+    if _disposition(agent) not in _SERVICE_RENDERED or not session_commit_succeeded:
+        return
+    from agent.memory_service.host_state import inherit_host_state
+
+    if old_session_id and old_session_id != agent.session_id:
+        inherit_host_state(old_session_id, agent.session_id)
+    agent._memory_session_key = agent.session_id
+
+
 def memory_guidance_flags(agent: Any) -> Optional[Tuple[bool, bool]]:
     """The stable-tier memory-tool guidance flags (contract C7; ruling X-2 (c)).
 

@@ -175,7 +175,7 @@ class MicroCompactionMixin:
         # history we lack.
         entry = next((e for e in reversed(messages) if _is_micro_marker(e)), None)
         if entry is not None:
-            entry["content"] = self._render_micro_marker_content(fresh_summary)
+            entry["content"] = self._render_micro_marker_content(fresh_summary, prefix=getattr(self, "summary_prefix", None))
             # Content changed: clear the persisted stamp so the DB sync rewrites the row. An
             # in-place pop on a live dict would be identity-skipped by the bounded flush scan;
             # flag the finalizer.
@@ -370,7 +370,7 @@ class MicroCompactionMixin:
             return messages
 
         summary_msg = {
-            "role": "assistant", "content": self._render_micro_marker_content(summary_text),
+            "role": "assistant", "content": self._render_micro_marker_content(summary_text, prefix=getattr(self, "summary_prefix", None)),
             cc.COMPRESSED_SUMMARY_METADATA_KEY: True,
             # Micro marker: eligible for supersede/defrag; batch markers never carry this key.
             cc.MICRO_COMPACT_MARKER_KEY: True,
@@ -390,10 +390,15 @@ class MicroCompactionMixin:
         return result
 
     @staticmethod
-    def _render_micro_marker_content(summary_text: str) -> str:
-        """Assemble the marker content wrapper around *summary_text*."""
+    def _render_micro_marker_content(summary_text: str, prefix: Optional[str] = None) -> str:
+        """Assemble the marker content wrapper around *summary_text*.
+
+        ``prefix`` is the live handoff prefix this session emits; the callers pass
+        ``self.summary_prefix`` so an authoritative session gets the curated variant
+        (ruling R40-5 (a)). ``None`` keeps the module default.
+        """
         cc = _cc()
-        return f"{cc.SUMMARY_PREFIX}\n\n{cc.HISTORICAL_TASK_HEADING}\n{summary_text.strip()}\n\n{cc._SUMMARY_END_MARKER}"
+        return f"{prefix or cc.SUMMARY_PREFIX}\n\n{cc.HISTORICAL_TASK_HEADING}\n{summary_text.strip()}\n\n{cc._SUMMARY_END_MARKER}"
 
     @staticmethod
     def _merge_adjacent_user_turns(result: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

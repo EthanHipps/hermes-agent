@@ -1912,6 +1912,11 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             min_tail_user_messages=cs.min_tail_users, tail_mode=cs.tail_mode,
             custom_providers=_custom_providers,
         )
+        # Ruling R40-5 (a): an authoritative or stateless session emits handoff text
+        # without the native memory file names. _init_memory already ran (init_agent
+        # calls it before this), so the disposition is known here. Built-in only.
+        from agent.memory_service.lifecycle import configure_compaction_text
+        configure_compaction_text(agent.context_compressor, getattr(agent, "_memory_service", None))
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
         with suppress(Exception):
