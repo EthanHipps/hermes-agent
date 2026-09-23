@@ -22,7 +22,6 @@ from agent.memory_service.service import CommitIntent, ContinuityCapture, Inspec
 
 logger = logging.getLogger(__name__)
 
-_NATIVE_HEADER = {"memory": "Memory", "user": "User profile"}
 _RESPONSE_ECHO_FIELDS = {
     "recall_context": ("frozen_identity", "target", "source_revision"),
     "stage_curated": ("request_id", "target", "expected_revision", "requested_write_scopes"),
@@ -166,11 +165,18 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         return result.result
 
     def prompt_block(self, target: str) -> Optional[str]:
+        """One target's region, rendered by the host (§9.4 L1498).
+
+        Hermes owns rendering, budgets and threat policy, so this delegates to
+        ``agent.memory_service.render`` rather than formatting here. The whole
+        prompt region is assembled by ``render_curated_prompt(memory, user)``;
+        this per-target form exists for the ``MemoryService`` interface.
+        """
+        from agent.memory_service.render import render_curated_prompt
+
         snapshot = self.load_curated(target)
-        texts = [e.text for e in snapshot.delivery_entries]
-        if not texts:
-            return None
-        return f"{_NATIVE_HEADER[target]} (authoritative provider {self._config.provider})\n" + "\n".join(f"- {t}" for t in texts)
+        return render_curated_prompt(snapshot if target == "memory" else None,
+                                     snapshot if target == "user" else None).text
 
     def stage_curated(self, request: MutationRequest) -> w.StageResult:
         self._require_target(request.target)

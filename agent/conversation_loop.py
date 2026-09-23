@@ -12,10 +12,12 @@ import json
 import logging
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.memory_service.errors import MemoryBlockedError
 from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.message_sanitization import _repair_tool_call_arguments, _sanitize_surrogates
@@ -1271,6 +1273,26 @@ def _preflight_timeout_result(agent, exc, conversation_history) -> Dict[str, Any
     )
 
 
+def _curated_memory_blocked_result(agent, exc, conversation_history) -> Dict[str, Any]:
+    """Typed turn-start result when curated memory is unavailable (§9.6 L1570, ruling R40-9).
+
+    Same shape as ``_preflight_timeout_result``: no provider call was sent and the
+    user row is deliberately NOT persisted. The text is content-free — no curated
+    text, no provider epoch, handle or binding revision (§8.6 L892, §9.3 L987)."""
+    logger.warning("Turn blocked: curated memory is unavailable — ending turn with a typed result")
+    from agent.agent_runtime_helpers import note_turn_persisted
+    note_turn_persisted(agent)
+    _service = getattr(agent, "_memory_service", None)
+    _warning = ""
+    with suppress(Exception):
+        _warning = _service.degraded_warning() or ""
+    return _partial_turn_result(
+        "Curated memory is unavailable, so this request was not sent to the model. " + _warning,
+        list(conversation_history or []), 0,
+        failed=True, turn_exit_reason="curated_memory_blocked",
+    )
+
+
 @dataclass
 class _LoopState:
     """Every local the turn loop threads through the phase helpers in ``agent/turn_*.py``.
@@ -1481,6 +1503,8 @@ def _run_conversation_turn(
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
+    except MemoryBlockedError as _memory_blocked:
+        return _curated_memory_blocked_result(agent, _memory_blocked, conversation_history)
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not

@@ -13,10 +13,14 @@ refusal; K-1 hands the rule-enforcing run to R47/R48 conformance.
 """
 
 import os
+from pathlib import Path
 from typing import Any, List, Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
+from agent.memory_service import wire as w
 from agent.memory_service.bootstrap import init_memory_service
 from agent.memory_service.errors import MemoryBlockedError
 from agent.memory_service.host_state import HostStateRecord, host_state_dir, load_host_state, save_host_state
@@ -25,6 +29,8 @@ from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, Fa
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 REPO = "repo-1"
+REPO_SCOPE = w.ScopeRef(kind="repository", id=REPO)
+PG_SCOPE = w.ScopeRef(kind="principal_global", id="ethan")
 
 
 def _never():
@@ -85,9 +91,69 @@ class MemoryEnv:
         return service
 
 
+def _tool_defs(*names):
+    return [{"type": "function", "function": {"name": name, "description": f"{name} tool",
+                                              "parameters": {"type": "object", "properties": {}}}}
+            for name in names]
+
+
+class AgentEnv(MemoryEnv):
+    """A real ``AIAgent`` whose curated memory comes from the R36 fake.
+
+    The authoritative ``memory:`` section is written to this test's isolated
+    ``HERMES_HOME/config.yaml``, so ``init_agent`` loads it through
+    ``load_config_readonly`` exactly as production does. No provider executable is
+    ever launched: the backend arrives through the patched discovery seam.
+    """
+
+    def __init__(self, tmp_path, monkeypatch, *, session_id: str = "s-1",
+                 tools=("web_search", "memory"), **memory_section) -> None:
+        super().__init__(tmp_path, monkeypatch)
+        self.config = self.config_with(**memory_section)
+        Path(os.environ["HERMES_HOME"], "config.yaml").write_text(
+            yaml.safe_dump(self.config), encoding="utf-8")
+        self.tools = tuple(tools)
+        self.session_id = session_id
+        self.agent = self.build_agent(session_id)
+
+    def build_agent(self, session_id: str):
+        """Build an agent the way production does; every later rebuild reuses this."""
+        from run_agent import AIAgent
+
+        with (
+            patch("model_tools.get_tool_definitions", return_value=_tool_defs(*self.tools)),
+            patch("model_tools.check_toolset_requirements", return_value={}),
+            patch("agent.process_bootstrap.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890", base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True, skip_context_files=True, skip_memory=False,
+                enabled_toolsets=["memory"], session_id=session_id, session_db=self.db,
+            )
+        agent.client = MagicMock()
+        agent._use_prompt_caching = False
+        agent.save_trajectories = False
+        agent.compression_enabled = False
+        return agent
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch) -> MemoryEnv:
     return MemoryEnv(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def agent_env_factory(tmp_path, monkeypatch):
+    """Build an ``AgentEnv`` with a custom memory section; one per test."""
+    def _build(**kwargs) -> AgentEnv:
+        return AgentEnv(tmp_path, monkeypatch, **kwargs)
+
+    return _build
+
+
+@pytest.fixture
+def agent_env(agent_env_factory) -> AgentEnv:
+    return agent_env_factory()
 
 
 @pytest.fixture
