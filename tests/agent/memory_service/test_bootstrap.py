@@ -184,3 +184,83 @@ def test_provider_failure_stateless_degrades_and_never_falls_back(tmp_path):
     assert service.disposition is MemoryDisposition.STATELESS
     assert service.prompt_block("memory") is None
     assert spy.built == 0 and swallowed is None
+
+
+# ── R40: the session-binding resolver (contract C4) ─────────────────────────
+
+
+def test_session_db_is_optional_and_absent_lineage_is_a_new_session(tmp_path):
+    """SimpleNamespace agents pass no session_db; the resolver must still decide."""
+    from agent.memory_service.bootstrap import resolve_session_binding
+
+    assert resolve_session_binding("s", session_db=None).kind == "new"
+
+
+def test_a_session_db_that_raises_never_breaks_the_resolver(tmp_path):
+    """A lookup failure degrades to 'no lineage known', never to an exception."""
+    from agent.memory_service.bootstrap import resolve_session_binding
+
+    class _Broken:
+        def get_session(self, session_id):
+            raise RuntimeError("db unavailable")
+
+    assert resolve_session_binding("s", session_db=_Broken()).kind == "new"
+
+
+def test_a_persisted_record_wins_over_lineage(tmp_path):
+    from agent.memory_service.bootstrap import resolve_session_binding
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+
+    save_host_state(HostStateRecord("s", "stateless", None), hermes_home=tmp_path)
+    assert resolve_session_binding("s", session_db=None, hermes_home=tmp_path).kind == "stateless"
+
+
+def test_open_session_view_validates_without_binding(tmp_path):
+    """C4: negotiate + validate, no bind and no probe load (ruling R40-6, R43 later)."""
+    from agent.memory_service.bootstrap import open_session_view
+    from agent.memory_service.config import resolve_memory_service_config
+
+    registry = FakeRegistry(directories={os.path.realpath(tmp_path): ("repo-1", "proj-1", None)})
+    store = FakeProviderStore(registry=registry)
+    backends = []
+
+    def factory(cfg):
+        backend = FakeAuthoritativeBackend(store, provider="example")
+        backends.append(backend)
+        return backend
+
+    service, _ = init_memory_service(_raw(tmp_path), logical_session_id="s", platform="cli",
+                                     store_factory=_StoreSpy(), working_directory=str(tmp_path),
+                                     backend_factory=factory)
+    view = open_session_view(resolve_memory_service_config(_raw(tmp_path)), service.session_state,
+                             backend_factory=factory)
+    try:
+        assert view.identity == service.identity
+        assert backends[-1].count("bind_session") == 0
+        assert backends[-1].count("validate_session") == 1
+        assert backends[-1].count("load_curated") == 0
+    finally:
+        view.shutdown()
+
+
+def test_open_session_view_shuts_the_transport_down_when_validation_fails(tmp_path):
+    from agent.memory_service.bootstrap import open_session_view
+    from agent.memory_service.config import resolve_memory_service_config
+
+    registry = FakeRegistry(directories={os.path.realpath(tmp_path): ("repo-1", "proj-1", None)})
+    store = FakeProviderStore(registry=registry)
+    backends = []
+
+    def factory(cfg):
+        backend = FakeAuthoritativeBackend(store, provider="example")
+        backends.append(backend)
+        return backend
+
+    service, _ = init_memory_service(_raw(tmp_path), logical_session_id="s", platform="cli",
+                                     store_factory=_StoreSpy(), working_directory=str(tmp_path),
+                                     backend_factory=factory)
+    store.fail_transport("validate_session")
+    with pytest.raises(Exception):
+        open_session_view(resolve_memory_service_config(_raw(tmp_path)), service.session_state,
+                          backend_factory=factory)
+    assert backends[-1].shutdown_calls == 1
