@@ -815,8 +815,16 @@ class CLICommandsMixin:
         snap_id = create_quick_snapshot(label=" ".join(parts[2:]) if len(parts) > 2 else None)
         print(f"  Snapshot created: {snap_id}" if snap_id else "  No state files found to snapshot.")
 
+    def _say_memory_disposition(self, home, *, kind: str) -> None:
+        """§9.8 L1637 on the slash paths; additive prints nothing, so output is unchanged (R44-11 (b))."""
+        from hermes_cli.backup_memory import disposition_line
+        line = disposition_line(home, kind=kind)
+        if line:
+            print(f"  {line}")
+
     def _snapshot_restore(self, parts) -> None:
         from hermes_cli.backup import list_quick_snapshots, restore_quick_snapshot
+        from hermes_constants import get_hermes_home
         if len(parts) < 3:
             print("  Usage: /snapshot restore <snapshot-id>")
             snaps = list_quick_snapshots(limit=1)
@@ -842,6 +850,7 @@ class CLICommandsMixin:
         if restore_quick_snapshot(snap_id):
             _pr(f"  Restored state from: {snap_id}",
                 "  Restart recommended for gateway/dashboard processes to pick up state.db changes.")
+            self._say_memory_disposition(get_hermes_home(), kind="restore")
         else:
             print(f"  Snapshot not found: {snap_id}")
 
@@ -859,7 +868,8 @@ class CLICommandsMixin:
     # ---- /export, /import -----------------------------------------------------------------
     def _handle_export_command(self, command: str):
         """Handle /export [profile] [-o path] — export a profile to a shareable .tar.gz archive."""
-        from hermes_cli.profiles import export_profile, get_active_profile_name, get_profile_export_path
+        from hermes_cli.profiles import (
+            export_profile, get_active_profile_name, get_profile_dir, get_profile_export_path)
         parts, output, ok = _take_flag(command.split()[1:], "-o")
         if not ok:
             return print("  Usage: /export [profile] [-o output.tar.gz]")
@@ -868,6 +878,7 @@ class CLICommandsMixin:
             result = export_profile(name, output or str(get_profile_export_path(name)))
             _pr(f"  ✓ Exported '{name}' to {result}",
                 "  Share it: the other user runs /import or `hermes profile import <archive>`.")
+            self._say_memory_disposition(get_profile_dir(name), kind="archive")
         except (ValueError, FileNotFoundError, OSError) as e:
             print(f"  Error: {e}")
 
@@ -884,6 +895,7 @@ class CLICommandsMixin:
             return print(f"  Error: {e}")
         imported = profile_dir.name
         print(f"  ✓ Imported profile '{imported}' at {profile_dir}")
+        self._say_memory_disposition(profile_dir, kind="restore")
         with suppress(Exception):
             if not check_alias_collision(imported):
                 wrapper_path = create_wrapper_script(imported)

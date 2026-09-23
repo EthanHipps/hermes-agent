@@ -7,6 +7,7 @@ and each suite keeps its own helpers (D-R44-f, reconciliation §3 rule 10).
 import importlib
 import json
 import tarfile
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -223,3 +224,78 @@ def test_clone_never_copies_host_session_state(profile_env, profiles, kw, provid
     _host_state(source)
     pdir = profiles.create_profile("coder", no_alias=True, **kw)
     assert not (pdir / "memory_service").exists()
+
+
+# --- Task 9: terminal messaging at CLI and slash entry points (R44-11 (b)) ---
+
+SPEC_SENTENCE = "Hermes archive complete; authoritative ygg memory is provider-managed and not included"
+
+
+def _profile_cmd():
+    return importlib.import_module("hermes_cli.profile_cmd")
+
+
+def _create_args(name, **over):
+    ns = Namespace(profile_action="create", profile_name=name, clone=False, clone_all=False,
+                   no_alias=True, no_skills=False, clone_from=None, clone_channels=False,
+                   description=None)
+    for key, value in over.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def _mixin():
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+    return CLICommandsMixin()
+
+
+def test_cli_export_prints_the_disposition(profile_env, profiles, capsys):
+    _profile(profile_env, "coder", provider="ygg")
+    _profile_cmd().cmd_profile(Namespace(profile_action="export", profile_name="coder",
+                                         output=str(profile_env / "coder.tar.gz")))
+    assert SPEC_SENTENCE in capsys.readouterr().out
+
+
+def test_cli_import_prints_the_restore_disposition(profile_env, profiles, capsys):
+    staging = profile_env / "stage" / "shared"
+    _profile_like(staging, provider="ygg")
+    archive = profile_env / "shared.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(staging, arcname="shared")
+    _profile_cmd().cmd_profile(Namespace(profile_action="import", archive=str(archive), import_name=None))
+    out = capsys.readouterr().out
+    assert "was not restored" in out and "reconnect-provider" in out
+
+
+def test_cli_clone_prints_the_disposition(profile_env, profiles, capsys):
+    _profile(profile_env, "default", provider="ygg")
+    _profile_cmd().cmd_profile(_create_args("coder", clone=True))
+    assert "authoritative ygg memory is provider-managed and not included" in capsys.readouterr().out
+
+
+def test_slash_export_and_import_print_the_disposition(profile_env, profiles, capsys):
+    _profile(profile_env, "coder", provider="ygg")
+    mixin = _mixin()
+    mixin._handle_export_command(f"/export coder -o {profile_env / 'coder.tar.gz'}")
+    assert SPEC_SENTENCE in capsys.readouterr().out
+    mixin._handle_import_command(f"/import {profile_env / 'coder.tar.gz'} --name copy")
+    out = capsys.readouterr().out
+    assert "was not restored" in out and "reconnect-provider" in out
+
+
+def test_slash_snapshot_restore_prints_the_restore_disposition(profile_env, profiles, capsys, monkeypatch):
+    home = _profile(profile_env, "default", provider="ygg")
+    from hermes_cli import backup as backup_mod
+    snap = backup_mod.create_quick_snapshot(hermes_home=home)
+    assert snap is not None
+    capsys.readouterr()
+    _mixin()._snapshot_restore(["/snapshot", "restore", snap])
+    out = capsys.readouterr().out
+    assert "was not restored" in out and "reconnect-provider" in out
+
+
+def test_additive_cli_and_slash_output_carries_no_disposition(profile_env, profiles, capsys):
+    _profile(profile_env, "coder")
+    _profile_cmd().cmd_profile(Namespace(profile_action="export", profile_name="coder",
+                                         output=str(profile_env / "coder.tar.gz")))
+    assert "provider-managed" not in capsys.readouterr().out
