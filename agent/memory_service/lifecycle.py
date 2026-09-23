@@ -15,10 +15,55 @@ from agent.memory_service.errors import MemoryBlockedError
 logger = logging.getLogger(__name__)
 _SERVICE_RENDERED = ("provider_authoritative", "stateless")
 
+#: Ruling R40-4c (a), decided at Checkpoint A: /new binds a fresh logical session, so the prior
+#: handle stays live and the old session stays resumable with its memory. The live-handle cost is
+#: recorded as cross-repo obligation K-2 (ygg has no end operation in v1 and caps handles at 4,096).
+NEW_SESSION_BIND_INTENT = "new_session"
+
 
 def _disposition(agent: Any) -> Optional[str]:
     disposition = getattr(getattr(agent, "_memory_service", None), "disposition", None)
     return getattr(disposition, "value", None)
+
+
+def _no_native_store():
+    raise AssertionError("a non-additive session never builds the native store (§9.1 L925)")
+
+
+def ensure_session_binding(agent: Any, conversation_history: Optional[list] = None) -> None:
+    """Re-resolve the frozen identity when ``agent.session_id`` moved (ruling R40-4b).
+
+    Same session: no-op. Same identity (branch/compression child): keep the service,
+    record already inherited. Otherwise resume, bind, stay stateless, or raise
+    ``MemoryBlockedError(code="binding_invalid")`` (D-R40-1).
+
+    ``conversation_history`` is accepted but unused: the resolver decides
+    "continuation" from the SessionDB ``message_count`` alone, identically at agent
+    init (where no history exists yet) and at turn start. A REST caller that holds
+    its own history with no SessionDB row is R42's surface.
+    """
+    if _disposition(agent) not in _SERVICE_RENDERED:
+        return
+    session_id = getattr(agent, "session_id", None)
+    if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
+        return
+    from agent.memory_service.bootstrap import init_memory_service, resolve_session_binding
+
+    current = agent._memory_service
+    binding = resolve_session_binding(session_id, session_db=getattr(agent, "_session_db", None))
+    if binding.kind in ("resume", "inherit") and binding.record.state == getattr(current, "session_state", None):
+        agent._memory_session_key = session_id
+        return
+    if binding.kind == "invalid" and current.config.failure_policy.value != "stateless":
+        raise MemoryBlockedError("binding_invalid: this session has no persisted memory identity; start a new session",
+                                 code="binding_invalid")
+    replacement, _ = init_memory_service(
+        agent._memory_boot_config, logical_session_id=session_id, platform=getattr(agent, "platform", None) or "cli",
+        store_factory=_no_native_store, session_db=getattr(agent, "_session_db", None),
+    )
+    agent._memory_service, agent._memory_session_key = replacement, session_id
+    agent._curated_prompt_render = None
+    current.shutdown()
 
 
 def curated_prompt_parts(agent: Any) -> Optional[List[str]]:

@@ -333,3 +333,173 @@ def test_every_resolver_path_leaves_the_native_directory_untouched(env, native_d
             env.init("old")                                          # invalid
     sentinel.assert_untouched()
     assert (native_dir / "MEMORY.md").read_text(encoding="utf-8") == "NATIVE-SECRET-FACT\n"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: session transitions at turn start
+# ---------------------------------------------------------------------------
+
+
+def _switch(agent, session_id):
+    """Point a live agent at another session, the way hermes_cli does.
+
+    ``_sync_agent_to_session`` (hermes_cli/cli_commands_mixin.py L317-350) and
+    ``cli_session_mixin.new_session`` both assign ``session_id``, call
+    ``reset_session_state()`` and invalidate the prompt; R40 touches none of
+    those surfaces, so the test drives exactly what they drive.
+    """
+    agent.session_id = session_id
+    agent.reset_session_state()
+    agent._invalidate_system_prompt()
+
+
+def test_resume_switches_to_the_persisted_identity_without_binding(agent_env):
+    """§9.3 L1233: resume validates the persisted state; it never binds."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    first_identity = agent_env.agent._memory_service.identity
+    other = agent_env.build_agent("s-other")                      # a second logical session
+    other_identity = other._memory_service.identity
+    assert other_identity != first_identity
+
+    binds = agent_env.count("bind_session")
+    _switch(other, agent_env.agent.session_id)
+    _session(agent_env.db, agent_env.agent.session_id, messages=2)
+    ensure_session_binding(other)
+    assert other._memory_service.identity == first_identity
+    assert agent_env.count("bind_session") == binds
+    assert other._memory_session_key == agent_env.agent.session_id
+
+
+def test_branch_keeps_the_identity_with_zero_provider_calls(agent_env):
+    """A branch child inherits the parent's record; nothing is re-negotiated."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    agent = agent_env.agent
+    parent_identity = agent._memory_service.identity
+    _session(agent_env.db, "branch-1", parent=agent.session_id, branched=True)
+    binds, validates = agent_env.count("bind_session"), agent_env.count("validate_session")
+    _switch(agent, "branch-1")
+    ensure_session_binding(agent)
+    assert agent._memory_service.identity == parent_identity
+    assert agent_env.count("bind_session") == binds
+    assert agent_env.count("validate_session") == validates
+    assert load_host_state("branch-1").state == load_host_state(agent_env.session_id).state
+
+
+def test_rewind_keeps_the_identity_and_rerenders_without_binding(agent_env):
+    """Rewind keeps the session id: the service and its identity are untouched."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    agent = agent_env.agent
+    agent_env.store.seed_record(REPO_SCOPE, "memory", "MEMORY-FACT")
+    service = agent._memory_service
+    identity = service.identity
+    first = agent._build_system_prompt(None)
+    binds = agent_env.count("bind_session")
+    agent._invalidate_system_prompt()                              # same session id
+    ensure_session_binding(agent)
+    assert agent._memory_service is service and agent._memory_service.identity == identity
+    assert agent_env.count("bind_session") == binds
+    assert agent._build_system_prompt(None) == first
+
+
+def test_new_binds_a_fresh_logical_session(agent_env):
+    """Ruling R40-4c (a): new_session; the old session stays resumable with its identity."""
+    from agent.memory_service.lifecycle import NEW_SESSION_BIND_INTENT, ensure_session_binding
+
+    agent = agent_env.agent
+    old_id = agent.session_id
+    old_identity = agent._memory_service.identity
+    binds = agent_env.count("bind_session")
+    _switch(agent, "fresh-1")
+    ensure_session_binding(agent)
+    assert agent_env.count("bind_session") == binds + 1
+    assert agent._memory_service.identity != old_identity
+    assert NEW_SESSION_BIND_INTENT == "new_session"
+    # The prior handle stays live and the old session still resumes with its identity.
+    assert load_host_state(old_id).state.identity == old_identity
+    resumed = agent_env.build_agent(old_id)
+    assert resumed._memory_service.identity == old_identity
+
+
+def test_resume_of_a_session_without_state_blocks_the_turn(agent_env):
+    """D-R40-1 at turn start: the model is never called."""
+    agent = agent_env.agent
+    agent._build_system_prompt(None)
+    _session(agent_env.db, "orphan", messages=6)
+    _switch(agent, "orphan")
+    agent.client.chat.completions.create.reset_mock()
+    result = agent.run_conversation("hello")
+    assert result["failed"] and result.get("turn_exit_reason") == "curated_memory_blocked"
+    agent.client.chat.completions.create.assert_not_called()
+
+
+def test_changing_cwd_mid_session_never_rebinds(agent_env, tmp_path, monkeypatch):
+    """§9.2 L965: a working-directory change is not a rebinding event."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    agent = agent_env.agent
+    identity = agent._memory_service.identity
+    binds = agent_env.count("bind_session")
+    unregistered = tmp_path / "elsewhere"
+    unregistered.mkdir()
+    monkeypatch.chdir(unregistered)
+    ensure_session_binding(agent)
+    assert agent._memory_service.identity == identity
+    assert agent_env.count("bind_session") == binds
+
+
+def test_an_unchanged_session_id_is_a_no_op(agent_env):
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    agent = agent_env.agent
+    service = agent._memory_service
+    transports = len(agent_env.backends)
+    for _ in range(3):
+        ensure_session_binding(agent)
+    assert agent._memory_service is service and len(agent_env.backends) == transports
+
+
+def test_an_additive_or_absent_service_is_never_resolved(tmp_path):
+    """§9.10 L1668: ensure_session_binding is a no-op outside authoritative/stateless."""
+    from types import SimpleNamespace
+
+    from agent.memory_service.host_state import host_state_dir
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    ensure_session_binding(SimpleNamespace(_memory_service=None, session_id="s-1"))
+    assert not host_state_dir().exists()
+
+
+def test_a_stateless_session_stays_stateless_across_a_transition(agent_env):
+    """I1: a stateless session that moves to a new id does not become authoritative."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+    from agent.memory_service.service import MemoryDisposition
+
+    save_host_state(HostStateRecord("stateless-a", "stateless", None))
+    save_host_state(HostStateRecord("stateless-b", "stateless", None))
+    agent = agent_env.build_agent("stateless-a")
+    assert agent._memory_service.disposition is MemoryDisposition.STATELESS
+    _switch(agent, "stateless-b")
+    ensure_session_binding(agent)
+    assert agent._memory_service.disposition is MemoryDisposition.STATELESS
+
+
+def test_transitions_never_touch_the_native_directory(agent_env, native_dir):
+    """§9.10 L1685: proven with the sentinel."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+
+    native_dir.mkdir(parents=True, exist_ok=True)
+    (native_dir / "MEMORY.md").write_text("NATIVE-SECRET-FACT\n", encoding="utf-8")
+    agent = agent_env.agent
+    _session(agent_env.db, "branch-2", parent=agent.session_id, branched=True)
+    with native_memory_sentinel(native_dir) as sentinel:
+        _switch(agent, "branch-2")
+        ensure_session_binding(agent)                              # inherit
+        _switch(agent, "fresh-2")
+        ensure_session_binding(agent)                              # new
+        _switch(agent, "branch-2")
+        ensure_session_binding(agent)                              # resume
+    sentinel.assert_untouched()
+    assert agent._memory_store is None
