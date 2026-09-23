@@ -15,11 +15,6 @@ from agent.memory_service.errors import MemoryBlockedError
 logger = logging.getLogger(__name__)
 _SERVICE_RENDERED = ("provider_authoritative", "stateless")
 
-#: Ruling R40-4c (a), decided at Checkpoint A: /new binds a fresh logical session, so the prior
-#: handle stays live and the old session stays resumable with its memory. The live-handle cost is
-#: recorded as cross-repo obligation K-2 (ygg has no end operation in v1 and caps handles at 4,096).
-NEW_SESSION_BIND_INTENT = "new_session"
-
 
 def _disposition(agent: Any) -> Optional[str]:
     disposition = getattr(getattr(agent, "_memory_service", None), "disposition", None)
@@ -36,6 +31,12 @@ def ensure_session_binding(agent: Any, conversation_history: Optional[list] = No
     Same session: no-op. Same identity (branch/compression child): keep the service,
     record already inherited. Otherwise resume, bind, stay stateless, or raise
     ``MemoryBlockedError(code="binding_invalid")`` (D-R40-1).
+
+    Ruling R40-4c (a): a genuinely new session binds with ``bind_intent="new_session"``
+    — ``ProviderAuthoritativeMemoryService.start``'s default — so the prior handle
+    stays live and the old session stays resumable with its memory. The live-handle
+    cost is cross-repo obligation K-2: v1 has no host end operation (D-R10-2) and ygg
+    caps handles at 4,096, so R28 budgets or closes them.
 
     ``conversation_history`` is accepted but unused: the resolver decides
     "continuation" from the SessionDB ``message_count`` alone, identically at agent

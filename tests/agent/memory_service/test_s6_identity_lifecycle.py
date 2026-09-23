@@ -405,8 +405,8 @@ def test_rewind_keeps_the_identity_and_rerenders_without_binding(agent_env):
 
 
 def test_new_binds_a_fresh_logical_session(agent_env):
-    """Ruling R40-4c (a): new_session; the old session stays resumable with its identity."""
-    from agent.memory_service.lifecycle import NEW_SESSION_BIND_INTENT, ensure_session_binding
+    """Ruling R40-4c (a): bind_intent new_session, and the old session stays resumable."""
+    from agent.memory_service.lifecycle import ensure_session_binding
 
     agent = agent_env.agent
     old_id = agent.session_id
@@ -416,7 +416,11 @@ def test_new_binds_a_fresh_logical_session(agent_env):
     ensure_session_binding(agent)
     assert agent_env.count("bind_session") == binds + 1
     assert agent._memory_service.identity != old_identity
-    assert NEW_SESSION_BIND_INTENT == "new_session"
+    # The intent the provider actually received, not a constant echoed back.
+    bind_requests = [request for backend in agent_env.backends
+                     for operation, request in backend.calls if operation == "bind_session"]
+    assert bind_requests[-1].bind_intent == "new_session"
+    assert bind_requests[-1].prior_identity is None
     # The prior handle stays live and the old session still resumes with its identity.
     assert load_host_state(old_id).state.identity == old_identity
     resumed = agent_env.build_agent(old_id)
