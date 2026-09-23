@@ -181,6 +181,58 @@ def on_compression_boundary(agent: Any, *, compressed: list, old_session_id: Opt
         inherit_host_state(old_session_id, agent.session_id)
     agent._memory_session_key = agent.session_id
 
+    service = agent._memory_service
+    if _disposition(agent) == "provider_authoritative" and service.capabilities.capture_continuity:
+        text = compression_summary_text(compressed)
+        if text:
+            agent._memory_continuity_thread = submit_continuity_async(service.config, service.session_state, text)
+
+
+def compression_summary_text(compressed: list) -> Optional[str]:
+    """The committed handoff body, prefix stripped; ``None`` when the engine wrote none."""
+    from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor
+
+    for message in compressed:
+        if isinstance(message, dict) and message.get(COMPRESSED_SUMMARY_METADATA_KEY):
+            content = message.get("content")
+            text = content if isinstance(content, str) else ""
+            body = ContextCompressor._strip_summary_prefix(text)
+            return body or None
+    return None
+
+
+def submit_continuity_async(config: Any, state: Any, text: str, *, backend_factory=None) -> "threading.Thread":
+    """Ruling R40-6 (a): a second transport from the persisted state; content-free and non-blocking.
+
+    The foreground service instance is documented as not thread-safe, so this never
+    touches it: it opens its own transport (negotiate plus validate, no bind, no probe
+    load) and sends exactly one capture_continuity. No retry and no pre-truncation —
+    the provider answers ``limit_exceeded`` — and every failure is logged without the
+    summary body or any provider token (§9.3 L1446, §8.6 L892).
+    """
+    import threading
+    import uuid
+
+    from agent.memory_service.service import ContinuityCapture
+
+    def _capture() -> None:
+        from agent.memory_service.bootstrap import open_session_view
+
+        try:
+            view = open_session_view(config, state, backend_factory=backend_factory)
+            try:
+                view.capture_continuity(ContinuityCapture(request_id=uuid.uuid4().hex, kind="compression_snapshot",
+                                                          text=text, initiating_surface="compression"))
+            finally:
+                view.shutdown()
+        except Exception as exc:  # §9.3 L1446: every failure is content-free and non-blocking
+            logger.warning("compression continuity capture failed (%s%s)", type(exc).__name__,
+                           f": {exc.code}" if getattr(exc, "code", None) else "")
+
+    thread = threading.Thread(target=_capture, name="memory-continuity", daemon=True)
+    thread.start()
+    return thread
+
 
 def memory_guidance_flags(agent: Any) -> Optional[Tuple[bool, bool]]:
     """The stable-tier memory-tool guidance flags (contract C7; ruling X-2 (c)).

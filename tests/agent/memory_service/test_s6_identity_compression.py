@@ -225,3 +225,197 @@ def test_an_additive_boundary_is_a_no_op(tmp_path):
     agent = SimpleNamespace(_memory_service=None, session_id="child")
     on_compression_boundary(agent, compressed=[], old_session_id="parent", session_commit_succeeded=True)
     assert not host_state_dir().exists()
+
+
+# ---- ruling R40-6 (a): continuity capture off the foreground turn ----------------------------
+
+
+def _committed(summary_body):
+    """A committed transcript whose summary row carries the live handoff prefix."""
+    from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY
+
+    return [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "assistant", "content": CURATED_MEMORY_SUMMARY_PREFIX + "\n" + summary_body,
+         COMPRESSED_SUMMARY_METADATA_KEY: True},
+        {"role": "user", "content": "next"},
+    ]
+
+
+def _continuity_spy(monkeypatch):
+    """Record (thread ident, request) for every capture_continuity the fake receives."""
+    import threading
+
+    from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend
+
+    seen = []
+    real = FakeAuthoritativeBackend.capture_continuity
+
+    def _wrapped(self, request):
+        seen.append((threading.get_ident(), request))
+        return real(self, request)
+
+    monkeypatch.setattr(FakeAuthoritativeBackend, "capture_continuity", _wrapped)
+    return seen
+
+
+def test_compression_summary_text_strips_the_prefix():
+    from agent.memory_service.lifecycle import compression_summary_text
+
+    assert compression_summary_text(_committed("HANDOFF BODY")) == "HANDOFF BODY"
+    assert compression_summary_text([{"role": "user", "content": "no summary"}]) is None
+    assert compression_summary_text(_committed("")) is None
+
+
+def test_negotiated_continuity_submits_the_summary_once_off_thread(agent_env, monkeypatch):
+    """§9.3 L1446: kind compression_snapshot, same frozen identity, not on the caller's thread."""
+    import threading
+
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    seen = _continuity_spy(monkeypatch)
+    agent = agent_env.agent
+    old_id = agent.session_id
+    identity = agent._memory_service.identity
+    agent.session_id = "rotated-continuity"
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=old_id, session_commit_succeeded=True)
+    agent._memory_continuity_thread.join(timeout=10)
+    assert not agent._memory_continuity_thread.is_alive()
+
+    assert len(seen) == 1
+    thread_ident, request = seen[0]
+    assert thread_ident != threading.get_ident()
+    assert request.kind == "compression_snapshot"
+    assert request.text == "HANDOFF BODY"
+    assert request.initiating_surface == "compression"
+    assert request.frozen_identity == identity.to_wire()
+
+
+def test_the_continuity_transport_binds_nothing_and_loads_nothing(agent_env, monkeypatch):
+    """R40-6 (a): a second transport from the persisted state; negotiate + validate only."""
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    _continuity_spy(monkeypatch)
+    agent = agent_env.agent
+    binds = agent_env.count("bind_session")
+    loads = agent_env.count("load_curated")
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=None, session_commit_succeeded=True)
+    agent._memory_continuity_thread.join(timeout=10)
+    assert agent_env.count("bind_session") == binds
+    assert agent_env.count("load_curated") == loads
+    assert agent_env.count("validate_session") >= 1
+    assert agent_env.count("capture_continuity") == 1
+
+
+def test_no_continuity_when_not_negotiated(agent_env_factory, monkeypatch):
+    """A provider that did not negotiate capture_continuity opens no second transport."""
+    from agent.memory_service.lifecycle import on_compression_boundary
+    from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore
+
+    env = agent_env_factory()
+    seen = _continuity_spy(monkeypatch)
+    # Rebuild the env's factory so every transport refuses the optional operation.
+    original = env._factory
+
+    def _no_continuity(cfg):
+        backend = FakeAuthoritativeBackend(env.store, provider=cfg.provider, continuity=False)
+        env.backends.append(backend)
+        return backend
+
+    env._factory = _no_continuity
+    agent = env.build_agent("no-continuity")
+    transports = len(env.backends)
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=None, session_commit_succeeded=True)
+    assert getattr(agent, "_memory_continuity_thread", None) is None
+    assert len(env.backends) == transports
+    assert seen == []
+    env._factory = original
+
+
+def test_no_continuity_for_a_stateless_session(agent_env, monkeypatch):
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    seen = _continuity_spy(monkeypatch)
+    save_host_state(HostStateRecord("stateless-cont", "stateless", None))
+    agent = agent_env.build_agent("stateless-cont")
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=None, session_commit_succeeded=True)
+    assert getattr(agent, "_memory_continuity_thread", None) is None
+    assert seen == []
+
+
+def test_no_continuity_for_an_additive_session(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    seen = _continuity_spy(monkeypatch)
+    agent = SimpleNamespace(_memory_service=None, session_id="s-1")
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=None, session_commit_succeeded=True)
+    assert seen == []
+
+
+def test_no_continuity_without_a_summary_body(agent_env, monkeypatch):
+    """A compression that wrote no handoff has nothing to submit."""
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    seen = _continuity_spy(monkeypatch)
+    agent = agent_env.agent
+    on_compression_boundary(agent, compressed=[{"role": "user", "content": "no summary"}],
+                            old_session_id=None, session_commit_succeeded=True)
+    assert getattr(agent, "_memory_continuity_thread", None) is None
+    assert seen == []
+
+
+@pytest.mark.parametrize("fault", ["transport", "secret_rejected", "limit_exceeded"])
+def test_continuity_failure_is_content_free_and_non_blocking(agent_env, caplog, fault):
+    """§9.3 L1446: the compression result is unchanged and the body never reaches a log."""
+    import logging
+
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    agent = agent_env.agent
+    if fault == "transport":
+        agent_env.store.fail_transport("capture_continuity")
+    else:
+        agent_env.store.fail_typed("capture_continuity", fault, outcome="not_applicable")
+
+    with caplog.at_level(logging.DEBUG):
+        on_compression_boundary(agent, compressed=_committed("SECRET-HANDOFF-BODY"),
+                                old_session_id=None, session_commit_succeeded=True)
+        agent._memory_continuity_thread.join(timeout=10)
+
+    assert not agent._memory_continuity_thread.is_alive()
+    assert agent._memory_service.blocked is False        # the foreground service is untouched
+    assert "SECRET-HANDOFF-BODY" not in caplog.text
+    state = agent._memory_service.session_state
+    assert state.identity.opaque_binding_b64url not in caplog.text
+    assert state.provider_epoch not in caplog.text
+
+
+def test_a_continuity_failure_never_disturbs_the_foreground_transport(agent_env):
+    """The second transport is separate: a failure there leaves the turn's loads working."""
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    agent = agent_env.agent
+    agent_env.store.fail_transport("capture_continuity")
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=None, session_commit_succeeded=True)
+    agent._memory_continuity_thread.join(timeout=10)
+    assert agent._memory_service.load_curated("memory") is not None
+
+
+def test_the_continuity_thread_is_a_daemon(agent_env, monkeypatch):
+    from agent.memory_service.lifecycle import on_compression_boundary
+
+    _continuity_spy(monkeypatch)
+    agent = agent_env.agent
+    on_compression_boundary(agent, compressed=_committed("HANDOFF BODY"),
+                            old_session_id=None, session_commit_succeeded=True)
+    assert agent._memory_continuity_thread.daemon is True
+    agent._memory_continuity_thread.join(timeout=10)
