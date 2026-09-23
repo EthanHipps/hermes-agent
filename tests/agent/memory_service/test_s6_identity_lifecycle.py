@@ -440,17 +440,33 @@ def test_resume_of_a_session_without_state_blocks_the_turn(agent_env):
 
 
 def test_changing_cwd_mid_session_never_rebinds(agent_env, tmp_path, monkeypatch):
-    """§9.2 L965: a working-directory change is not a rebinding event."""
+    """§9.2 L965: a working-directory change is not a rebinding event.
+
+    Two arms. Staying in the same session must be a pure no-op. Then, still in the
+    unregistered directory, resuming a session that HAS a record must succeed with
+    zero binds — which it can only do if resume validates the persisted identity
+    instead of rebuilding a RequestedContext from the cwd (D-R40-2). The fake
+    resolves directories by exact match, so a cwd-reading resume would fail the bind.
+    """
     from agent.memory_service.lifecycle import ensure_session_binding
 
     agent = agent_env.agent
     identity = agent._memory_service.identity
+    other = agent_env.build_agent("cwd-other")
+    other_identity = other._memory_service.identity
     binds = agent_env.count("bind_session")
+
     unregistered = tmp_path / "elsewhere"
     unregistered.mkdir()
     monkeypatch.chdir(unregistered)
-    ensure_session_binding(agent)
+
+    ensure_session_binding(agent)                                  # same session: no-op
     assert agent._memory_service.identity == identity
+    assert agent_env.count("bind_session") == binds
+
+    _switch(agent, "cwd-other")                                    # resume, from an unregistered cwd
+    ensure_session_binding(agent)
+    assert agent._memory_service.identity == other_identity
     assert agent_env.count("bind_session") == binds
 
 
