@@ -78,7 +78,10 @@ configurable; per-model overrides; failure cooldown after provider-proven overfl
 prunes old tool results first (no LLM call), then picks boundaries, then generates a structured
 summary with the `auxiliary` compression model. In-place compaction keeps a single stable session
 id; native Responses/Codex compaction paths are provider-specific. Compression is the sanctioned
-cache break — keep it the only one. Full detail:
+cache break — keep it the only one. The handoff prefix and head note a session EMITS are
+`ContextCompressor.summary_prefix` / `.compression_note`; an authoritative or stateless session
+swaps in the `CURATED_MEMORY_*` variants, which differ from the live texts only in the memory
+clause (see "Memory, context engines, curator"). Full detail:
 `website/docs/developer-guide/context-compression-and-caching.md`.
 
 ## Model and provider resolution
@@ -115,6 +118,28 @@ Home skeleton initialization and doctor suppress native storage based on the req
 authority mode, even when provider validation fails. Cold-process tests arm the sentinel
 before imports/config loading. Bootstrap binds to `runtime_cwd.resolve_agent_cwd()` (unless
 an explicit working directory is supplied), and the default agent platform binds as `cli`.
+
+In authoritative or stateless mode the system prompt's curated region comes only from
+`agent/memory_service/render.py`, through `lifecycle.curated_prompt_parts` — one structured
+region, never concatenated with native data — and the stable-tier memory-tool guidance comes
+from `lifecycle.memory_guidance_flags`, so `agent._memory_enabled`/`_user_profile_enabled` stay
+`False` and are read, never written. The frozen identity is persisted per Hermes session under
+`<home>/memory_service/sessions/` (`host_state.py`, owner-only JSON). It is resolved at agent
+init and again at turn start (`bootstrap.resolve_session_binding`: resume, inherit, new,
+stateless, invalid), so compression, branch, rewind, `/resume` and a working-directory change
+never re-bind; only `/new` and a genuinely new logical session bind, with intent `new_session`.
+A conversation that already has messages but no record fails `binding_invalid`. Each model
+request passes `lifecycle.curated_request_gate` — a fresh load per enabled target, which
+validates and blocks but never re-renders the byte-stable prompt — and a stored prompt is
+reused only on an exact disposition-plus-digest match. Compression carries the record to a
+rotated session id and, when the provider negotiated it, submits the committed summary through
+`capture_continuity` on a daemon thread over a second transport. Authoritative compressors emit
+`CURATED_MEMORY_SUMMARY_PREFIX` / `CURATED_MEMORY_COMPRESSION_NOTE`; retiring `SUMMARY_PREFIX`
+retires the variant too, and the frozen historical recognizers are never edited.
+**Per-turn authoritative recall is not wired; see ledger R40-8** — the entry in the ygg
+revision ledger's "Wave 6 fork decisions: R38, R40, R44 (2026-09-22)" section, which names R48
+as the owner of host recall wiring and of §9.6's host-visible recall warning (L1574) and
+recall-ambiguity blocking (L1576) cells.
 
 ## Tests
 
