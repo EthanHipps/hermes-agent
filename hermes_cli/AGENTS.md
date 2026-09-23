@@ -127,7 +127,10 @@ matchers; parser-derived flag sets; never blanket-exclude gateway ancestors, #87
 ## Profiles (multi-instance)
 
 `_apply_profile_override()` in `hermes_cli/main.py` sets `HERMES_HOME` before any module import, so
-every `get_hermes_home()` scopes to the active profile (rules in root). Profiles are independent
+every `get_hermes_home()` scopes to the active profile (rules in root). Clone/export/backup of an
+authoritative home never touch its `memories/` and carry the provider-managed disposition record;
+no archive carries `migrations/` or `memory_service/` in any mode; route new archive surfaces
+through `hermes_cli/backup_memory.py` rather than re-deciding the mode. Profiles are independent
 islands by design — no live config inheritance; `--clone` copies at creation, minus messaging
 channels (`profile_channels.py` derives the token/allowlist/platform-section key set from the adapter
 registry + `gateway/config_env._ENV_STEPS`, never a hand list; `--clone-channels` opts in). Multiplex
