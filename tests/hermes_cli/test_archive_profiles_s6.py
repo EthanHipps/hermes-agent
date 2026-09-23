@@ -173,3 +173,53 @@ def test_profile_import_withholds_host_session_state(profile_env, profiles, prov
     pdir = profiles.import_profile(str(archive))
     assert not (pdir / "memory_service").exists()
     assert (pdir / "config.yaml").exists()
+
+
+# --- Task 8: clone (--clone, --clone-all, --clone-from) ---
+
+CLONES = [{"clone_config": True}, {"clone_all": True}, {"clone_from": "default"}]
+
+
+@pytest.mark.parametrize("kw", CLONES)
+def test_clone_of_an_authoritative_source_never_touches_native(profile_env, profiles, kw):
+    source = _profile(profile_env, "default", provider="example")
+    native = _dormant(source)
+    with native_memory_sentinel(native) as sentinel:
+        pdir = profiles.create_profile("coder", no_alias=True, **kw)
+    sentinel.assert_untouched()
+    assert not (pdir / "memories").exists()                    # no native dir initialized (R37 precedent)
+    record = yaml.safe_load((pdir / DISPOSITION_RECORD_NAME).read_text(encoding="utf-8"))
+    assert record == {"curated_memory": {**SPEC_BLOCK, "provider": "example"}}
+
+
+@pytest.mark.parametrize("kw", CLONES)
+def test_additive_clone_still_copies_native_memory(profile_env, profiles, kw):
+    _dormant(_profile(profile_env, "default"))
+    pdir = profiles.create_profile("coder", no_alias=True, **kw)
+    assert (pdir / "memories" / "MEMORY.md").read_text(encoding="utf-8") == "dormant native memory\n"
+    assert not (pdir / DISPOSITION_RECORD_NAME).exists()
+
+
+@pytest.mark.parametrize("kw", CLONES)
+def test_active_migration_refuses_clone_and_creates_nothing(profile_env, profiles, kw):
+    _migration(_profile(profile_env, "default"), "active")
+    from hermes_cli.backup_memory import MigrationInProgressError
+    with pytest.raises(MigrationInProgressError):
+        profiles.create_profile("coder", no_alias=True, **kw)
+    assert not (profile_env / ".hermes" / "profiles" / "coder").exists()
+
+
+def test_fresh_profile_creation_is_unchanged(profile_env, profiles):
+    _profile(profile_env, "default", provider="example")          # the source mode must not leak into a fresh profile
+    pdir = profiles.create_profile("fresh", no_alias=True)
+    assert (pdir / "memories").is_dir() and not (pdir / DISPOSITION_RECORD_NAME).exists()
+
+
+@pytest.mark.parametrize("kw", CLONES)
+@pytest.mark.parametrize("provider", [None, "example"])  # ruling X-1 (a): every mode
+def test_clone_never_copies_host_session_state(profile_env, profiles, kw, provider):
+    """X-1 (a): `memory_service/` is a mode-independent exclusion, so no clone form carries it."""
+    source = _profile(profile_env, "default", provider=provider)
+    _host_state(source)
+    pdir = profiles.create_profile("coder", no_alias=True, **kw)
+    assert not (pdir / "memory_service").exists()
