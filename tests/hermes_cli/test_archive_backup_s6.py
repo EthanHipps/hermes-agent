@@ -236,6 +236,20 @@ def test_quick_snapshot_manifest_carries_the_disposition(tmp_path, env, capsys):
     assert "provider-managed and not included" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("cause", ["db copy failed", "db skipped for size"])
+def test_an_incomplete_quick_snapshot_never_says_complete(tmp_path, env, monkeypatch, capsys, cause):
+    """§9.8 L1637's sentence is for a successful archive; #68474: a missing state.db must not look successful."""
+    home = env(_home(tmp_path / ".hermes", provider="example"))
+    (home / "state.db").write_bytes(b"\0" * 8192)
+    if cause == "db copy failed":
+        monkeypatch.setattr(_backup(), "_safe_copy_db", lambda src, dst: False)
+    snap = _backup().create_quick_snapshot(hermes_home=home, max_file_size=4096 if "size" in cause else None)
+    assert snap is not None  # config.yaml was captured, so the snapshot is published
+    out = capsys.readouterr().out
+    assert "Hermes snapshot incomplete; authoritative example memory is provider-managed and not included" in out
+    assert "Hermes snapshot complete" not in out
+
+
 def test_additive_quick_snapshot_manifest_has_no_disposition(tmp_path, env):
     home = env(_home(tmp_path / ".hermes"))
     snap = _backup().create_quick_snapshot(hermes_home=home)

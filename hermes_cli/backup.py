@@ -1296,8 +1296,8 @@ def _create_quick_snapshot_locked(
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     os.replace(staging_dir, root / snap_id)
-    if disposition is not None:
-        print(f"  {disposition.archive_message(what='snapshot')}.")
+    if disposition is not None:  # incomplete when a DB failed or was skipped (#68474), as full backup says
+        print(f"  {disposition.archive_message(what='snapshot', complete=not (failed_dbs or oversized_skipped))}.")
     # Auto-prune (pre-update callers pass a smaller keep so state.db copies don't accumulate).
     # Skip when a DB failed to capture OR was skipped for size (#68805): the snapshot is
     # incomplete and the older one may hold the only recoverable database.
