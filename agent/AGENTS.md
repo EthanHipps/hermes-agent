@@ -125,9 +125,12 @@ region, never concatenated with native data — and the stable-tier memory-tool 
 from `lifecycle.memory_guidance_flags`, so `agent._memory_enabled`/`_user_profile_enabled` stay
 `False` and are read, never written. The frozen identity is persisted per Hermes session under
 `<home>/memory_service/sessions/` (`host_state.py`, owner-only JSON). It is resolved at agent
-init and again at turn start (`bootstrap.resolve_session_binding`: resume, inherit, new,
-stateless, invalid), so compression, branch, rewind, `/resume` and a working-directory change
-never re-bind; only `/new` and a genuinely new logical session bind, with intent `new_session`.
+init and again, lazily, whenever `agent.session_id` has moved — at turn start, before any prompt
+render and before any compression begins (`lifecycle.follow_session_binding` →
+`bootstrap.resolve_session_binding`: resume, inherit, new, stateless, invalid) — so
+compression, branch, rewind, `/resume` and a working-directory change never re-bind, and an
+out-of-turn `/context` or `/compress` never uses the previous session's service; only `/new` and
+a genuinely new logical session bind, with intent `new_session`.
 A conversation that already has messages but no record fails `binding_invalid`. Each model
 request passes `lifecycle.curated_request_gate` — a fresh load per enabled target, which
 validates and blocks but never re-renders the byte-stable prompt — and a stored prompt is
