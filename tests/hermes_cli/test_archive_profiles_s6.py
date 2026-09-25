@@ -308,6 +308,17 @@ def test_slash_snapshot_restore_that_switches_to_additive_warns_native_is_stale(
     assert "authoritative to additive" in out and "stale" in out
 
 
+def test_additive_slash_snapshot_restore_output_is_unchanged(profile_env, profiles, capsys):  # §9.10 L1668
+    home = _profile(profile_env, "default")
+    from hermes_cli import backup as backup_mod
+    snap = backup_mod.create_quick_snapshot(hermes_home=home)
+    capsys.readouterr()
+    _mixin()._snapshot_restore(["/snapshot", "restore", snap])
+    out = capsys.readouterr().out
+    assert "Restored state from" in out
+    assert "stale" not in out and "provider-managed" not in out
+
+
 def test_additive_cli_and_slash_output_carries_no_disposition(profile_env, profiles, capsys):
     _profile(profile_env, "coder")
     _profile_cmd().cmd_profile(Namespace(profile_action="export", profile_name="coder",
