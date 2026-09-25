@@ -10,6 +10,8 @@ resume stripping. The curated prefix is a LIVE variant registered beside
 SUMMARY_PREFIX.
 """
 
+import hashlib
+
 import pytest
 
 from agent.context_compressor import (
@@ -419,3 +421,98 @@ def test_the_continuity_thread_is_a_daemon(agent_env, monkeypatch):
                             old_session_id=None, session_commit_succeeded=True)
     assert agent._memory_continuity_thread.daemon is True
     agent._memory_continuity_thread.join(timeout=10)
+
+
+# ---- the real compression path (plan L1643): AIAgent._compress_context end to end -------------
+#
+# Only the summary LLM is patched (this box is offline; progress Task 0); lease, fence, commit,
+# prompt rebuild and _finish_compaction_boundary all run for real against the SessionDB.
+
+SUMMARY_BODY = "HANDOFF-SUMMARY-BODY"
+
+
+def _transcript(agent, turns=30):
+    """A persisted conversation whose middle outweighs the lean tail budget, so a summary shrinks it.
+
+    The rows are written through the agent's own flush, as a finished turn leaves them.
+    """
+    messages = [{"role": "user" if i % 2 == 0 else "assistant",
+                 "content": f"turn {i}: " + "lorem ipsum dolor sit amet " * 150}
+                for i in range(turns)]
+    agent._ensure_db_session()
+    agent._flush_messages_to_session_db(messages, None)
+    return messages
+
+
+def _patch_summary(monkeypatch, on_call=None):
+    def _summary(self, prompt, prompt_started_at):
+        if on_call is not None:
+            on_call()
+        return SUMMARY_BODY
+
+    monkeypatch.setattr(ContextCompressor, "_call_summary_llm", _summary)
+
+
+def _real_compress(agent, messages, **kwargs):
+    """The manual /compress call shape (cli_session_mixin._manual_compress)."""
+    kwargs.setdefault("force", True)
+    return agent._compress_context(messages, None, approx_tokens=50_000, **kwargs)
+
+
+def _submitted(agent, seen):
+    """The texts capture_continuity received, after the capture thread finished."""
+    thread = getattr(agent, "_memory_continuity_thread", None)
+    if thread is not None:
+        thread.join(timeout=10)
+    return [request.text for _, request in seen]
+
+
+def test_real_rotation_carries_the_record_and_submits_the_summary(agent_env, monkeypatch):
+    """Plan L1643 / D-R40-2 / R40-6: the boundary hook fires from the real commit.
+
+    The child session gets the parent's record with zero binds, the rebuilt prompt carries
+    the curated region, and the committed summary is submitted once.
+    """
+    from agent.memory_service.host_state import load_host_state
+    from agent.memory_service.lifecycle import compression_summary_text
+    from agent.memory_service.render import REGION_HEADING
+
+    seen = _continuity_spy(monkeypatch)
+    _patch_summary(monkeypatch)
+    agent = agent_env.agent
+    agent.compression_in_place = False
+    agent_env.store.seed_record(REPO_SCOPE, "memory", "MEMORY-FACT")
+    old_id, identity = agent.session_id, agent._memory_service.identity
+    binds = agent_env.count("bind_session")
+
+    compressed, prompt = _real_compress(agent, _transcript(agent))
+
+    assert agent.session_id != old_id                              # the real rotation happened
+    assert load_host_state(agent.session_id).state == load_host_state(old_id).state
+    assert agent._memory_session_key == agent.session_id
+    assert agent._memory_service.identity == identity and agent_env.count("bind_session") == binds
+    assert REGION_HEADING in prompt and "MEMORY-FACT" in prompt
+    assert load_host_state(agent.session_id).prompt_sha256 == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    summary = compression_summary_text(compressed)
+    assert SUMMARY_BODY in summary
+    assert _submitted(agent, seen) == [summary]
+
+
+def test_real_in_place_compaction_submits_the_summary_under_the_same_record(agent_env, monkeypatch):
+    """In-place keeps one session id and one record; the committed summary still reaches the provider."""
+    from agent.memory_service.host_state import load_host_state
+    from agent.memory_service.lifecycle import compression_summary_text
+
+    seen = _continuity_spy(monkeypatch)
+    _patch_summary(monkeypatch)
+    agent = agent_env.agent
+    agent.compression_in_place = True
+    session_id, state = agent.session_id, load_host_state(agent.session_id).state
+
+    compressed, _prompt = _real_compress(agent, _transcript(agent))
+
+    assert agent.session_id == session_id and agent._last_compaction_in_place is True
+    assert load_host_state(session_id).state == state
+    summary = compression_summary_text(compressed)
+    assert SUMMARY_BODY in summary
+    assert _submitted(agent, seen) == [summary]
