@@ -628,6 +628,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     timestamp line, runtime environment hints).  Worktree-dependent blocks follow project context so a
     shared context file can remain in the longest common prefix across worktrees.
     Never re-rendered mid-session."""
+    # Ruling R40-4b: a render right after /resume or /branch (/context, a TUI prompt persist, a
+    # CLI close) serves the session's own memory service, never the previous session's.
+    from agent.memory_service.lifecycle import follow_session_binding
+    follow_session_binding(agent)
     # Model context window scales the context-file caps; stable per conversation.
     _cc_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None

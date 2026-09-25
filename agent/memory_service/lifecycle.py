@@ -26,17 +26,7 @@ def _no_native_store():
 
 
 def ensure_session_binding(agent: Any, conversation_history: Optional[list] = None) -> None:
-    """Re-resolve the frozen identity when ``agent.session_id`` moved (ruling R40-4b).
-
-    Same session: no-op. Same identity (branch/compression child): keep the service,
-    record already inherited. Otherwise resume, bind, stay stateless, or raise
-    ``MemoryBlockedError(code="binding_invalid")`` (D-R40-1).
-
-    Ruling R40-4c (a): a genuinely new session binds with ``bind_intent="new_session"``
-    — ``ProviderAuthoritativeMemoryService.start``'s default — so the prior handle
-    stays live and the old session stays resumable with its memory. The live-handle
-    cost is cross-repo obligation K-2: v1 has no host end operation (D-R10-2) and ygg
-    caps handles at 4,096, so R28 budgets or closes them.
+    """Turn start: scope the fresh-load flag to this turn, then ``follow_session_binding``.
 
     ``conversation_history`` is accepted but unused: the resolver decides
     "continuation" from the SessionDB ``message_count`` alone, identically at agent
@@ -50,6 +40,29 @@ def ensure_session_binding(agent: Any, conversation_history: Optional[list] = No
     # that ended after a preflight compression) is not; this turn's own prompt build or
     # compaction re-arms the flag (§9.6 L1564, L1573).
     agent._curated_fresh_for_next_request = False
+    follow_session_binding(agent)
+
+
+def follow_session_binding(agent: Any) -> None:
+    """Re-resolve the frozen identity when ``agent.session_id`` moved (ruling R40-4b).
+
+    Called lazily before anything uses the service for a session: at turn start, before
+    every prompt render (``build_system_prompt_parts``) and before any compression state
+    exists (``prepare_compression``), so an out-of-turn render or ``/compress`` right after
+    ``/resume`` or ``/branch`` never serves the new session from the previous one's service.
+
+    Same session: no-op. Same identity (branch/compression child): keep the service,
+    record already inherited. Otherwise resume, bind, stay stateless, or raise
+    ``MemoryBlockedError(code="binding_invalid")`` (D-R40-1).
+
+    Ruling R40-4c (a): a genuinely new session binds with ``bind_intent="new_session"``
+    — ``ProviderAuthoritativeMemoryService.start``'s default — so the prior handle
+    stays live and the old session stays resumable with its memory. The live-handle
+    cost is cross-repo obligation K-2: v1 has no host end operation (D-R10-2) and ygg
+    caps handles at 4,096, so R28 budgets or closes them.
+    """
+    if _disposition(agent) not in _SERVICE_RENDERED:
+        return
     session_id = getattr(agent, "session_id", None)
     if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
         return
@@ -173,24 +186,31 @@ def configure_compaction_text(compressor: Any, service: Any) -> None:
 
 
 def prepare_compression(agent: Any) -> bool:
-    """Before any compression state exists: hold a validated render the boundary can reuse.
+    """Before any compression state exists: follow a session switch, then hold a validated render.
+
+    Ruling R40-4b: a compression outside a turn (manual ``/compress`` right after ``/resume``
+    or ``/branch``) must use the session's own service, so the switch is detected here —
+    the boundary hook would otherwise carry the previous session's service onto this one.
 
     The boundary rebuild runs inside the commit fence, where a raise would leave compression
     half-done, so ruling R40-7 (a) reuses the last validated render when that refresh fails.
     A session whose stored prompt was reused (R40-4d) has rendered nothing in this process —
     ``reconstruct_static_prefix`` renders only on prompt-caching routes — so render once now.
-    If that load fails, ``False`` tells the caller not to begin: nothing is committed, and
+    If either step fails, ``False`` tells the caller not to begin: nothing is committed, and
     the next request's gate blocks (§9.6 L1573).
     """
-    if _disposition(agent) != "provider_authoritative":
+    if _disposition(agent) not in _SERVICE_RENDERED:
         return True
-    service = agent._memory_service
-    prior = getattr(agent, "_curated_prompt_render", None)
-    if prior is not None and prior[0] == service.identity:
-        return True
-    from agent.memory_service.render import render_service_prompt
-
     try:
+        follow_session_binding(agent)
+        if _disposition(agent) != "provider_authoritative":
+            return True
+        service = agent._memory_service
+        prior = getattr(agent, "_curated_prompt_render", None)
+        if prior is not None and prior[0] == service.identity:
+            return True
+        from agent.memory_service.render import render_service_prompt
+
         agent._curated_prompt_render = (service.identity, render_service_prompt(service))
     except MemoryBlockedError:
         logger.warning("compression not started: curated memory unavailable")

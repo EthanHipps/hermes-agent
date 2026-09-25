@@ -624,6 +624,109 @@ def test_a_reused_render_never_satisfies_the_next_request(agent_env, monkeypatch
     assert agent_env.count("load_curated") == loads + 1               # by its own (failed) load
 
 
+def _session_b_in_another_repository(agent_env, monkeypatch):
+    """A second logical session, bound earlier from another repository, with a persisted transcript.
+
+    Its scopes differ from session A's, so A's region and B's region are distinguishable.
+    Returns (B's frozen state, B's transcript).
+    """
+    import os
+
+    from agent.memory_service import wire as w
+
+    other = agent_env.tmp_path / "repo-b"
+    other.mkdir()
+    agent_env.registry.directories[os.path.realpath(other)] = ("repo-2", "proj-1", None)
+    agent_env.store.seed_record(REPO_SCOPE, "memory", "A-FACT")
+    agent_env.store.seed_record(w.ScopeRef(kind="repository", id="repo-2"), "memory", "B-FACT")
+    monkeypatch.chdir(other)
+    b_agent = agent_env.build_agent("session-b")
+    history = _transcript(b_agent)
+    monkeypatch.chdir(agent_env.tmp_path)
+    return b_agent._memory_service.session_state, history
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["in_place", "rotation"])
+def test_compress_right_after_resume_uses_the_resumed_sessions_own_binding(agent_env, monkeypatch, in_place):
+    """66-V3 / R40-4b / §4.1 L259 / §9.10 L1677: ``/resume B`` then ``/compress`` before the next turn.
+
+    ``_sync_agent_to_session`` re-points ``session_id`` but leaves session A's service. The
+    compression must still render B's region, stamp B's record with the digest of that prompt
+    and capture B's summary under B's own binding — never A's.
+    """
+    from agent.conversation_compression import finalize_context_engine_compression_notification
+    from agent.memory_service.host_state import load_host_state
+    from tests.agent.memory_service.test_s6_identity_lifecycle import _switch
+
+    b_state, b_history = _session_b_in_another_repository(agent_env, monkeypatch)
+    agent = agent_env.agent                                            # the live CLI agent, on session A
+    agent._cached_system_prompt = agent._build_system_prompt(None)
+    assert "A-FACT" in agent._cached_system_prompt
+    agent.compression_in_place = in_place
+    binds = agent_env.count("bind_session")
+    seen = _continuity_spy(monkeypatch)
+    _patch_summary(monkeypatch)
+
+    _switch(agent, "session-b")                                        # /resume session-b
+    compressed, prompt = _real_compress(agent, b_history, defer_context_engine_notification=True)
+    finalize_context_engine_compression_notification(agent, committed=True)
+
+    assert agent._memory_service.session_state == b_state             # B bound its own service first
+    assert "B-FACT" in prompt and "A-FACT" not in prompt              # B's region, never A's
+    record = load_host_state(agent.session_id)                        # B, or B's rotated child
+    assert record.state == b_state
+    assert record.prompt_sha256 == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    _submitted(agent, seen)
+    assert [request.frozen_identity for _, request in seen] == [b_state.identity.to_wire()]
+    assert agent_env.count("bind_session") == binds                   # resume validates, never binds
+
+
+def test_a_prompt_built_right_after_resume_uses_the_resumed_sessions_own_binding(agent_env, monkeypatch):
+    """66-V3: any render after ``/resume B`` (TUI prompt persist, CLI close) detects the switch first."""
+    from agent.memory_service.host_state import load_host_state
+    from tests.agent.memory_service.test_s6_identity_lifecycle import _switch
+
+    b_state, _history = _session_b_in_another_repository(agent_env, monkeypatch)
+    agent = agent_env.agent
+    agent._build_system_prompt(None)
+
+    _switch(agent, "session-b")
+    prompt = agent._build_system_prompt(None)
+
+    assert agent._memory_service.session_state == b_state
+    assert "B-FACT" in prompt and "A-FACT" not in prompt
+    assert load_host_state("session-b").prompt_sha256 == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def test_compress_right_after_resuming_a_session_without_state_never_begins(agent_env, monkeypatch):
+    """66-V3: the switch is detected before any compression state exists.
+
+    ``/resume`` of a conversation with no persisted identity is ``binding_invalid``
+    (D-R40-1). ``/compress`` must refuse before summarizing or committing anything — never
+    carry session A's service into it.
+    """
+    from agent.memory_service.errors import MemoryBlockedError
+    from agent.memory_service.host_state import load_host_state
+    from tests.agent.memory_service.test_s6_identity_lifecycle import _session, _switch
+
+    agent = agent_env.agent
+    a_key = agent._memory_session_key
+    agent._build_system_prompt(None)
+    history = _transcript(agent_env.build_agent("scratch"))            # a long enough transcript
+    _session(agent_env.db, "orphan", messages=6)
+    summaries = []
+    _patch_summary(monkeypatch, on_call=lambda: summaries.append(1))
+
+    _switch(agent, "orphan")
+    with pytest.raises(MemoryBlockedError) as exc:
+        _real_compress(agent, history)
+
+    assert exc.value.code == "binding_invalid"
+    assert summaries == [] and agent.context_compressor.compression_count == 0
+    assert agent.session_id == "orphan" and agent._memory_session_key == a_key
+    assert load_host_state("orphan") is None
+
+
 def test_with_no_render_to_fall_back_on_compression_never_begins(agent_env, monkeypatch):
     """The other half of 66-V1: the provider is already down when preflight compression starts.
 
