@@ -116,6 +116,38 @@ def test_corrupt_missing_or_unknown_state_blocks(tmp_path, raw):  # §9.9 L1647,
     assert _mod().active_migration_manifests(tmp_path) == [path]
 
 
+@pytest.mark.parametrize("raw", ['{"state": []}', "[" * 100_000],
+                         ids=["unhashable-state", "nesting-past-the-recursion-limit"])
+def test_a_manifest_that_breaks_the_decoder_blocks_without_raising(tmp_path, raw):
+    """create_pre_update_backup never raises (R44-8 (a)), so the detector classifies instead of propagating."""
+    path = _state(tmp_path, raw=raw)
+    assert _mod().active_migration_manifests(tmp_path) == [path]
+
+
+def _deny_listing(monkeypatch, directory: Path) -> None:
+    """Listing *directory* fails as an ACL denial does, at the scandir the detector calls."""
+    m = _mod()
+    real = m.os.scandir
+
+    def scandir(path="."):
+        if Path(path) == directory:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(m.os, "scandir", scandir)
+
+
+@pytest.mark.parametrize("level", ["migrations", "migrations/example", "migrations/example/ep-1"])
+def test_an_unlistable_level_blocks(tmp_path, monkeypatch, level):  # R44-9 / K-9: "unlistable" fails closed
+    _state(tmp_path, "completed")  # listable, this receipt would not block
+    blocked = tmp_path / level
+    _deny_listing(monkeypatch, blocked)
+    m = _mod()
+    assert m.active_migration_manifests(tmp_path) == [blocked]
+    with pytest.raises(m.MigrationInProgressError):
+        m.refuse_if_migration_in_progress([tmp_path])
+
+
 def test_every_provider_directory_is_scanned(tmp_path):  # R44-9: never keyed on memory.provider
     path = _state(tmp_path, "active", provider="some-other-provider")
     assert _mod().active_migration_manifests(tmp_path) == [path]

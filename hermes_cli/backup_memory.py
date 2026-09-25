@@ -140,19 +140,51 @@ def active_migration_manifests(home: Path) -> List[Path]:
     root = Path(home) / MIGRATION_STATE_DIRNAME
     if not root.is_dir():
         return []
-    try:
-        candidates = sorted(root.glob("*/*/*.json"))
-    except OSError:
-        return [root]  # unlistable state cannot prove "no active migration" (§9.9 L1647)
-    active: List[Path] = []
-    for path in candidates:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = None
-        if not (isinstance(data, dict) and data.get("state") in _TERMINAL_MIGRATION_STATES):
-            active.append(path)
+    candidates: List[Path] = []
+    active: List[Path] = []  # an unlistable directory cannot prove "no active migration" (§9.9 L1647)
+    _walk_migration_state(root, 2, candidates, active)
+    active.extend(path for path in sorted(candidates) if not _is_terminal_manifest(path))
     return active
+
+
+def _walk_migration_state(directory: Path, depth: int, candidates: List[Path], unlistable: List[Path]) -> None:
+    """Collect ``*.json`` *depth* directory levels below *directory*; a listing error is never skipped.
+
+    Not ``Path.glob``: CPython 3.11's ``pathlib._WildcardSelector._select_from`` ends with
+    ``except PermissionError: return``, so an access-denied level would read as empty (fail open).
+    """
+    try:
+        with os.scandir(directory) as it:
+            entries = list(it)
+    except OSError:
+        unlistable.append(directory)
+        return
+    for entry in entries:
+        path = directory / entry.name
+        if depth == 0:
+            if os.path.normcase(entry.name).endswith(".json"):  # glob's case rule on this host
+                candidates.append(path)
+            continue
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            unlistable.append(path)
+            continue
+        if is_dir:
+            _walk_migration_state(path, depth - 1, candidates, unlistable)
+
+
+def _is_terminal_manifest(path: Path) -> bool:
+    """True only for a readable manifest whose top-level ``state`` is compacted. Never raises.
+
+    ``create_pre_update_backup`` must never raise (R44-8 (a)), so a decoder failure of any kind
+    (``RecursionError`` on deep nesting, ``TypeError`` on an unhashable ``state``) blocks instead.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return isinstance(data, dict) and data.get("state") in _TERMINAL_MIGRATION_STATES
+    except Exception:
+        return False
 
 
 def refuse_if_migration_in_progress(homes: Iterable[Path]) -> None:

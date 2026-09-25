@@ -148,6 +148,43 @@ def test_active_migration_refuses_backup_before_any_archive_exists(tmp_path, env
     assert "MIGRATION_IN_PROGRESS" in capsys.readouterr().out
 
 
+def _deny_listing(monkeypatch, directory: Path) -> None:
+    """Listing *directory* fails as an ACL denial does, at the scandir the migration detector calls."""
+    import hermes_cli.backup_memory as backup_memory
+    real = backup_memory.os.scandir
+
+    def scandir(path="."):
+        if Path(path) == directory:
+            raise PermissionError(13, "Access is denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(backup_memory.os, "scandir", scandir)
+
+
+@pytest.mark.parametrize("surface", ["backup", "pre-update zip", "export", "clone"])
+def test_unlistable_migration_state_refuses_backup_export_and_clone(tmp_path, env, monkeypatch, capsys, surface):
+    """R44-9 / K-9: unlistable state blocks. Path.glob swallowed the PermissionError, so it failed open."""
+    home = env(_home(tmp_path / ".hermes"))
+    _migration(home, "completed")  # listable, this receipt would not block
+    _deny_listing(monkeypatch, home / "migrations")
+    profiles = importlib.import_module("hermes_cli.profiles")
+    from hermes_cli.backup_memory import MigrationInProgressError
+    surfaces = {
+        "backup": lambda: _backup().run_backup(Namespace(output=str(tmp_path / "out.zip"))),
+        "pre-update zip": lambda: _backup().create_pre_update_backup(hermes_home=home),  # never raises
+        "export": lambda: profiles.export_profile("default", str(tmp_path / "default.tar.gz")),
+        "clone": lambda: profiles.create_profile("coder", no_alias=True, clone_config=True),
+    }
+    try:
+        outcome = surfaces[surface]()
+    except (MigrationInProgressError, SystemExit) as exc:
+        outcome = exc
+    assert outcome is None or isinstance(outcome, MigrationInProgressError) or getattr(outcome, "code", None) == 2
+    assert "MIGRATION_IN_PROGRESS" in capsys.readouterr().out + str(outcome)
+    assert not (tmp_path / "out.zip").exists() and not (tmp_path / "default.tar.gz").exists()
+    assert not list((home / "backups").glob("*.zip")) and not (home / "profiles" / "coder").exists()
+
+
 @pytest.mark.parametrize("state", ["completed", "rolled_back"])
 def test_compacted_receipt_does_not_block_and_never_enters_the_archive(tmp_path, env, state):
     home = env(_home(tmp_path / ".hermes", provider="example"))
