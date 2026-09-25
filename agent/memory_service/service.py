@@ -46,6 +46,20 @@ class MemoryDisposition(str, Enum):
     STATELESS = "stateless"
 
 
+_PROVIDER_MANAGED = frozenset({MemoryDisposition.AUTHORITATIVE.value, MemoryDisposition.STATELESS.value})
+
+
+def is_provider_managed(service: object) -> bool:
+    """True for a provider-authoritative or stateless service (§9.1).
+
+    Readers of ``agent._memory_service`` treat a missing service or a missing
+    disposition as additive, as R37's readers already do
+    (``agent/memory_manager.py``, ``run_agent.py``).
+    """
+    disposition = getattr(service, "disposition", None)
+    return getattr(disposition, "value", disposition) in _PROVIDER_MANAGED
+
+
 @dataclass(frozen=True)
 class ServiceCapabilities:
     recall_context: bool
