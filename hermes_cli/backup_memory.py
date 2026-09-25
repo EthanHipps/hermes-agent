@@ -293,7 +293,7 @@ def withhold_native_memory(staged_home: Path) -> bool:
     native = Path(staged_home) / NATIVE_MEMORY_DIRNAME
     if not native.is_dir():
         return False
-    shutil.rmtree(native, ignore_errors=True)
+    _drop_staged(native)
     return True
 
 
@@ -306,8 +306,21 @@ def withhold_host_state(staged_home: Path) -> bool:
     host_state = Path(staged_home) / HOST_STATE_DIRNAME
     if not host_state.is_dir():
         return False
-    shutil.rmtree(host_state, ignore_errors=True)
+    _drop_staged(host_state)
     return True
+
+
+def _drop_staged(directory: Path) -> None:
+    """Delete a withheld *directory* from a staging copy, or refuse the import.
+
+    ``ignore_errors`` hides a failed unlink (a read-only extracted file, a scanner's handle),
+    and a survivor would be published into the live profile (§9.8 L1639). A ValueError is a
+    clean refusal on every import entry point (D-R44-c); the staging tree is then discarded.
+    """
+    shutil.rmtree(directory, ignore_errors=True)
+    if os.path.lexists(directory):
+        raise ValueError(f"Could not withhold {directory.name}/ from the imported profile "
+                         "(a file in it could not be deleted); nothing was imported.")
 
 
 def stale_native_warning(label: str = "") -> str:

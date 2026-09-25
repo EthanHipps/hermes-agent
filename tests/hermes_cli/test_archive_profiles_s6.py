@@ -176,6 +176,31 @@ def test_profile_import_withholds_host_session_state(profile_env, profiles, prov
     assert (pdir / "config.yaml").exists()
 
 
+@pytest.mark.parametrize("withheld, provider", [("memories", "example"), ("memory_service", None)])
+def test_profile_import_refuses_when_a_withheld_directory_survives(profile_env, profiles, monkeypatch,
+                                                                   withheld, provider):
+    """§9.8 L1639: a withheld directory that could not be deleted (a read-only file, a scanner's handle)
+    must never be published into the live profile while the log says it was withheld."""
+    staging = profile_env / "stage" / "stuck"
+    _profile_like(staging, provider=provider)
+    _dormant(staging) if withheld == "memories" else _host_state(staging)
+    archive = profile_env / "stuck.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(staging, arcname="stuck")
+    import hermes_cli.backup_memory as backup_memory
+    real_rmtree = backup_memory.shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):  # the deletion fails, and ignore_errors=True hides it
+        if Path(path).name == withheld:
+            return None
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup_memory.shutil, "rmtree", rmtree)
+    with pytest.raises(ValueError):
+        profiles.import_profile(str(archive))
+    assert not (profile_env / ".hermes" / "profiles" / "stuck").exists()
+
+
 # --- Task 8: clone (--clone, --clone-all, --clone-from) ---
 
 CLONES = [{"clone_config": True}, {"clone_all": True}, {"clone_from": "default"}]
