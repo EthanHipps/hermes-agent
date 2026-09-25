@@ -294,6 +294,20 @@ def test_slash_snapshot_restore_prints_the_restore_disposition(profile_env, prof
     assert "was not restored" in out and "reconnect-provider" in out
 
 
+def test_slash_snapshot_restore_that_switches_to_additive_warns_native_is_stale(profile_env, profiles, capsys):
+    """R44-1 lists /snapshot restore; R44-7 and §9.9 L1662 require the stale-native warning on the flip."""
+    home = _profile(profile_env, "default")                       # additive when the snapshot is taken
+    from hermes_cli import backup as backup_mod
+    snap = backup_mod.create_quick_snapshot(hermes_home=home)
+    assert snap is not None
+    _profile(profile_env, "default", provider="ygg")              # the operator later goes authoritative
+    capsys.readouterr()
+    _mixin()._snapshot_restore(["/snapshot", "restore", snap])
+    out = capsys.readouterr().out
+    assert "Restored state from" in out
+    assert "authoritative to additive" in out and "stale" in out
+
+
 def test_additive_cli_and_slash_output_carries_no_disposition(profile_env, profiles, capsys):
     _profile(profile_env, "coder")
     _profile_cmd().cmd_profile(Namespace(profile_action="export", profile_name="coder",

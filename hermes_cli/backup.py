@@ -1007,9 +1007,9 @@ def _print_restore_disposition(plan) -> None:
     for label, disposition in plan.dispositions:
         where = f"[{label.rstrip('/')}] " if label else ""
         print(f"\n  {where}{disposition.restore_message()}")
+    from hermes_cli.backup_memory import stale_native_warning
     for label in plan.switched_to_additive:
-        print(f"\n  Warning: this restore switches {label.rstrip('/') or 'this home'} from authoritative to "
-              "additive memory. Its dormant MEMORY.md/USER.md are stale; authoritative changes are not in them.")
+        print(f"\n  {stale_native_warning(label)}")
     if plan.withheld_host_state:
         # Deliberately not printed: host session state is Hermes's own transport state, not
         # memory content, and no archive reachable at 5c583156f7 can contain it -- a printed

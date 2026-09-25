@@ -278,6 +278,15 @@ def withhold_host_state(staged_home: Path) -> bool:
     return True
 
 
+def stale_native_warning(label: str = "") -> str:
+    """§9.9 L1662 (ruling R44-7): a restore that flips a home authoritative -> additive says so.
+
+    One sentence for every restore surface R44-1 lists (``hermes import`` and ``/snapshot restore``).
+    """
+    return (f"Warning: this restore switches {label.rstrip('/') or 'this home'} from authoritative to "
+            "additive memory. Its dormant MEMORY.md/USER.md are stale; authoritative changes are not in them.")
+
+
 def disposition_line(home: Path, *, kind: str) -> Optional[str]:
     """The §9.8 L1637 sentence for *home*, or ``None`` in additive mode (nothing is printed)."""
     disposition = home_disposition(home)

@@ -847,10 +847,15 @@ class CLICommandsMixin:
             with suppress(Exception):
                 local_session_db.close()
                 self._session_db = None
+        from hermes_cli.backup_memory import home_disposition, stale_native_warning
+        home = get_hermes_home()
+        was_authoritative = home_disposition(home) is not None  # the snapshot may carry an older config.yaml
         if restore_quick_snapshot(snap_id):
             _pr(f"  Restored state from: {snap_id}",
                 "  Restart recommended for gateway/dashboard processes to pick up state.db changes.")
-            self._say_memory_disposition(get_hermes_home(), kind="restore")
+            self._say_memory_disposition(home, kind="restore")
+            if was_authoritative and home_disposition(home) is None:  # §9.9 L1662, ruling R44-7
+                print(f"  {stale_native_warning()}")
         else:
             print(f"  Snapshot not found: {snap_id}")
 
