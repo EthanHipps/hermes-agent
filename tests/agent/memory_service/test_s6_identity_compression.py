@@ -516,3 +516,113 @@ def test_real_in_place_compaction_submits_the_summary_under_the_same_record(agen
     summary = compression_summary_text(compressed)
     assert SUMMARY_BODY in summary
     assert _submitted(agent, seen) == [summary]
+
+
+# ---- ruling R40-7 (a) after a stored-prompt reuse (Checkpoint B 66-V1) ------------------------
+
+
+def _text_response(content):
+    from types import SimpleNamespace
+
+    message = SimpleNamespace(content=content, tool_calls=None, reasoning_content=None, reasoning=None)
+    response = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], model="test/model")
+    response.usage = None
+    return response
+
+
+def _resumed_with_stored_prompt(agent_env):
+    """``hermes --resume`` after a restart on a route without prompt caching.
+
+    A first process ran a real turn over the persisted transcript: it built the prompt,
+    recorded its digest and stored it on the row. The fresh agent's turn then reuses the
+    stored prompt verbatim (R40-4d) and renders nothing in-process
+    (``reconstruct_static_prefix`` renders only with prompt caching on).
+    """
+    first = agent_env.agent
+    agent_env.store.seed_record(REPO_SCOPE, "memory", "MEMORY-FACT")
+    first.client.chat.completions.create.return_value = _text_response("first answer")
+    result = first.run_conversation("first question", conversation_history=_transcript(first))
+    assert result.get("completed") is True
+    agent = agent_env.build_agent(first.session_id)
+    assert agent._use_prompt_caching is False and getattr(agent, "_curated_prompt_render", None) is None
+    return agent, result["messages"]
+
+
+def _pressure_at_the_first_pre_api_check(agent, monkeypatch, after_first_gate=None):
+    """Report the context over threshold once, at the loop's first pre-API check.
+
+    Turn-start compaction sees the real (sub-threshold) figure; the loop's first
+    ``run_preflight_gate`` then finds pressure, so compression runs as preflight compression
+    (turn_preflight_gate -> turn_preflight -> _compress_context), outside the turn-start
+    ``MemoryBlockedError`` handler. Returns what each gate call observed.
+    """
+    import agent.memory_service.lifecycle as lifecycle
+
+    real_gate = lifecycle.curated_request_gate
+    state = {"pressure": False, "renders_at_gate": []}
+
+    def _gate(target):
+        state["renders_at_gate"].append(getattr(target, "_curated_prompt_render", None))
+        verdict = real_gate(target)
+        if len(state["renders_at_gate"]) == 1:
+            state["pressure"] = True
+            if after_first_gate is not None:
+                after_first_gate()
+        return verdict
+
+    def _should_compress(prompt_tokens=None):
+        fire, state["pressure"] = state["pressure"], False
+        return fire
+
+    monkeypatch.setattr(lifecycle, "curated_request_gate", _gate)
+    monkeypatch.setattr(agent.context_compressor, "should_compress", _should_compress)
+    agent.compression_enabled = True
+    return state
+
+
+def test_a_failed_boundary_refresh_after_a_stored_prompt_reuse_blocks_the_turn_typed(agent_env, monkeypatch):
+    """R40-7 (a) / §9.6 L1573 / R40-9 (a): the boundary refresh fails during preflight compression.
+
+    Nothing had rendered in-process, yet compression must end consistent and the turn must end
+    with the typed ``curated_memory_blocked`` result at the next gate, never an exception out of
+    ``run_conversation`` with compression half-done inside the commit fence.
+    """
+    from agent.memory_service.host_state import load_host_state
+
+    agent, history = _resumed_with_stored_prompt(agent_env)
+    gates = _pressure_at_the_first_pre_api_check(agent, monkeypatch)
+    # The provider blips while the summary LLM runs: the boundary refresh and the next gate fail.
+    _patch_summary(monkeypatch, on_call=lambda: agent_env.store.fail_transport("load_curated", times=2))
+
+    result = agent.run_conversation("next question", conversation_history=history)
+
+    assert gates["renders_at_gate"][0] is None                # the stored prompt was reused, unrendered
+    assert result["failed"] and result.get("turn_exit_reason") == "curated_memory_blocked"
+    agent.client.chat.completions.create.assert_not_called()
+    assert len(gates["renders_at_gate"]) == 2                 # the gate re-ran after the compression
+    prompt = agent._cached_system_prompt                      # committed with the last validated render
+    assert "MEMORY-FACT" in prompt
+    assert load_host_state(agent.session_id).prompt_sha256 == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def test_with_no_render_to_fall_back_on_compression_never_begins(agent_env, monkeypatch):
+    """The other half of 66-V1: the provider is already down when preflight compression starts.
+
+    No validated render exists and none can be made, so compression must not begin at all —
+    no summary requested, no session mutated — and the turn still ends typed at the next gate.
+    """
+    agent, history = _resumed_with_stored_prompt(agent_env)
+    session_id, rows = agent.session_id, len(agent_env.db.get_messages(agent.session_id))
+    summaries = []
+    _patch_summary(monkeypatch, on_call=lambda: summaries.append(1))
+    _pressure_at_the_first_pre_api_check(
+        agent, monkeypatch, after_first_gate=lambda: agent_env.store.fail_transport("load_curated", times=2))
+
+    result = agent.run_conversation("next question", conversation_history=history)
+
+    assert result["failed"] and result.get("turn_exit_reason") == "curated_memory_blocked"
+    agent.client.chat.completions.create.assert_not_called()
+    assert summaries == []                                    # the compression never began
+    assert agent.session_id == session_id and agent.context_compressor.compression_count == 0
+    assert not any(ContextCompressor._is_context_summary_message(m)
+                   for m in agent_env.db.get_messages(session_id)[:rows])

@@ -166,6 +166,32 @@ def configure_compaction_text(compressor: Any, service: Any) -> None:
         compressor.compression_note = CURATED_MEMORY_COMPRESSION_NOTE
 
 
+def prepare_compression(agent: Any) -> bool:
+    """Before any compression state exists: hold a validated render the boundary can reuse.
+
+    The boundary rebuild runs inside the commit fence, where a raise would leave compression
+    half-done, so ruling R40-7 (a) reuses the last validated render when that refresh fails.
+    A session whose stored prompt was reused (R40-4d) has rendered nothing in this process —
+    ``reconstruct_static_prefix`` renders only on prompt-caching routes — so render once now.
+    If that load fails, ``False`` tells the caller not to begin: nothing is committed, and
+    the next request's gate blocks (§9.6 L1573).
+    """
+    if _disposition(agent) != "provider_authoritative":
+        return True
+    service = agent._memory_service
+    prior = getattr(agent, "_curated_prompt_render", None)
+    if prior is not None and prior[0] == service.identity:
+        return True
+    from agent.memory_service.render import render_service_prompt
+
+    try:
+        agent._curated_prompt_render = (service.identity, render_service_prompt(service))
+    except MemoryBlockedError:
+        logger.warning("compression not started: curated memory unavailable")
+        return False
+    return True
+
+
 def on_compression_boundary(agent: Any, *, compressed: list, old_session_id: Optional[str],
                             session_commit_succeeded: bool) -> None:
     """D-R40-2 / D-R40-3: carry the identity to a rotated id; then continuity.

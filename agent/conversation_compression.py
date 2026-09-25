@@ -3592,6 +3592,13 @@ def compress_context(
     """
     attempt = _begin_compression_attempt(agent, force=force, defer_notification=defer_context_engine_notification)
 
+    # Host-owned MemoryService (ruling R40-7 (a)): the boundary rebuild below runs inside the
+    # commit fence, so it must always have a validated curated render to fall back on. When none
+    # can be made, do not begin; the next request's gate blocks instead.
+    from agent.memory_service.lifecycle import prepare_compression
+    if not prepare_compression(agent):
+        return messages, _existing_system_prompt(agent, system_message)
+
     # Codex owns the real thread; route compaction to its own compact (config
     # compression.codex_app_server_auto). Memory handoff is Hermes-only: no native
     # summary prompt to inject into. `is True`: MagicMock attributes are truthy.
