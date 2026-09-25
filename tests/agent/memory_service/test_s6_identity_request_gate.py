@@ -232,6 +232,30 @@ def test_the_gate_never_rerenders_the_prompt(agent_env):
     assert "SECOND-FACT" not in agent._cached_system_prompt
 
 
+def test_an_out_of_turn_render_never_satisfies_a_later_request(agent_env):
+    """66-V2 (b) / R40-1 (c): a render between turns is not a load made for the next request.
+
+    CLI ``/context`` and the TUI context panel render the live agent's prompt parts; the
+    binding is then revoked. The next turn reuses its cached prompt, so nothing renders for
+    its first request, which must therefore run its own load and be blocked (§9.6 L1573,
+    L1580), never sent on the stale render.
+    """
+    from agent.context_breakdown import compute_session_context_breakdown
+
+    agent = agent_env.agent
+    agent.client.chat.completions.create.return_value = _response("first answer")
+    first = agent.run_conversation("first question")
+    assert first.get("completed") is True and agent._cached_system_prompt
+    compute_session_context_breakdown(agent, first["messages"])        # /context, out of turn
+    agent_env.store.revoke(agent._memory_service.session_state.identity.opaque_binding_b64url)
+    agent.client.chat.completions.create.reset_mock()
+
+    result = agent.run_conversation("second question", conversation_history=first["messages"])
+
+    assert result["failed"] and result.get("turn_exit_reason") == "curated_memory_blocked"
+    agent.client.chat.completions.create.assert_not_called()
+
+
 def test_a_blocked_gate_raises_nothing_at_the_service_boundary(agent_env):
     """The gate answers with a message; MemoryBlockedError never escapes it."""
     from agent.memory_service.lifecycle import curated_request_gate

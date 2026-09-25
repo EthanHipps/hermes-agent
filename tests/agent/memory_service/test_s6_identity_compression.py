@@ -166,7 +166,6 @@ def test_boundary_refresh_failure_reuses_the_last_render_and_the_gate_blocks(age
     assert "MEMORY-FACT" in rebuilt                            # the last validated render, reused
     assert agent._memory_service.blocked is True
 
-    agent._curated_fresh_for_next_request = False
     agent_env.store.fail_transport("load_curated", times=1)
     assert curated_request_gate(agent) is not None             # and the gate still blocks
 
@@ -603,6 +602,26 @@ def test_a_failed_boundary_refresh_after_a_stored_prompt_reuse_blocks_the_turn_t
     prompt = agent._cached_system_prompt                      # committed with the last validated render
     assert "MEMORY-FACT" in prompt
     assert load_host_state(agent.session_id).prompt_sha256 == hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def test_a_reused_render_never_satisfies_the_next_request(agent_env, monkeypatch):
+    """66-V2 (a): R40-7 (a)'s reuse is not a fresh load, so the gate blocks the next request.
+
+    The turn's prompt build armed R40-1 (c)'s one-shot flag; the turn-start compaction that
+    follows fails its refresh and reuses that render. The first request must still run its
+    own load (§9.6 L1573), not ride on the render the failed refresh replaced.
+    """
+    from agent.memory_service.lifecycle import curated_request_gate
+
+    agent = agent_env.agent
+    agent._cached_system_prompt = agent._build_system_prompt(None)     # the turn's prompt build
+    _patch_summary(monkeypatch, on_call=lambda: agent_env.store.fail_transport("load_curated", times=2))
+    compressed, _prompt = _real_compress(agent, _transcript(agent), force=False)
+    assert compressed and agent._memory_service.blocked is True       # committed on the reused render
+
+    loads = agent_env.count("load_curated")
+    assert curated_request_gate(agent) is not None                    # the next request is blocked
+    assert agent_env.count("load_curated") == loads + 1               # by its own (failed) load
 
 
 def test_with_no_render_to_fall_back_on_compression_never_begins(agent_env, monkeypatch):

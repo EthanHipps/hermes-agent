@@ -45,6 +45,11 @@ def ensure_session_binding(agent: Any, conversation_history: Optional[list] = No
     """
     if _disposition(agent) not in _SERVICE_RENDERED:
         return
+    # Ruling R40-1 (c): only a load made while rendering the prompt FOR a request satisfies
+    # it. A render outside this turn (/context, a TUI prompt persist, manual /compress, a turn
+    # that ended after a preflight compression) is not; this turn's own prompt build or
+    # compaction re-arms the flag (§9.6 L1564, L1573).
+    agent._curated_fresh_for_next_request = False
     session_id = getattr(agent, "session_id", None)
     if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
         return
@@ -84,6 +89,7 @@ def curated_prompt_parts(agent: Any) -> Optional[List[str]]:
         if prior is None or prior[0] != service.identity:
             raise
         render = prior[1]                        # ruling R40-7 (a): reuse the last validated render
+        agent._curated_fresh_for_next_request = False  # ... and the gate blocks the next request
     else:
         agent._curated_prompt_render = (service.identity, render)
         agent._curated_fresh_for_next_request = True   # ruling R40-1 (c)
