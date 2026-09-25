@@ -323,6 +323,21 @@ def test_legacy_archive_native_and_external_files_stay_in_the_archive(tmp_path, 
     assert "2 legacy native memory file(s)" in out and "migration" in out
 
 
+def test_withheld_provider_files_are_reported_without_native_members(tmp_path, env, capsys):  # R44-6
+    """R44-6: withheld AND reported. An archive can carry _external/ with no memories/ (e.g. `hermes -p coder
+    backup` of an additive coder under an authoritative root prunes the root's memories/)."""
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    archive = _legacy_zip(tmp_path / "ext.zip", _authoritative_yaml(exe, "example"), native=False, external=True)
+    target = env(tmp_path / "dst")
+    target.mkdir()
+    _backup().run_import(Namespace(zipfile=str(archive), force=True))
+    assert not (tmp_path / ".legacyprov" / "config.json").exists()
+    out = capsys.readouterr().out
+    assert "Left 1 memory-provider file(s) in the archive" in out
+    assert "legacy native memory" not in out
+
+
 def test_additive_archive_restore_is_unchanged(tmp_path, env):
     archive = _legacy_zip(tmp_path / "old.zip", "model:\n  provider: openrouter\n")
     target = env(tmp_path / "dst")

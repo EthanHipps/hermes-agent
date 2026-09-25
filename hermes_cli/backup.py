@@ -999,11 +999,12 @@ def _import_members(
 def _print_restore_disposition(plan) -> None:
     """Say what a restore did NOT restore, and why (§9.8 L1637-1641, rulings R44-6, R44-7, X-1)."""
     if plan.withheld_native:
-        ext = (f" and {len(plan.withheld_external)} memory-provider file(s)"
-               if plan.withheld_external else "")
-        print(f"\n  Left {len(plan.withheld_native)} legacy native memory file(s){ext} in the archive: "
+        print(f"\n  Left {len(plan.withheld_native)} legacy native memory file(s) in the archive: "
               "the restored configuration is authoritative, so they stay dormant. "
               "Importing them requires the explicit memory migration procedure.")
+    if plan.withheld_external:  # R44-6: withheld AND reported, with or without native members
+        print(f"\n  Left {len(plan.withheld_external)} memory-provider file(s) in the archive: "
+              "the restored configuration is authoritative, so they were not restored.")
     for label, disposition in plan.dispositions:
         where = f"[{label.rstrip('/')}] " if label else ""
         print(f"\n  {where}{disposition.restore_message()}")
