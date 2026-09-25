@@ -171,10 +171,16 @@ def _background_delete_gate(action, operations, target="memory", content=None, o
 
 def memory_tool(action: str = None, target: str = "memory", content: str = None, old_text: str = None,
                 new_text: str = None, operations: Optional[List[Dict[str, Any]]] = None,
-                store: Optional[MemoryStore] = None) -> str:
+                store: Optional[MemoryStore] = None, *, service: Any = None, budget: Any = None) -> str:
     """Tool entry point; returns a JSON string. Single op (action + content/old_text)
     or batch (``operations``, atomic against the final budget). ``new_text``
-    aliases ``content`` — callers mirror ``old_text`` with it (patch-tool shape)."""
+    aliases ``content`` — callers mirror ``old_text`` with it (patch-tool shape).
+    A provider-managed ``service`` routes through MemoryService and never touches
+    ``store`` (§9.7; tools/memory_tool_curated.py)."""
+    if service is not None:
+        from tools.memory_tool_curated import curated_memory_tool
+        return curated_memory_tool(service, action=action, target=target, content=content, old_text=old_text,
+                                   new_text=new_text, operations=operations, budget=budget)
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
     if content is None and new_text is not None:
