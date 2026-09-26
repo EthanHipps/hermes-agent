@@ -277,9 +277,19 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     # available"; with only USER.md enabled the narrower block is used.
     memory_guidance = None
     if "memory" in names:
-        memory_guidance = _pb.build_memory_guidance(
+        # Ruling X-2 (c): in a provider-managed session the agent flags stay False
+        # (agent_init._init_memory), so the flags come from the service's per-target
+        # configuration instead. ``None`` means additive or absent: today's bytes.
+        from agent.memory_service.lifecycle import memory_guidance_flags
+
+        _flags = memory_guidance_flags(agent)
+        _memory_on, _user_on = _flags if _flags is not None else (
             getattr(agent, "_memory_enabled", True),
             getattr(agent, "_user_profile_enabled", True),
+        )
+        memory_guidance = _pb.build_memory_guidance(
+            _memory_on,
+            _user_on,
             skill_manage_available="skill_manage" in names,
         )
     # Kanban lifecycle: resolved once at __init__ (_kanban_worker_guidance);
@@ -460,7 +470,15 @@ def _timestamp_line(agent: Any) -> str:
 def _memory_parts(agent: Any) -> List[str]:
     """Built-in memory/USER.md blocks plus the external provider block (gated on
     the same check ``inject_memory_provider_tools`` uses, so we never advertise
-    tools the toolset config gated off)."""
+    tools the toolset config gated off).
+
+    In authoritative or stateless mode the host-owned MemoryService is the only
+    source of curated memory (§9.7 L1596): one structured region, never
+    concatenated with native data (§9.1 L948), and no external-provider block."""
+    from agent.memory_service.lifecycle import curated_prompt_parts
+    _curated = curated_prompt_parts(agent)
+    if _curated is not None:
+        return _curated          # authoritative/stateless: one service region; no native store, no sidecar block
     parts: List[str] = []
     if agent._memory_store:
         for enabled, kind in ((agent._memory_enabled, "memory"), (agent._user_profile_enabled, "user")):
@@ -610,6 +628,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     timestamp line, runtime environment hints).  Worktree-dependent blocks follow project context so a
     shared context file can remain in the longest common prefix across worktrees.
     Never re-rendered mid-session."""
+    # Ruling R40-4b: a render right after /resume or /branch (/context, a TUI prompt persist, a
+    # CLI close) serves the session's own memory service, never the previous session's.
+    from agent.memory_service.lifecycle import follow_session_binding
+    follow_session_binding(agent)
     # Model context window scales the context-file caps; stable per conversation.
     _cc_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None
@@ -672,7 +694,12 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     # Surface context-file truncation warnings in chat, not only in logs.
     for warning in drain_truncation_warnings():
         agent._emit_status(warning)
-    return "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    prompt = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    # Ruling R40-4d: remember which disposition built exactly these bytes, so a stored
+    # prompt from another disposition is never reused. No-op outside authoritative/stateless.
+    from agent.memory_service.lifecycle import record_curated_prompt
+    record_curated_prompt(agent, prompt)
+    return prompt
 
 
 def invalidate_system_prompt(agent: Any) -> None:

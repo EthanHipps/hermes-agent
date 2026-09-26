@@ -946,6 +946,13 @@ def build_turn_context(
             f"{'...' if len(_preview_text) > 60 else ''}'"
         )
 
+    # A surface may have pointed this agent at another session since the last turn
+    # (/resume, /branch, /new, gateway rebuild). Re-resolve the frozen memory identity
+    # before the prompt is restored or built (ruling R40-4b); no-op outside
+    # authoritative/stateless, and a MemoryBlockedError ends the turn with a typed result.
+    from agent.memory_service.lifecycle import ensure_session_binding
+    ensure_session_binding(agent, conversation_history)
+
     # System prompt is cached per session for prefix caching.
     if agent._cached_system_prompt is None:
         restore_or_build_system_prompt(agent, system_message, conversation_history)

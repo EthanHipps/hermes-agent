@@ -3093,6 +3093,14 @@ def _finish_compaction_boundary(
                 agent.session_id or "", parent_session_id=_boundary_parent, reset=False, reason="compression"
             )
 
+    # Host-owned MemoryService (D-R40-2/3): carry the frozen identity to the rotated
+    # session id — never a rebind — and, when the provider negotiated it, submit the
+    # committed summary through capture_continuity off this thread (ruling R40-6 (a)).
+    with _swallow('memory service compression boundary: %s'):
+        from agent.memory_service.lifecycle import on_compression_boundary
+        on_compression_boundary(agent, compressed=compressed, old_session_id=_old_sid,
+                                session_commit_succeeded=session_commit_succeeded)
+
     # Route via _emit_status so the warning reaches gateway platforms; store it on
     # _compression_warning so a late-bound status_callback can replay it.
     compressor = agent.context_compressor
@@ -3583,6 +3591,13 @@ def compress_context(
     session state after its caller has moved on.
     """
     attempt = _begin_compression_attempt(agent, force=force, defer_notification=defer_context_engine_notification)
+
+    # Host-owned MemoryService (ruling R40-7 (a)): the boundary rebuild below runs inside the
+    # commit fence, so it must always have a validated curated render to fall back on. When none
+    # can be made, do not begin; the next request's gate blocks instead.
+    from agent.memory_service.lifecycle import prepare_compression
+    if not prepare_compression(agent):
+        return messages, _existing_system_prompt(agent, system_message)
 
     # Codex owns the real thread; route compaction to its own compact (config
     # compression.codex_app_server_auto). Memory handoff is Hermes-only: no native

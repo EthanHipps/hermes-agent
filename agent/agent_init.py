@@ -1235,6 +1235,11 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     # stateless session never builds one.
     agent._memory_store = None
     agent._memory_service = None
+    # The Hermes session the service is bound for (None when additive or absent) and
+    # the raw config it was selected from, so a session transition at turn start can
+    # re-resolve the binding without reaching back into init (ruling R40-4b).
+    agent._memory_session_key = None
+    agent._memory_boot_config = None
     agent._memory_enabled = False
     agent._user_profile_enabled = False
     agent._memory_nudge_interval = 10
@@ -1250,6 +1255,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     )
     if not skip_memory or _memory_toolset_requested:
         from agent.memory_service.bootstrap import init_memory_service, requests_authoritative_mode
+        from agent.memory_service.service import is_provider_managed
 
         _authoritative_requested = requests_authoritative_mode(_agent_cfg)
         try:
@@ -1310,6 +1316,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
                     logical_session_id=getattr(agent, "session_id", "") or "",
                     platform=platform or "cli",
                     store_factory=_build_native_store,
+                    session_db=getattr(agent, "_session_db", None),
                 )
             except Exception:
                 if _authoritative_requested:
@@ -1318,6 +1325,9 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
             if agent._memory_service is None:
                 with suppress(Exception):
                     _build_native_store()
+            agent._memory_session_key = (getattr(agent, "session_id", None)
+                                         if is_provider_managed(agent._memory_service) else None)
+            agent._memory_boot_config = _agent_cfg
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None
@@ -1902,6 +1912,11 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             min_tail_user_messages=cs.min_tail_users, tail_mode=cs.tail_mode,
             custom_providers=_custom_providers,
         )
+        # Ruling R40-5 (a): an authoritative or stateless session emits handoff text
+        # without the native memory file names. _init_memory already ran (init_agent
+        # calls it before this), so the disposition is known here. Built-in only.
+        from agent.memory_service.lifecycle import configure_compaction_text
+        configure_compaction_text(agent.context_compressor, getattr(agent, "_memory_service", None))
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
         with suppress(Exception):

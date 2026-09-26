@@ -14,9 +14,12 @@ and reads the resolved scopes back off the frozen identity the bind returns.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
 
 from agent.memory_service import wire as w
 from agent.memory_service.config import MemoryServiceConfig
@@ -74,6 +77,82 @@ def requests_authoritative_mode(raw_config: object) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class SessionBinding:
+    """How this Hermes session gets its frozen identity (contract C4)."""
+
+    kind: str                                   # resume | inherit | new | stateless | invalid
+    record: Optional["HostStateRecord"]         # noqa: F821 - agent.memory_service.host_state
+
+
+def _row(session_db: Any, session_id: str) -> Optional[dict]:
+    getter = getattr(session_db, "get_session", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(session_id)
+    except Exception:
+        logger.warning("session lookup failed while resolving the memory binding")
+        return None
+
+
+def _model_config(row: dict) -> dict:
+    raw = row.get("model_config")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw) if isinstance(raw, str) and raw else {}
+    except ValueError:
+        return {}
+
+
+def resolve_session_binding(session_id: str, *, session_db: Any = None, hermes_home: Optional[Path] = None) -> SessionBinding:
+    """Decide how this Hermes session gets its frozen identity (§4.1 L250, §9.2, §9.3 L1233).
+
+    A record always wins. A branch or compression child inherits its parent's
+    record (never a ``_delegate_from`` child: R43). A session that already has
+    messages but no record is a continuation without identity: ``invalid``
+    (D-R40-1). Anything else is a new logical session.
+    """
+    from agent.memory_service.host_state import inherit_host_state, load_host_state
+
+    record = load_host_state(session_id, hermes_home=hermes_home)
+    if record is not None:
+        return SessionBinding("stateless" if record.disposition == "stateless" else "resume", record)
+    row = _row(session_db, session_id)
+    parent_id = (row or {}).get("parent_session_id")
+    if parent_id:
+        branched = bool(_model_config(row).get("_branched_from"))
+        parent = _row(session_db, parent_id) or {}
+        rotated = parent.get("end_reason") == "compression"
+        if branched or rotated:
+            inherited = inherit_host_state(parent_id, session_id, hermes_home=hermes_home)
+            if inherited is not None:
+                return SessionBinding("stateless" if inherited.disposition == "stateless" else "inherit", inherited)
+    if row is not None and int(row.get("message_count") or 0) > 0:
+        return SessionBinding("invalid", None)
+    return SessionBinding("new", None)
+
+
+def open_session_view(config: MemoryServiceConfig, state: "HostSessionState", *, backend_factory=None):  # noqa: F821
+    """A second provider transport bound to the same persisted identity.
+
+    Negotiate plus validate: no bind, and no probe load. Used off the foreground
+    turn (continuity, ruling R40-6) and later by R43's capability-limited views.
+    """
+    from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
+    from agent.memory_service.service import _default_backend_factory
+
+    factory = backend_factory or _default_backend_factory(config)
+    view = ProviderAuthoritativeMemoryService(config, factory(config))
+    try:
+        view.resume(state)
+    except BaseException:
+        view.shutdown()
+        raise
+    return view
+
+
 def init_memory_service(
     raw_config,
     *,
@@ -83,6 +162,7 @@ def init_memory_service(
     profile_id: Optional[str] = None,
     working_directory: Optional[str] = None,
     backend_factory=None,
+    session_db: Any = None,
 ):
     """Select the memory service before any native store is constructed.
 
@@ -92,6 +172,13 @@ def init_memory_service(
     today. In authoritative mode nothing is swallowed: a configuration error, a
     fail-closed provider failure, and a blocked session all propagate, because a
     session never switches mode because of failure (I1).
+
+    In authoritative mode the session's frozen identity comes from
+    :func:`resolve_session_binding`: a persisted record is resumed or inherited
+    and never re-bound (§9.3 L1233), a continuation with no record fails
+    ``binding_invalid`` (D-R40-1), and only a genuinely new logical session
+    binds. A session with no id at all is unmanaged and binds exactly as it did
+    before this resolver existed.
     """
     from agent.memory_service.config import MemoryConfigurationError, resolve_memory_service_config
     from agent.memory_service.service import select_memory_service
@@ -105,18 +192,72 @@ def init_memory_service(
         logger.warning("memory configuration is invalid; continuing with built-in memory: %s", exc)
         return None, exc
 
-    context = None
-    if config.provider_mode.value == "authoritative":
-        context = build_requested_context(
-            config,
-            logical_session_id=logical_session_id,
-            platform=platform,
-            profile_id=profile_id,
-            working_directory=working_directory,
+    if config.provider_mode.value != "authoritative":
+        return select_memory_service(raw_config, store_factory=store_factory, backend_factory=backend_factory), None
+
+    from agent.memory_service.errors import MemoryBlockedError
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+    from agent.memory_service.service import FailurePolicy, StatelessMemoryService
+
+    binding = (
+        resolve_session_binding(logical_session_id, session_db=session_db)
+        if logical_session_id else SessionBinding("new", None)
+    )
+
+    if binding.kind == "stateless":
+        # §9.6 L1582 and I1: a session that started stateless stays stateless,
+        # across a process restart included. The provider is not contacted.
+        return StatelessMemoryService(config, reason="this session started stateless"), None
+
+    if binding.kind == "invalid":
+        if config.failure_policy is FailurePolicy.STATELESS:
+            save_host_state(HostStateRecord(logical_session_id, "stateless", None))
+            return StatelessMemoryService(config, reason="binding_invalid: no persisted host session state"), None
+        raise MemoryBlockedError(
+            "binding_invalid: this session has no persisted memory identity; start a new session",
+            code="binding_invalid",
         )
-    return select_memory_service(
-        raw_config,
-        store_factory=store_factory,
-        requested_context=context,
-        backend_factory=backend_factory,
-    ), None
+
+    if binding.kind in ("resume", "inherit"):
+        service = select_memory_service(
+            raw_config, store_factory=store_factory, session_state=binding.record.state,
+            backend_factory=backend_factory,
+        )
+    else:
+        service = select_memory_service(
+            raw_config,
+            store_factory=store_factory,
+            requested_context=build_requested_context(
+                config, logical_session_id=logical_session_id, platform=platform,
+                profile_id=profile_id, working_directory=working_directory,
+            ),
+            backend_factory=backend_factory,
+        )
+
+    if logical_session_id:
+        _persist_binding(logical_session_id, service, prior=binding.record)
+    return service, None
+
+
+def _persist_binding(logical_session_id: str, service, *, prior) -> None:
+    """Record the disposition this session settled on (§4.1 L250; ruling R40-4a).
+
+    ``prompt_sha256`` carries forward only while the disposition AND the frozen
+    identity are unchanged, which is what makes ruling R40-4d's exact-match reuse
+    survive a resume; anything else leaves it unset so the prompt is rebuilt once.
+    """
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+    from agent.memory_service.service import MemoryDisposition
+
+    if service.disposition is MemoryDisposition.AUTHORITATIVE:
+        state = service.session_state
+        digest = (prior.prompt_sha256 if prior is not None
+                  and prior.disposition == "provider_authoritative" and prior.state == state else None)
+        record = HostStateRecord(logical_session_id, "provider_authoritative", state, prompt_sha256=digest)
+    elif service.disposition is MemoryDisposition.STATELESS:
+        record = HostStateRecord(logical_session_id, "stateless", None)
+    else:
+        return
+    if prior is not None and prior == record:
+        return
+    save_host_state(record)

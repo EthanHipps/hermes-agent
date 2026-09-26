@@ -43,6 +43,27 @@ def run_preflight_gate(
         _last_preflight_pressure=None,
     )
 
+    # §9.6 L1564: each model request needs a fresh successful load per enabled target.
+    # Ruling R40-9 (a), mid-turn half: same shape as the Ollama floor below — a
+    # content-free assistant row, failed=True, the call count and iteration budget
+    # refunded, and the turn broken before the request is sent. No-op outside
+    # authoritative mode.
+    from agent.memory_service.lifecycle import curated_request_gate
+
+    _curated_block = curated_request_gate(agent)
+    if _curated_block:
+        v.final_response = _curated_block
+        v.failed = True
+        v._turn_exit_reason = "curated_memory_blocked"
+        append_message(messages, {"role": "assistant", "content": v.final_response})
+        agent._emit_status("❌ Curated memory is unavailable — request not sent")
+        v.api_call_count -= 1
+        agent._api_call_count = v.api_call_count
+        with suppress(Exception):
+            agent.iteration_budget.refund()
+        v.action = "break"
+        return v
+
     _runtime_context_error = _ollama_context_limit_error(agent, request_pressure_tokens)
     if _runtime_context_error:
         v.final_response = _runtime_context_error

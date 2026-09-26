@@ -10,8 +10,23 @@ import logging
 
 from agent.memory_service import wire
 from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
-from agent.memory_service.bootstrap import build_requested_context, init_memory_service
+from agent.memory_service.bootstrap import (
+    SessionBinding,
+    build_requested_context,
+    init_memory_service,
+    open_session_view,
+    resolve_session_binding,
+)
 from agent.memory_service.builtin import BuiltinMemoryService
+from agent.memory_service.host_state import (
+    HOST_STATE_ROOT_DIRNAME,
+    HOST_STATE_SCHEMA,
+    HostStateRecord,
+    host_state_dir,
+    inherit_host_state,
+    load_host_state,
+    save_host_state,
+)
 from agent.memory_service.config import (
     PROVIDER_API_VERSION,
     REQUIRED_OPERATIONS,
@@ -48,6 +63,8 @@ from agent.memory_service.service import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "HOST_STATE_ROOT_DIRNAME",
+    "HOST_STATE_SCHEMA",
     "PROVIDER_API_VERSION",
     "REQUIRED_OPERATIONS",
     "FailurePolicy",
@@ -66,6 +83,8 @@ __all__ = [
     "TargetDisabledError",
     "FrozenMemoryIdentity",
     "HostSessionState",
+    "HostStateRecord",
+    "SessionBinding",
     "BuiltinMemoryService",
     "CommitIntent",
     "ContinuityCapture",
@@ -78,6 +97,12 @@ __all__ = [
     "ServiceCapabilities",
     "StatelessMemoryService",
     "build_requested_context",
+    "host_state_dir",
+    "inherit_host_state",
     "init_memory_service",
+    "load_host_state",
+    "open_session_view",
+    "resolve_session_binding",
+    "save_host_state",
     "select_memory_service",
 ]

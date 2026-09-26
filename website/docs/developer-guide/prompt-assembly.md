@@ -30,7 +30,7 @@ The cached system prompt is assembled as three ordered tiers (see `agent/system_
 
 1. **stable** — identity (`SOUL.md` or fallback), tool/model guidance, coding operating brief
 2. **context** — caller-supplied `system_message`, project context files (`.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules`), then the worktree-dependent git workspace snapshot, operator instructions and platform hints
-3. **volatile** — skills index, built-in memory snapshot (`MEMORY.md`), user profile snapshot (`USER.md`), external memory-provider block, timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
+3. **volatile** — skills index, built-in memory snapshot (`MEMORY.md`), user profile snapshot (`USER.md`), external memory-provider block (in authoritative memory mode, one `## Curated Memory` region rendered from the MemoryService snapshot replaces the built-in snapshots), timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
 
 The final system prompt is then joined as: `stable` → `context` → `volatile`.
 
