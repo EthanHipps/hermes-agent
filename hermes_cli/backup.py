@@ -271,18 +271,32 @@ def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional
     The one owner of the walk policy (directory pruning so os.walk never descends a multi-GB
     excluded tree, the root-only ``hermes-agent`` carve-out, root runtime trees, per-file rules),
     shared by ``hermes backup`` and the pre-update / pre-migration path so they can never drift.
+
+    R44: at every Hermes home root (the root and ``profiles/<name>``) names from
+    ``backup_memory.archive_prune_names`` are dropped BEFORE descent: an authoritative
+    home's ``memories/`` is never listed or stat'd (§9.1 L948), and ``migrations/``,
+    the disposition record and the host session-state directory never enter any
+    archive in any mode (§9.9 L1647/L1651, rulings R44-5 and X-1 (a)). Pruned names
+    are deliberately kept out of *skipped_dirs*: they are policy, not a user-visible
+    exclusion, so the "Excluded directories" line is byte-identical in additive mode.
     """
+    from hermes_cli.backup_memory import archive_prune_names
     for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
         rel_dir = Path(dirpath).relative_to(hermes_root)
         is_root = rel_dir == Path(".")
+        at_home_root = is_root or (len(rel_dir.parts) == 2 and rel_dir.parts[0] == "profiles")
+        home_prune = archive_prune_names(Path(dirpath)) if at_home_root else frozenset()
         kept = [
             d for d in dirnames
-            if (d not in _EXCLUDED_DIRS or (d == "hermes-agent" and not is_root))
+            if d not in home_prune
+            and (d not in _EXCLUDED_DIRS or (d == "hermes-agent" and not is_root))
             and not _in_excluded_root_dir(rel_dir / d)]
         if skipped_dirs is not None:
-            skipped_dirs.update(str(rel_dir / d) for d in set(dirnames) - set(kept))
+            skipped_dirs.update(str(rel_dir / d) for d in set(dirnames) - set(kept) - home_prune)
         dirnames[:] = kept
         for fname in filenames:
+            if fname in home_prune:
+                continue
             rel = rel_dir / fname
             fpath = hermes_root / rel
             # zipfile.write() follows file symlinks, so skip links before any archive write can
@@ -623,6 +637,12 @@ def _resolve_backup_output_path(output: Optional[str]) -> Path:
 def _collect_external_entries() -> tuple[list[tuple[Path, str]], list[str]]:
     """``([(abs_path, arcname)], [skipped])`` for the memory provider's external state, arc-named
     ``_external/<home-relative>``; paths outside home are skipped (security + portability)."""
+    # §9.8 L1637: an authoritative archive MUST NOT discover arbitrary provider paths. The
+    # disposition record says where curated memory lives; discovery is refused, not merely
+    # unused, so ``_collect_memory_provider_external_paths`` is never even called (R44-10).
+    from hermes_cli.backup_memory import home_disposition
+    if home_disposition(get_hermes_home()) is not None:
+        return [], []
     home_dir = Path.home().resolve()
     external_to_add: list[tuple[Path, str]] = []
     skipped_external: list[str] = []
@@ -647,16 +667,28 @@ def run_backup(args) -> None:
         print(f"Error: Hermes home directory not found at {hermes_root}")
         sys.exit(1)
 
+    from hermes_cli.backup_memory import MigrationInProgressError
     try:
         with _backup_operation_lock(hermes_root):
             _run_backup_locked(args, hermes_root)
     except BackupInProgressError as exc:
         print(f"Error: {exc}")
         raise SystemExit(2) from exc
+    except MigrationInProgressError as exc:
+        # §9.8 L1637: backup refuses while a memory migration is active. Exit 2 matches
+        # BackupInProgressError -- both mean "an operation holds the slot; retry later" (D-R44-d).
+        print(f"Error: {exc}")
+        raise SystemExit(2) from exc
 
 
 def _run_backup_locked(args, hermes_root: Path) -> None:
     """Write a full backup while the cross-process backup slot is held."""
+    from agent.memory_service.archive import DISPOSITION_RECORD_NAME
+    from hermes_cli.backup_memory import archive_homes, home_disposition, refuse_if_migration_in_progress
+    homes = archive_homes(hermes_root)
+    # Refuse BEFORE resolving the output path, so no archive or directory exists (§13.1 L2174).
+    refuse_if_migration_in_progress(home for _, home in homes)
+    dispositions = [(label, d) for label, home in homes if (d := home_disposition(home)) is not None]
     out_path = _resolve_backup_output_path(args.output)
     scan_started = time.monotonic()
     logger.info("backup phase=scan status=started")
@@ -695,6 +727,10 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
                 total_bytes += abs_path.stat().st_size
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
+        # Written fresh per archive, into each authoritative home's slot, so a stale record
+        # (e.g. one left by a rollback to additive) can never propagate (ruling R44-5).
+        for label, disposition in dispositions:
+            zf.writestr(f"{label}{DISPOSITION_RECORD_NAME}", disposition.record_text())
     elapsed = time.monotonic() - t0
     zip_size = out_path.stat().st_size
     logger.info("backup phase=archive status=complete duration_ms=%.1f files=%d errors=%d bytes=%d",
@@ -704,6 +740,9 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
           f"  Original:    {_format_size(total_bytes)}\n"
           f"  Compressed:  {_format_size(zip_size)}\n"
           f"  Time:        {elapsed:.1f}s")
+    for label, disposition in dispositions:  # §9.8 L1637 MUST say it, per home (R44-11 (b))
+        where = f"[{label.rstrip('/')}] " if label else ""
+        print(f"\n  {where}{disposition.archive_message(complete=not errors)}")
     if external_to_add:
         print(f"\n  Included {len(external_to_add)} memory-provider file(s) stored outside {display_hermes_home()}.")
     if skipped_external:
@@ -957,6 +996,29 @@ def _import_members(
     return restored, restored_external, errors, skipped_runtime, db_shrunk
 
 
+def _print_restore_disposition(plan) -> None:
+    """Say what a restore did NOT restore, and why (§9.8 L1637-1641, rulings R44-6, R44-7, X-1)."""
+    if plan.withheld_native:
+        print(f"\n  Left {len(plan.withheld_native)} legacy native memory file(s) in the archive: "
+              "the restored configuration is authoritative, so they stay dormant. "
+              "Importing them requires the explicit memory migration procedure.")
+    if plan.withheld_external:  # R44-6: withheld AND reported, with or without native members
+        print(f"\n  Left {len(plan.withheld_external)} memory-provider file(s) in the archive: "
+              "the restored configuration is authoritative, so they were not restored.")
+    for label, disposition in plan.dispositions:
+        where = f"[{label.rstrip('/')}] " if label else ""
+        print(f"\n  {where}{disposition.restore_message()}")
+    from hermes_cli.backup_memory import stale_native_warning
+    for label in plan.switched_to_additive:
+        print(f"\n  {stale_native_warning(label)}")
+    if plan.withheld_host_state:
+        # Deliberately not printed: host session state is Hermes's own transport state, not
+        # memory content, and no archive reachable at 5c583156f7 can contain it -- a printed
+        # line would change additive output for a state that cannot occur (§9.10 L1668).
+        logger.info("hermes import: withheld %d host session-state file(s) (spec 9.8)",
+                    len(plan.withheld_host_state))
+
+
 def run_import(args) -> None:
     """Restore a Hermes backup from a zip file."""
     zip_path = Path(args.zipfile).expanduser().resolve()
@@ -984,11 +1046,16 @@ def run_import(args) -> None:
             return
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
+        # §9.8 L1639: a restore restores Hermes configuration and the disposition record only.
+        # Planned BEFORE the first write, so withheld members are never created (R44-6, X-1 (a)).
+        from hermes_cli.backup_memory import plan_restore
+        plan = plan_restore(zf, members, prefix, hermes_root, external_prefix=_EXTERNAL_PREFIX)
         t0 = time.monotonic()
         restored, restored_external, errors, skipped_runtime, db_shrunk = _import_members(
-            zf, members, prefix, hermes_root, file_count)
+            zf, plan.restore, prefix, hermes_root, len(plan.restore))
         elapsed = time.monotonic() - t0
         print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
+        _print_restore_disposition(plan)
         if restored_external:
             print(f"\n  Restored {restored_external} memory-provider file(s) to "
                   f"their original location(s) outside {display_hermes_home()}.")
@@ -1219,9 +1286,19 @@ def _create_quick_snapshot_locked(
         "total_size": sum(manifest.values()), "files": manifest,
         "failed_dbs": failed_dbs, "oversized_skipped": oversized_skipped,
     }
+    # R44-8 (a): quick snapshots are EXEMPT from the migration refusal -- their fixed file
+    # list never holds migration state, and an in-place overlay restore cannot lose a
+    # manifest. They still declare the disposition (§9.8 L1627). _QUICK_STATE_FILES is
+    # deliberately untouched (hermes_cli/AGENTS.md: never a partial/tiered snapshot set).
+    from hermes_cli.backup_memory import home_disposition
+    disposition = home_disposition(home)
+    if disposition is not None:
+        meta["curated_memory"] = disposition.as_mapping()
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     os.replace(staging_dir, root / snap_id)
+    if disposition is not None:  # incomplete when a DB failed or was skipped (#68474), as full backup says
+        print(f"  {disposition.archive_message(what='snapshot', complete=not (failed_dbs or oversized_skipped))}.")
     # Auto-prune (pre-update callers pass a smaller keep so state.db copies don't accumulate).
     # Skip when a DB failed to capture OR was skipped for size (#68805): the snapshot is
     # incomplete and the older one may hold the only recoverable database.
@@ -1576,6 +1653,19 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
 
 
 def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional[Path]:
+    from agent.memory_service.archive import DISPOSITION_RECORD_NAME
+    from hermes_cli.backup_memory import (
+        MigrationInProgressError, archive_homes, home_disposition, refuse_if_migration_in_progress)
+    homes = archive_homes(hermes_root)
+    try:
+        refuse_if_migration_in_progress(home for _, home in homes)
+    except MigrationInProgressError as exc:
+        # R44-8 (a): automatic zips are SKIPPED, never raised. Their "never raises, the update
+        # continues" contract holds, and the printed reason says why the safety net is missing.
+        logger.warning("Full-zip backup skipped: %s", exc)
+        print(f"  ⚠ Backup skipped: {exc}")
+        return None
+    dispositions = [(label, d) for label, home in homes if (d := home_disposition(home)) is not None]
     scan_started = time.monotonic()
     logger.info("automatic backup phase=scan status=started")
     try:
@@ -1601,6 +1691,8 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
                 on_error=lambda rel, exc: logger.debug("Skipping %s in zip backup: %s", rel, exc),
                 on_progress=lambda i: logger.info(
                     "automatic backup phase=archive status=progress completed=%d total=%d", i, len(files_to_add)))
+            for label, disposition in dispositions:  # written fresh per archive (R44-5)
+                zf.writestr(f"{label}{DISPOSITION_RECORD_NAME}", disposition.record_text())
     except (OSError, _SQLiteSnapshotError) as exc:
         # The hidden partial is already gone; ``out_path`` may be a previous valid backup: keep it.
         logger.warning("Full-zip backup: zip write failed: %s", exc)
@@ -1608,6 +1700,9 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     logger.info("automatic backup phase=archive status=complete duration_ms=%.1f files=%d bytes=%d",
                 (time.monotonic() - archive_started) * 1000, len(files_to_add),
                 out_path.stat().st_size)
+    for label, disposition in dispositions:  # no stdout: automatic zips are not a human-facing path
+        logger.info("automatic backup: %s%s", f"[{label.rstrip('/')}] " if label else "",
+                    disposition.archive_message())
     return out_path
 
 

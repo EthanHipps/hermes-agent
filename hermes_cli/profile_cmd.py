@@ -249,6 +249,7 @@ def _profile_create(args):
         _die(f"Error: {e}")
     print(f"\nProfile '{name}' created at {profile_dir}")
     if cloned:
+        _say_disposition(profile_dir, kind="profile clone")
         if clone_all:
             print(f"Full copy from {source_label} (excluding session history, cron jobs, backups, and snapshots).")
         else:
@@ -465,13 +466,22 @@ def _profile_rename(args):
         _die(f"Error: {e}")
 
 
+def _say_disposition(home, *, kind: str) -> None:
+    """§9.8 L1637: every terminal archive entry point says it; additive prints nothing (R44-11 (b))."""
+    from hermes_cli.backup_memory import disposition_line
+    line = disposition_line(home, kind=kind)
+    if line:
+        print(f"  {line}")
+
+
 def _profile_export(args):
-    from hermes_cli.profiles import export_profile, get_profile_export_path
+    from hermes_cli.profiles import export_profile, get_profile_dir, get_profile_export_path
     name = args.profile_name
     try:
         output = args.output or str(get_profile_export_path(name))
         result_path = export_profile(name, output)
         print(f"✓ Exported '{name}' to {result_path}")
+        _say_disposition(get_profile_dir(name), kind="archive")
     except (ValueError, FileNotFoundError, OSError) as e:
         _die(f"Error: {e}")
 
@@ -482,6 +492,7 @@ def _profile_import(args):
         profile_dir = import_profile(args.archive, name=getattr(args, "import_name", None))
         name = profile_dir.name
         print(f"✓ Imported profile '{name}' at {profile_dir}")
+        _say_disposition(profile_dir, kind="restore")
         if not check_alias_collision(name):
             wrapper_path = create_wrapper_script(name)
             if wrapper_path:
