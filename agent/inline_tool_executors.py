@@ -111,15 +111,51 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
     )
 
 
+_MEMORY_ARGS: Tuple[_ArgSpec, ...] = (
+    ("action", "action"), ("target", "target", "memory"), ("content", "content"),
+    ("old_text", "old_text"), ("new_text", "new_text"), ("operations", "operations"),
+)
+# Ruling R38-3 (b), decided at Checkpoint A: surfaces §9.6 L1583 says must be refused before any read
+# or write until they receive an explicit frozen-identity service (R43). The review fork is detected
+# by its write origin. This must stay until R43, not only until R40: after R40 the fork resumes the
+# PARENT's frozen identity at its first turn (background_review.build_cache_parity_fork sets the
+# parent's session_id and clears _session_db), so this refusal is the only thing keeping it from
+# publishing under that identity. Attended /refine forks are is_background_review() too and are
+# refused; that side effect was accepted. Gateway hygiene agents are NOT refused here (R40's residual).
+_UNBOUND_MEMORY_PLATFORMS = frozenset({"cron"})
+
+
+def _unbound_memory_surface_refusal(agent) -> Optional[str]:
+    from tools.skill_provenance import is_background_review
+
+    if is_background_review() or getattr(agent, "platform", None) in _UNBOUND_MEMORY_PLATFORMS:
+        return json.dumps({"success": False, "done": True, "error": (
+            "Memory is provider-managed, and this background surface has no explicit memory identity, "
+            "so it cannot read or write memory. Nothing was saved.")})
+    return None
+
+
+def _curated_memory_budget(agent):
+    budget = getattr(agent, "_curated_memory_budget", None)
+    if budget is None:
+        from tools.memory_tool_curated import ConsolidationBudget
+
+        budget = agent._curated_memory_budget = ConsolidationBudget()
+    return budget
+
+
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
-    result = _call_tool(
-        "tools.memory_tool", "memory_tool", args,
-        (
-            ("action", "action"), ("target", "target", "memory"), ("content", "content"),
-            ("old_text", "old_text"), ("new_text", "new_text"), ("operations", "operations"),
-        ),
-        store=agent._memory_store,
-    )
+    from agent.memory_service.service import is_provider_managed
+
+    service = getattr(agent, "_memory_service", None)
+    if is_provider_managed(service):
+        # §9.7 L1599: MemoryService only — no store= argument, no notify_memory_tool_write, no mirroring.
+        refusal = _unbound_memory_surface_refusal(agent)
+        if refusal is not None:
+            return refusal
+        return _call_tool("tools.memory_tool", "memory_tool", args, _MEMORY_ARGS,
+                          service=service, budget=_curated_memory_budget(agent))
+    result = _call_tool("tools.memory_tool", "memory_tool", args, _MEMORY_ARGS, store=agent._memory_store)
     # Mirror built-in memory writes to external providers; gating lives in
     # MemoryManager.notify_memory_tool_write.
     if agent._memory_manager:

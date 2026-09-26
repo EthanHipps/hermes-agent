@@ -505,9 +505,10 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
     agent._turn_failed_file_mutations = {}
     agent._turn_file_mutation_paths = set()
     agent._tool_guardrails.reset_for_turn()
-    _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
-    if callable(_reset_consol):
-        _reset_consol()
+    for _holder in (agent._memory_store, getattr(agent, "_curated_memory_budget", None)):
+        _reset_consol = getattr(_holder, "reset_consolidation_failures", None)
+        if callable(_reset_consol):
+            _reset_consol()
 
     # Pre-turn connection health check: clean up dead TCP connections.
     if agent.api_mode != "anthropic_messages":

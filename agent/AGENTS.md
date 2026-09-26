@@ -97,15 +97,18 @@ cache break — keep it the only one. Full detail:
 `agent/memory_provider.py` (ABC) + `agent/memory_manager.py` (orchestrator) drive memory-provider
 plugins; `agent/context_engine.py` drives context-engine plugins; `agent/image_gen_provider.py`
 image-gen plugins (all in `plugins/AGENTS.md`). `agent/curator.py` + `curator_backup.py` implement
-the skill curator (`skills/AGENTS.md`). Cron sessions pass `skip_memory=True` by default — memory
-providers intentionally do not run during cron.
+the skill curator (`skills/AGENTS.md`). Cron agents are built with `skip_memory=False` and
+`platform="cron"` (`cron/scheduler.py::_construct_cron_agent`), so memory — and a configured external
+memory provider — loads as in any other session; in a provider-managed session the memory tool
+refuses cron calls before any load until cron receives an explicit frozen-identity service.
 
 `agent/memory_service/` is the host-owned generic memory service: `agent_init._init_memory`
 selects the router via `bootstrap.init_memory_service` **before** any native `MemoryStore` is
 constructed, so an authoritative or stateless-fallback session never builds, stats, or reads
 `MEMORY.md`/`USER.md` — `agent._memory_store` stays `None` in that case. `agent._memory_service`
-is `None` when memory is skipped entirely (cron's `skip_memory=True` with no `memory` toolset
-requested, where the store is `None` too) or when *additive* service init fails, which degrades
+is `None` when memory is skipped entirely (`skip_memory=True` with no `memory` toolset requested,
+as delegate children, the curator and batch runs do; the store is `None` too) or when *additive*
+service init fails, which degrades
 to the native store alone exactly as before the router existed. A configuration error or
 fail-closed provider failure in authoritative mode propagates out of init instead — a session
 never switches mode because of failure. `tests/agent/memory_service/
@@ -123,6 +126,16 @@ restored by backup, export, clone or import; every such archive carries
 (`curated-memory-disposition.yaml`); `migrations/` and the host session-state directory
 `memory_service/` never enter an archive in any mode and are never restored; and an active
 migration manifest refuses backup/export/clone with `MIGRATION_IN_PROGRESS`.
+
+In a provider-managed session (`memory_service.service.is_provider_managed`) the memory tool
+dispatches only through `MemoryService`: `inline_tool_executors._memory` passes `service=` (never
+`store=`) and never calls `notify_memory_tool_write`; `tools/memory_tool_curated.py` runs the native
+`MemoryStore` semantics over one complete snapshot in memory (`SnapshotMemoryStore`) and turns the
+result into an explicit intent and an ID-based delta; `memory_service/mutation.py::run_curated_mutation`
+loads fresh, stages, commits, replays `version_conflict` with a new request ID and reloads every
+enabled target after a commit. Mutations that need approval fail closed until the approval flow
+lands, and cron and background-review calls are refused before any load until they receive an
+explicit frozen-identity service.
 
 ## Tests
 
