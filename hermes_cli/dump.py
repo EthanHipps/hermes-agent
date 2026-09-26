@@ -267,6 +267,12 @@ def run_dump(args):
         f"  cron_jobs:          {_cron_summary(hermes_home)}",
         f"  skills:             {_count_skills(hermes_home)}",
     ]
+    from agent.memory_service.archive import archive_disposition
+    disposition = archive_disposition(config)
+    if disposition is not None:  # §9.8 L1627 / §12.1 L2044: every diagnostic bundle embeds this dump
+        lines += ["", f"memory_authority:   {disposition.subject()} is provider-managed and not included "
+                      "in this report",
+                  *disposition.yaml_block().rstrip("\n").splitlines()]
     overrides = _config_overrides(config)
     if overrides:
         lines += ["", "config_overrides:"] + [f"  {key}: {val}" for key, val in overrides.items()]

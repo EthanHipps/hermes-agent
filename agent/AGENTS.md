@@ -116,6 +116,14 @@ authority mode, even when provider validation fails. Cold-process tests arm the 
 before imports/config loading. Bootstrap binds to `runtime_cwd.resolve_agent_cwd()` (unless
 an explicit working directory is supplied), and the default agent platform binds as `cli`.
 
+Archives follow the same dormancy: `hermes_cli/backup_memory.py` decides each Hermes home's mode
+from its own config, so an authoritative home's `memories/` is never walked, copied, created or
+restored by backup, export, clone or import; every such archive carries
+`agent/memory_service/archive.py`'s generic `curated_memory` record
+(`curated-memory-disposition.yaml`); `migrations/` and the host session-state directory
+`memory_service/` never enter an archive in any mode and are never restored; and an active
+migration manifest refuses backup/export/clone with `MIGRATION_IN_PROGRESS`.
+
 ## Tests
 
 Loop/phase tests go in `tests/agent/`; patch the binding the phase actually reads (siblings often
