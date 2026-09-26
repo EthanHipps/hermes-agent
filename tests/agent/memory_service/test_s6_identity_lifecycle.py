@@ -492,6 +492,27 @@ def test_an_additive_or_absent_service_is_never_resolved(tmp_path):
     assert not host_state_dir().exists()
 
 
+@pytest.mark.parametrize("disposition", ["provider_authoritative", "stateless"])
+def test_a_plain_string_disposition_is_provider_managed_as_c1_says(disposition):
+    """Correction R-2: the lifecycle agrees with ``is_provider_managed`` on a plain-string disposition."""
+    from types import SimpleNamespace
+
+    from agent.memory_service import lifecycle
+    from agent.memory_service.service import is_provider_managed
+
+    service = SimpleNamespace(disposition=disposition, identity="identity-1",
+                              target_enabled=lambda target: target == "memory")
+    agent = SimpleNamespace(_memory_service=service, session_id="s-1", _memory_session_key="s-1",
+                            _curated_fresh_for_next_request=True)
+    assert is_provider_managed(service)
+    lifecycle.ensure_session_binding(agent)
+    assert agent._curated_fresh_for_next_request is False
+    expected = (True, False) if disposition == "provider_authoritative" else (False, False)
+    assert lifecycle.memory_guidance_flags(agent) == expected
+    service.target_enabled = lambda target: False     # nothing to load, so the renderer needs no snapshot
+    assert lifecycle.curated_prompt_parts(agent) == []
+
+
 def test_a_stateless_session_stays_stateless_across_a_transition(agent_env):
     """I1: a stateless session that moves to a new id does not become authoritative."""
     from agent.memory_service.lifecycle import ensure_session_binding

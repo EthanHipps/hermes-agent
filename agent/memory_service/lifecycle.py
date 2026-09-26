@@ -11,14 +11,20 @@ import logging
 from typing import Any, List, Optional, Tuple
 
 from agent.memory_service.errors import MemoryBlockedError
+from agent.memory_service.service import is_provider_managed
 
 logger = logging.getLogger(__name__)
-_SERVICE_RENDERED = ("provider_authoritative", "stateless")
+
+
+def _managed(agent: Any) -> bool:
+    """Contract C1 on the agent's service: provider-authoritative or stateless."""
+    return is_provider_managed(getattr(agent, "_memory_service", None))
 
 
 def _disposition(agent: Any) -> Optional[str]:
+    """The disposition VALUE (stateless vs authoritative), normalized exactly as C1 reads it."""
     disposition = getattr(getattr(agent, "_memory_service", None), "disposition", None)
-    return getattr(disposition, "value", None)
+    return getattr(disposition, "value", disposition)
 
 
 def _no_native_store():
@@ -33,7 +39,7 @@ def ensure_session_binding(agent: Any, conversation_history: Optional[list] = No
     init (where no history exists yet) and at turn start. A REST caller that holds
     its own history with no SessionDB row is R42's surface.
     """
-    if _disposition(agent) not in _SERVICE_RENDERED:
+    if not _managed(agent):
         return
     # Ruling R40-1 (c): only a load made while rendering the prompt FOR a request satisfies
     # it. A render outside this turn (/context, a TUI prompt persist, manual /compress, a turn
@@ -61,7 +67,7 @@ def follow_session_binding(agent: Any) -> None:
     cost is cross-repo obligation K-2: v1 has no host end operation (D-R10-2) and ygg
     caps handles at 4,096, so R28 budgets or closes them.
     """
-    if _disposition(agent) not in _SERVICE_RENDERED:
+    if not _managed(agent):
         return
     session_id = getattr(agent, "session_id", None)
     if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
@@ -87,9 +93,9 @@ def follow_session_binding(agent: Any) -> None:
 
 def curated_prompt_parts(agent: Any) -> Optional[List[str]]:
     """The curated region for the system prompt; ``None`` means "use the native path"."""
-    disposition = _disposition(agent)
-    if disposition not in _SERVICE_RENDERED:
+    if not _managed(agent):
         return None
+    disposition = _disposition(agent)
     if disposition == "stateless":
         return []
     from agent.memory_service.render import render_service_prompt
@@ -111,9 +117,9 @@ def curated_prompt_parts(agent: Any) -> Optional[List[str]]:
 
 def record_curated_prompt(agent: Any, prompt: str) -> None:
     """Remember which prompt this disposition built (ruling R40-4d)."""
-    disposition = _disposition(agent)
-    if disposition not in _SERVICE_RENDERED or not getattr(agent, "session_id", None):
+    if not _managed(agent) or not getattr(agent, "session_id", None):
         return
+    disposition = _disposition(agent)
     from dataclasses import replace
 
     from agent.memory_service.host_state import load_host_state, save_host_state
@@ -155,9 +161,9 @@ def curated_prompt_reusable(agent: Any, stored_prompt: str) -> bool:
     (§9.1 L948). A whole-prompt digest needs no heuristic, and the guard is a no-op
     for an additive or absent service.
     """
-    disposition = _disposition(agent)
-    if disposition not in _SERVICE_RENDERED:
+    if not _managed(agent):
         return True
+    disposition = _disposition(agent)
     from agent.memory_service.errors import BindingInvalidError
     from agent.memory_service.host_state import load_host_state
 
@@ -179,8 +185,7 @@ def configure_compaction_text(compressor: Any, service: Any) -> None:
         CURATED_MEMORY_COMPRESSION_NOTE, CURATED_MEMORY_SUMMARY_PREFIX, ContextCompressor,
     )
 
-    disposition = getattr(getattr(service, "disposition", None), "value", None)
-    if isinstance(compressor, ContextCompressor) and disposition in _SERVICE_RENDERED:
+    if isinstance(compressor, ContextCompressor) and is_provider_managed(service):
         compressor.summary_prefix = CURATED_MEMORY_SUMMARY_PREFIX
         compressor.compression_note = CURATED_MEMORY_COMPRESSION_NOTE
 
@@ -199,7 +204,7 @@ def prepare_compression(agent: Any) -> bool:
     If either step fails, ``False`` tells the caller not to begin: nothing is committed, and
     the next request's gate blocks (§9.6 L1573).
     """
-    if _disposition(agent) not in _SERVICE_RENDERED:
+    if not _managed(agent):
         return True
     try:
         follow_session_binding(agent)
@@ -226,7 +231,7 @@ def on_compression_boundary(agent: Any, *, compressed: list, old_session_id: Opt
     copied to the child session id with the frozen identity unchanged (§9.3 L1233).
     An aborted commit carries nothing.
     """
-    if _disposition(agent) not in _SERVICE_RENDERED or not session_commit_succeeded:
+    if not _managed(agent) or not session_commit_succeeded:
         return
     from agent.memory_service.host_state import inherit_host_state
 
@@ -296,9 +301,9 @@ def memory_guidance_flags(agent: Any) -> Optional[Tuple[bool, bool]]:
     returns ``(False, False)``, for which ``build_memory_guidance`` returns ``""``,
     because its tool refuses (§9.1 L946). The agent flags are never written.
     """
-    disposition = _disposition(agent)
-    if disposition not in _SERVICE_RENDERED:
+    if not _managed(agent):
         return None
+    disposition = _disposition(agent)
     if disposition == "stateless":
         return (False, False)
     service = agent._memory_service

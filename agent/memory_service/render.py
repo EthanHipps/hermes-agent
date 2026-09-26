@@ -143,9 +143,10 @@ def render_service_prompt(service: Any) -> CuratedPromptRender:
     """
     from agent.memory_service.service import MemoryDisposition
 
-    if service.disposition is MemoryDisposition.STATELESS:
+    disposition = getattr(service.disposition, "value", service.disposition)   # read as contract C1 reads it
+    if disposition == MemoryDisposition.STATELESS.value:
         return EMPTY_RENDER
-    if service.disposition is not MemoryDisposition.AUTHORITATIVE:
+    if disposition != MemoryDisposition.AUTHORITATIVE.value:
         raise ValueError("only an authoritative service renders through render_service_prompt")
     memory = service.load_curated("memory") if service.target_enabled("memory") else None
     user = service.load_curated("user") if service.target_enabled("user") else None

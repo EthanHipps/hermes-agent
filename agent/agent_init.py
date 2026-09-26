@@ -1255,6 +1255,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     )
     if not skip_memory or _memory_toolset_requested:
         from agent.memory_service.bootstrap import init_memory_service, requests_authoritative_mode
+        from agent.memory_service.service import is_provider_managed
 
         _authoritative_requested = requests_authoritative_mode(_agent_cfg)
         try:
@@ -1324,9 +1325,8 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
             if agent._memory_service is None:
                 with suppress(Exception):
                     _build_native_store()
-            _disp = getattr(getattr(agent, "_memory_service", None), "disposition", None)
             agent._memory_session_key = (getattr(agent, "session_id", None)
-                                         if getattr(_disp, "value", None) in ("provider_authoritative", "stateless") else None)
+                                         if is_provider_managed(agent._memory_service) else None)
             agent._memory_boot_config = _agent_cfg
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
