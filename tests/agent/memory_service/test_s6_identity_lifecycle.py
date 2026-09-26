@@ -556,3 +556,70 @@ def test_host_state_root_is_the_name_archives_prune(tmp_path):
     from hermes_cli.backup_memory import HOST_STATE_DIRNAME
     from agent.memory_service.host_state import host_state_dir
     assert host_state_dir(tmp_path).relative_to(tmp_path).parts[0] == HOST_STATE_DIRNAME
+
+
+@pytest.mark.parametrize("policy", ["fail_closed", "stateless"])
+def test_a_conversation_restored_into_a_fresh_home_has_no_identity(env, tmp_path, monkeypatch, policy):
+    """X-1 (a), §9.8: restored into a home holding no record for it, a conversation is binding_invalid.
+
+    FRESH HOME ONLY (Ethan's ruling, 2026-09-26): an in-place restore leaves the home's own
+    records, and a conversation that still has one resumes. The fake does not model ygg's
+    one-live-handle rule, so the new session's bind is counted, never refused (K-1).
+    """
+    from argparse import Namespace
+
+    import hermes_cli.gateway as gateway_mod
+    from agent.memory_service.host_state import HOST_STATE_ROOT_DIRNAME
+    from hermes_cli import backup
+    from hermes_cli.config import load_config
+    from hermes_state import SessionDB
+
+    monkeypatch.setattr(gateway_mod, "ensure_gateway_service", lambda **kw: False)
+    monkeypatch.setattr(gateway_mod, "_is_service_running", lambda: False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    config = env.config_with(authoritative_failure_policy=policy)
+
+    # The source home: session "restored-1" bound as new, then held a conversation.
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(source))
+    source_db = SessionDB(db_path=source / "state.db")
+    init_memory_service(config, logical_session_id="restored-1", platform="cli", store_factory=_never,
+                        session_db=source_db)
+    _session(source_db, "restored-1", messages=2)
+    assert load_host_state("restored-1") is not None and (source / HOST_STATE_ROOT_DIRNAME).is_dir()
+    assert env.count("bind_session") == 1
+    source_db.close()
+    backup.run_backup(Namespace(output=str(tmp_path / "a.zip")))
+
+    target = tmp_path / "dst"
+    target.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(target))
+    with native_memory_sentinel(target / "memories") as sentinel:
+        backup.run_import(Namespace(zipfile=str(tmp_path / "a.zip"), force=True))
+        # Before any init_memory_service call: the record did not come back ...
+        assert load_host_state("restored-1") is None
+        assert not (target / HOST_STATE_ROOT_DIRNAME).exists()
+        restored_db = SessionDB(db_path=target / "state.db")
+        # ... but the conversation did, so the session is a continuation without identity.
+        assert restored_db.get_session("restored-1")["message_count"] == 2
+
+        def _init(session_id):
+            return init_memory_service(load_config(), logical_session_id=session_id, platform="cli",
+                                       store_factory=_never, session_db=restored_db)[0]
+
+        if policy == "fail_closed":
+            with pytest.raises(MemoryBlockedError) as blocked:
+                _init("restored-1")
+            assert blocked.value.code == "binding_invalid"
+        else:
+            assert _init("restored-1").disposition is MemoryDisposition.STATELESS
+        assert env.count("bind_session") == 1                   # the restored conversation never binds
+        fresh = _init("after-restore-1")
+    sentinel.assert_untouched()
+    restored_db.close()
+    assert fresh.disposition is MemoryDisposition.AUTHORITATIVE
+    binds = [req for op, req in env.backends[-1].calls if op == "bind_session"]
+    assert env.count("bind_session") == 2
+    assert len(binds) == 1 and binds[0].bind_intent == "new_session" and binds[0].prior_identity is None
