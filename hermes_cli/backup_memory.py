@@ -313,11 +313,19 @@ def withhold_host_state(staged_home: Path) -> bool:
 def _drop_staged(directory: Path) -> None:
     """Delete a withheld *directory* from a staging copy, or refuse the import.
 
-    ``ignore_errors`` hides a failed unlink (a read-only extracted file, a scanner's handle),
-    and a survivor would be published into the live profile (§9.8 L1639). A ValueError is a
+    Extraction applies the tar mode, so a legacy 0o444 member is read-only here; the house
+    handler clears that and retries. A failure it cannot clear (a scanner's handle) leaves a
+    survivor, which would be published into the live profile (§9.8 L1639). A ValueError is a
     clean refusal on every import entry point (D-R44-c); the staging tree is then discarded.
     """
-    shutil.rmtree(directory, ignore_errors=True)
+    from hermes_cli.profiles import _rmtree_make_writable
+    try:
+        try:
+            shutil.rmtree(directory, onexc=_rmtree_make_writable)
+        except TypeError:  # ``onexc`` is 3.12+; 3.11 has ``onerror``
+            shutil.rmtree(directory, onerror=_rmtree_make_writable)
+    except OSError:
+        pass
     if os.path.lexists(directory):
         raise ValueError(f"Could not withhold {directory.name}/ from the imported profile "
                          "(a file in it could not be deleted); nothing was imported.")

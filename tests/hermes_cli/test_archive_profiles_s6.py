@@ -152,6 +152,29 @@ def test_profile_import_withholds_legacy_native_memory(profile_env, profiles):  
     assert (pdir / "config.yaml").exists()
 
 
+def test_profile_import_withholds_a_read_only_legacy_memory_file(profile_env, profiles):  # R44-6
+    """A base-era export whose dormant MEMORY.md/USER.md were 0o444: extraction applies the tar
+    mode, so the staged copies are read-only. They are still withheld, not a refused import."""
+    staging = profile_env / "stage" / "legacy"
+    _profile_like(staging, provider="example")
+    _dormant(staging)
+    archive = profile_env / "legacy.tar.gz"
+
+    def read_only_memory(info):
+        if info.isfile() and info.name.startswith("legacy/memories/") and info.name.endswith(".md"):
+            info.mode = 0o444
+        return info
+
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(staging, arcname="legacy", filter=read_only_memory)
+    target_native = profile_env / ".hermes" / "profiles" / "legacy" / "memories"
+    with native_memory_sentinel(target_native) as sentinel:
+        pdir = profiles.import_profile(str(archive))
+    sentinel.assert_untouched()
+    assert pdir.is_dir()
+    assert not (pdir / "memories").exists()
+
+
 def test_additive_profile_import_still_restores_native_memory(profile_env, profiles):
     staging = profile_env / "stage" / "plain"
     _profile_like(staging)
