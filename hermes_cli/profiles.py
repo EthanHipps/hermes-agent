@@ -75,8 +75,11 @@ _PLACEHOLDER_ENV = (
 def _clone_all_copytree_ignore(source_dir: Path):
     """copytree ignore for --clone-all: history artifacts for any source, infrastructure
     only when the source is the default profile (see the two exclude sets above)."""
+    from hermes_cli.backup_memory import archive_prune_names
     source_resolved = source_dir.resolve()
-    root_exclude = set(_CLONE_ALL_HISTORY_EXCLUDE_ROOT)
+    # An authoritative source's memories/ is dropped before descent (§9.1 L948), and
+    # migrations/, the record and memory_service/ in every mode (R44-5, X-1 (a)).
+    root_exclude = set(_CLONE_ALL_HISTORY_EXCLUDE_ROOT) | archive_prune_names(source_dir)
     if source_resolved == _get_default_hermes_home().resolve():
         root_exclude |= _CLONE_ALL_DEFAULT_EXCLUDE_ROOT
 
@@ -759,9 +762,14 @@ def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
 def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files
     and cloned single-use OAuth grants."""
+    from hermes_cli.backup_memory import NATIVE_MEMORY_DIRNAME, home_disposition
+    authoritative = home_disposition(source_dir) is not None
     shutil.copytree(source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir))
     # Excluded history dirs (sessions/, cron/) must still exist as empty dirs so the clone runs.
+    # §9.1 L948 lists "initialize": an authoritative clone creates no memories/ at all.
     for subdir in _PROFILE_DIRS:
+        if authoritative and subdir == NATIVE_MEMORY_DIRNAME:
+            continue
         (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
     for stale in _CLONE_ALL_STRIP:
         (profile_dir / stale).unlink(missing_ok=True)
@@ -782,8 +790,14 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path]) -> Non
     """Fresh layout: bootstrap dirs, then either seed a model block (no source) or clone
     config files, installed skills (the dashboard's "clone from default" must keep bundled
     AND user-installed skills), and memory/identity files from *source_dir*."""
+    from hermes_cli.backup_memory import NATIVE_MEMORY_DIRNAME, home_disposition
+    # With no source this is a fresh profile: byte-identical to before (the source's mode
+    # must never leak into a profile that has none of its own).
+    authoritative = source_dir is not None and home_disposition(source_dir) is not None
     profile_dir.mkdir(parents=True, exist_ok=True)
     for subdir in _PROFILE_DIRS:
+        if authoritative and subdir == NATIVE_MEMORY_DIRNAME:
+            continue  # §9.1 L948: never initialize native storage for an authoritative home
         (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
     if source_dir is None:
         _seed_model_config(profile_dir)
@@ -793,8 +807,9 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path]) -> Non
     source_skills = source_dir / "skills"
     if source_skills.is_dir():
         shutil.copytree(source_skills, profile_dir / "skills", symlinks=True, dirs_exist_ok=True)
-    for relpath in _CLONE_SUBDIR_FILES:
-        _clone_file(source_dir, profile_dir, relpath)
+    if not authoritative:  # _CLONE_SUBDIR_FILES is memories/MEMORY.md + memories/USER.md
+        for relpath in _CLONE_SUBDIR_FILES:
+            _clone_file(source_dir, profile_dir, relpath)
 
 
 def create_profile(
@@ -821,6 +836,14 @@ def create_profile(
     if canon == "default":
         raise ValueError("Cannot create a profile named 'default' — it is the built-in profile (~/.hermes).")
     profile_dir = get_profile_dir(canon)
+    if clone_from is not None or clone_all or clone_config:
+        # §9.8 L1637: refuse BEFORE any tombstone rmtree or directory creation, so a refused
+        # clone leaves nothing behind (R44-8). These are pure path computations -- a missing
+        # source still raises FileNotFoundError later from _resolve_clone_source, as today.
+        from hermes_constants import get_hermes_home
+        from hermes_cli.backup_memory import refuse_if_migration_in_progress
+        refuse_if_migration_in_progress(
+            [get_hermes_home() if clone_from is None else get_profile_dir(_canon_valid(clone_from))])
     if profile_dir.exists() and named_profile_is_deleted(profile_dir):
         # Empty shells left by post-delete mkdir may be replaced. Identity files mean the
         # leftover is not a shell — fail closed, no rmtree.
@@ -842,6 +865,15 @@ def create_profile(
         stripped = strip_channel_settings(profile_dir, include_state=clone_all)
         if stripped:
             logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
+    if source_dir is not None:
+        # §12.1 L2044 counts a clone as an archive surface: the new profile inherits the
+        # source's authoritative configuration, so it carries the record too (R44-5).
+        from agent.memory_service.archive import DISPOSITION_RECORD_NAME
+        from hermes_cli.backup_memory import home_disposition
+        cloned_disposition = home_disposition(source_dir)
+        if cloned_disposition is not None:
+            (profile_dir / DISPOSITION_RECORD_NAME).write_text(
+                cloned_disposition.record_text(), encoding="utf-8")
 
     # Seed an empty .env so the profile owns a credentials file from day one. Without it,
     # profile-scoped env writes (dashboard Channels/Keys pages, `hermes -p <name> auth add`)
@@ -1524,6 +1556,13 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     force-redacted first. Returns the output file path."""
     import tempfile
     canon, profile_dir = _existing_profile_dir(name)
+    from agent.memory_service.archive import DISPOSITION_RECORD_NAME
+    from hermes_cli.backup_memory import (
+        archive_prune_names, home_disposition, refuse_if_migration_in_progress, root_pruning_ignore)
+    # §9.8 L1637: refuse before any archive exists, so a half-written export cannot
+    # outlive an interrupted migration (R44-8).
+    refuse_if_migration_in_progress([profile_dir])
+    disposition = home_disposition(profile_dir)
     # Archive base name without extension (.tar.gz appended by the writer).
     base = str(Path(output_path)).removesuffix(".tar.gz").removesuffix(".tgz")
 
@@ -1533,7 +1572,11 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     def _ignore_credentials(directory: str, contents: list) -> set:
         return _EXPORT_CREDENTIAL_FILES & set(contents)
 
-    ignore = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
+    inner = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials
+    # Drop the archive-policy names at the profile root BEFORE copytree descends, so an
+    # authoritative home's memories/ is never listed or stat'd (§9.1 L948), and migrations/,
+    # the record and memory_service/ never leave in any mode (R44-5, X-1 (a)).
+    ignore = root_pruning_ignore(profile_dir, archive_prune_names(profile_dir), inner)
     with tempfile.TemporaryDirectory() as tmpdir:
         staged = Path(tmpdir) / canon
         shutil.copytree(profile_dir, staged, symlinks=True, ignore=ignore)
@@ -1542,6 +1585,10 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         _scrub_export_secrets(staged)
+        if disposition is not None:
+            # After the scrub: force-redaction rewrites .yaml files and must never
+            # alter the spec block (D-R44-g).
+            (staged / DISPOSITION_RECORD_NAME).write_text(disposition.record_text(), encoding="utf-8")
         return Path(make_targz(base, tmpdir, canon))
 
 
@@ -1584,6 +1631,15 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
         if archive_root != canon:
             final_source = staging_root / canon
             extracted.rename(final_source)
+        # Withheld on the STAGED copy, so nothing is ever created in the live profile
+        # (§9.1 L948 forbids "restore into"; §9.10 L1669 requires no native touch).
+        from hermes_cli.backup_memory import withhold_host_state, withhold_native_memory
+        if withhold_native_memory(final_source):
+            logger.warning(
+                "profile import %s: legacy native memory left in the archive "
+                "(authoritative configuration; spec 9.8)", canon)
+        if withhold_host_state(final_source):  # every mode (ruling X-1 (a))
+            logger.info("profile import %s: withheld host session state (spec 9.8)", canon)
         shutil.move(str(final_source), str(profile_dir))
     return profile_dir
 
