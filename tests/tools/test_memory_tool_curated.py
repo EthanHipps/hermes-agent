@@ -184,6 +184,18 @@ def test_single_ops_map_to_single_intents(tmp_path):
     assert collapse.intent == w.MutationIntent(kind="remove", matched_entry_id=ids["alpha fact"])
 
 
+def test_cr_forms_are_judged_on_the_normalized_text(tmp_path):
+    """Candidate text is ``normalize_entry``, so no-op and collapse are judged on that stored form."""
+    snapshot = _snapshot(tmp_path, ("alpha fact", "uses pnpm\nnot npm"))
+    ids = {e.text: e.id for e in snapshot.mutation_entries}
+    add = plan_native_call(snapshot, NativeCall("add", "uses pnpm\r\nnot npm", None, None), ConsolidationBudget())
+    assert isinstance(add, PlanShortCircuit) and add.response["success"] is True
+    rep = plan_native_call(snapshot, NativeCall("replace", "uses pnpm\r\nnot npm", "alpha", None), ConsolidationBudget())
+    assert rep.intent == w.MutationIntent(kind="remove", matched_entry_id=ids["alpha fact"])
+    two = NativeCall(None, None, None, [{"action": "add", "content": "x\ny"}, {"action": "add", "content": "x\r\ny"}])
+    assert [c.text for c in plan_native_call(snapshot, two, ConsolidationBudget()).candidate_entries] == ["x\ny"]
+
+
 def test_batch_with_two_net_items_is_bulk_edit(tmp_path):
     snapshot = _snapshot(tmp_path, SEED)
     plan = plan_native_call(snapshot, dict(CASES)["batch"], ConsolidationBudget())

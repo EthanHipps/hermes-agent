@@ -152,13 +152,15 @@ def _candidate(client_ref: str, text: str, scope: w.ScopeRef, target: str) -> w.
 
 def _to_plan(snapshot: w.CuratedSnapshot, items: List[_Item], message: str, response: Dict[str, Any],
              budget: ConsolidationBudget) -> Union[PlannedMutation, PlanShortCircuit]:
-    unchanged = {item.text for item in items if item.entry is not None and item.text == item.entry.text}
+    key = MemoryStore.normalize_entry  # duplicates are judged on the candidate (stored) form
+    unchanged = {key(i.text) for i in items if i.entry is not None and key(i.text) == key(i.entry.text)}
     kept_ids, changed, seen = set(), [], set()
     for item in items:
-        if item.entry is not None and item.text == item.entry.text:
+        text = key(item.text)
+        if item.entry is not None and text == key(item.entry.text):
             kept_ids.add(item.entry.id)
-        elif item.text not in unchanged and item.text not in seen:  # native reload would de-duplicate the rest
-            seen.add(item.text)
+        elif text not in unchanged and text not in seen:  # native reload would de-duplicate the rest
+            seen.add(text)
             changed.append(item)
     superseding = {item.entry.id: item for item in changed if item.entry is not None}
     delta: List[w.MutationDeltaItem] = []
