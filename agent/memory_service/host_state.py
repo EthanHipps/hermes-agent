@@ -4,7 +4,8 @@ One owner-only JSON record per Hermes session id holds the provider epoch and th
 complete FrozenMemoryIdentity (HostSessionState), or marks the session stateless.
 Resume, branch and compression read it; they never bind (§9.3 L1233). The record is
 host state under §9.3 L987: never logged, never shown, and excluded from every
-Hermes archive (R44 consumes host_state_dir()).
+Hermes archive (R44 prunes the same literal, spelled independently as
+hermes_cli/backup_memory.HOST_STATE_DIRNAME; see HOST_STATE_ROOT_DIRNAME).
 """
 
 from __future__ import annotations

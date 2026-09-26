@@ -544,3 +544,15 @@ def test_transitions_never_touch_the_native_directory(agent_env, native_dir):
         ensure_session_binding(agent)                              # resume
     sentinel.assert_untouched()
     assert agent._memory_store is None
+
+
+# ---------------------------------------------------------------------------
+# After F-R44 merged: ruling X-1 (a), archives and restore
+# ---------------------------------------------------------------------------
+
+
+def test_host_state_root_is_the_name_archives_prune(tmp_path):
+    """X-1 (a) / C3: one literal, spelled in two modules, pinned by this test."""
+    from hermes_cli.backup_memory import HOST_STATE_DIRNAME
+    from agent.memory_service.host_state import host_state_dir
+    assert host_state_dir(tmp_path).relative_to(tmp_path).parts[0] == HOST_STATE_DIRNAME
