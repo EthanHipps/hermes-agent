@@ -1,11 +1,20 @@
 """S6 inventory suite B part 1 (§13.1 L2211; §14.1 row 42 L2312): explicit administrative identity (§9.2 L968, §4.2 L271)."""
 
+import os
+import types
+
 import pytest
 
-from agent.memory_service.admin import (AdminContext, AdminIdentityError, authority_report, format_scope,
-                                        outcome_payload, parse_scope_selector)
+from agent.memory_service.admin import (ADMIN_PLATFORM, AdminContext, AdminIdentityError, admin_service,
+                                        admin_state_path, authority_report, format_scope, outcome_payload,
+                                        parse_scope_selector)
 from agent.memory_service.archive import archive_disposition
+from agent.memory_service.config import MemoryConfigurationError, resolve_memory_service_config
+from agent.memory_service.errors import MemoryBlockedError
 from agent.memory_service.mutation import MutationOutcome, MutationStatus
+from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
+
+REPO_CTX = AdminContext(repo_id="repo-1", project_id="proj-1")
 
 
 def _cfg(exe, **extra):
@@ -69,3 +78,82 @@ def test_every_mutation_status_has_a_typed_payload():
     for status in set(MutationStatus) - set(_OUTCOME_PAYLOADS):
         payload = outcome_payload(MutationOutcome(status, "memory", 1))
         assert payload["ok"] is False and payload["code"] == status.value
+
+
+# -- the administrative service (ruling R42-2) ----------------------------------------------------------
+
+
+@pytest.fixture
+def env(exe):
+    store = FakeProviderStore(registry=FakeRegistry())            # C:\work\repo -> (repo-1, proj-1, None)
+    backends = []
+
+    def factory(cfg):
+        backends.append(FakeAuthoritativeBackend(store, provider="example"))
+        return backends[-1]
+    return types.SimpleNamespace(store=store, backends=backends, factory=factory, cfg=_cfg(exe))
+
+
+def _count(env, op):
+    return sum(b.count(op) for b in env.backends)
+
+
+def test_identity_is_explicit_and_never_the_process_directory(env, tmp_path, monkeypatch):
+    here = tmp_path / "work"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    env.store.registry.directories[os.path.realpath(str(here))] = ("repo-9", "proj-9", None)
+    with admin_service(env.cfg, context=AdminContext(), backend_factory=env.factory) as service:
+        identity = service.identity
+        assert (identity.repo_id, identity.project_id, identity.platform) == (None, None, ADMIN_PLATFORM)
+        assert service.load_curated("memory").status == "degraded_global_only"
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        assert service.identity.repo_id == "repo-1"
+
+
+def test_first_open_binds_and_persists_then_resumes(env):
+    key = REPO_CTX.record_key(resolve_memory_service_config(env.cfg))
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        handle = service.identity.opaque_binding_b64url
+    assert _count(env, "bind_session") == 1 and admin_state_path(key).is_file()
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        assert service.identity.opaque_binding_b64url == handle
+    assert _count(env, "bind_session") == 1 and _count(env, "validate_session") == 1
+
+
+@pytest.mark.parametrize("refuse", ["revoke", "epoch"])
+def test_a_refused_binding_is_rebound(env, refuse):
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        handle = service.identity.opaque_binding_b64url
+    env.store.revoke(handle) if refuse == "revoke" else env.store.set_epoch("ep-2")
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        assert service.identity.opaque_binding_b64url != handle
+    assert _count(env, "bind_session") == 2
+
+
+def test_a_transport_failure_is_reported_and_keeps_the_record(env):
+    key = REPO_CTX.record_key(resolve_memory_service_config(env.cfg))
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory):
+        pass
+    before = admin_state_path(key).read_bytes()
+    env.store.fail_transport("validate_session")
+    with pytest.raises(MemoryBlockedError):
+        with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory):
+            pass
+    assert _count(env, "bind_session") == 1 and admin_state_path(key).read_bytes() == before
+
+
+def test_admin_state_lives_under_the_archive_excluded_root(env):
+    from hermes_cli import backup_memory
+    from hermes_constants import get_hermes_home
+    key = REPO_CTX.record_key(resolve_memory_service_config(env.cfg))
+    parts = admin_state_path(key).relative_to(get_hermes_home()).parts
+    assert parts[0] == backup_memory.HOST_STATE_DIRNAME and parts[1] == "admin"   # X-1 relationship
+
+
+def test_additive_or_invalid_configuration_never_reaches_a_provider(env):
+    for cfg in ({}, {"memory": {"provider": "example", "provider_mode": "authoritative"}}):
+        with pytest.raises(MemoryConfigurationError):
+            with admin_service(cfg, context=AdminContext(), backend_factory=env.factory):
+                pass
+    assert env.backends == []

@@ -29,14 +29,20 @@ surface-neutral, content-free outcome mapping.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, Optional
 
 from agent.memory_service import wire as w
 from agent.memory_service.archive import archive_disposition
-from agent.memory_service.config import MemoryConfigurationError, MemoryServiceConfig, resolve_memory_service_config
-from agent.memory_service.errors import MemoryServiceError
+from agent.memory_service.config import (MemoryConfigurationError, MemoryMode, MemoryServiceConfig,
+                                         resolve_memory_service_config)
+from agent.memory_service.errors import MemoryBlockedError, MemoryServiceError, ProviderTransportError
+from agent.memory_service.host_state import HOST_STATE_ROOT_DIRNAME, HostStateRecord
 from agent.memory_service.mutation import MutationOutcome, MutationStatus
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,84 @@ def parse_scope_selector(text: str) -> w.ScopeRef:
 
 def format_scope(scope: w.ScopeRef) -> str:
     return f"{_PREFIX_FOR_KIND[scope.kind]}:{scope.id}"
+
+
+def admin_state_path(key: str, hermes_home: Optional[Path] = None) -> Path:
+    """``<home>/memory_service/admin/<sha256>.json``: host state (§9.3 L987), inside the X-1 archive exclusion."""
+    if hermes_home is None:
+        from hermes_constants import get_hermes_home
+
+        hermes_home = get_hermes_home()
+    return Path(hermes_home) / HOST_STATE_ROOT_DIRNAME / ADMIN_STATE_DIRNAME / (key.split(":", 1)[1] + ".json")
+
+
+def _load_record(key: str, hermes_home: Optional[Path]) -> Optional[HostStateRecord]:
+    path = admin_state_path(key, hermes_home)
+    if not path.exists():
+        return None
+    try:
+        record = HostStateRecord.from_dict(json.loads(path.read_text(encoding="utf-8")), session_id=key)
+    except (OSError, ValueError, MemoryServiceError):  # BindingInvalidError is a MemoryServiceError
+        logger.warning("administrative memory identity record is unreadable; binding a new one")
+        return None
+    return record if record.state is not None else None
+
+
+def _save_record(key: str, state, hermes_home: Optional[Path]) -> None:
+    from utils import atomic_json_write
+
+    atomic_json_write(admin_state_path(key, hermes_home),
+                      HostStateRecord(key, "provider_authoritative", state).to_dict(), mode=0o600)
+
+
+def _binding_refused(exc: MemoryBlockedError) -> bool:
+    """Revoked/invalid/epoch-changed/identity-mismatch: re-bindable. A transport failure is not."""
+    return not isinstance(exc.__cause__, ProviderTransportError)
+
+
+@contextmanager
+def admin_service(raw_config: Any, *, context: AdminContext, backend_factory: Any = None,
+                  hermes_home: Optional[Path] = None) -> Iterator[Any]:
+    """The explicit administrative identity for *context* (ruling R42-2); the caller owns nothing to close.
+
+    The first open binds a ``new_session`` (``explicit_ids``, ``platform: admin``) and persists its host
+    state; later opens resume it with negotiate plus validate (C4 ``open_session_view``) and never bind.
+    A binding the provider refuses (revoked, invalid, epoch changed, identity mismatch) is re-bound; a
+    transport failure propagates and keeps the record. Never stateless (D-R42-c). Two concurrent first
+    opens may both bind and the last record wins, leaving one orphan handle (bounded; K-2, R28).
+    """
+    from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
+    from agent.memory_service.bootstrap import open_session_view
+    from agent.memory_service.service import _default_backend_factory
+    from hermes_cli.profiles import get_active_profile_name
+
+    config = resolve_memory_service_config(raw_config)
+    if config.provider_mode is not MemoryMode.AUTHORITATIVE:
+        raise MemoryConfigurationError("an administrative memory identity requires provider_mode: authoritative")
+    key = context.record_key(config)
+    record = _load_record(key, hermes_home)
+    service = None
+    if record is not None:
+        try:
+            service = open_session_view(config, record.state, backend_factory=backend_factory)
+        except MemoryBlockedError as exc:
+            if not _binding_refused(exc):
+                raise
+            logger.info("administrative memory identity was refused by the provider; binding a new one")
+    if service is None:
+        factory = backend_factory or _default_backend_factory(config)
+        service = ProviderAuthoritativeMemoryService(config, factory(config))
+        try:
+            service.start(context.requested_context(config, profile_id=get_active_profile_name(),
+                                                    logical_session_id="admin-" + uuid.uuid4().hex))
+            _save_record(key, service.session_state, hermes_home)
+        except BaseException:
+            service.shutdown()
+            raise
+    try:
+        yield service
+    finally:
+        service.shutdown()
 
 
 def authority_report(raw_config: Any) -> Optional[Dict[str, Any]]:
