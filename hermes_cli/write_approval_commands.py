@@ -38,7 +38,13 @@ def handle_pending_subcommand(
     loaded one); ``set_mode_fn`` persists the write_approval boolean. Returns text for the user,
     or None when the args are not a write-approval subcommand so the caller falls through to its
     other handling (e.g. /skills search).
+
+    In a home whose config requests authoritative memory, /memory works only on handle-only
+    approval records (R39) and never uses ``memory_store``.
     """
+    if subsystem == wa.MEMORY and _memory_is_provider_managed():
+        from hermes_cli.write_approval_commands_curated import handle_curated_memory_subcommand
+        return handle_curated_memory_subcommand(args, set_mode_fn=set_mode_fn)
     if not args:
         return f"{_fmt_state(subsystem)}\n\n" + _fmt_pending_list(subsystem)
     sub, rest = args[0].lower(), args[1:]
@@ -53,6 +59,20 @@ def handle_pending_subcommand(
     if sub in {"approval", "mode"}:  # 'mode' kept as a back-compat alias
         return _set_approval(subsystem, rest, set_mode_fn)
     return None  # not ours — caller handles
+
+
+def _memory_is_provider_managed() -> bool:
+    """Ruling R39-13: a home that requests authoritative mode never replays native pending records (§9.1 L950).
+
+    The requested mode counts, even when invalid (R44-3). An unreadable config keeps today's path;
+    last-known-good handling for it is R41's (ledger, Checkpoint B)."""
+    from agent.memory_service.bootstrap import requests_authoritative_mode
+    try:
+        from hermes_cli.config import load_config
+        raw = load_config()
+    except Exception:
+        return False
+    return requests_authoritative_mode(raw)
 
 
 def _usage(subsystem: str) -> str:
