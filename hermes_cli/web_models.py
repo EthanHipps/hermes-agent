@@ -369,6 +369,12 @@ class MemoryProviderSelect(BaseModel):
 
 class MemoryReset(BaseModel):
     target: str = "all"  # "all" | "memory" | "user"
+    # Provider-managed memory only (ruling R42-9): explicit §11.2 scopes (global:<principal>,
+    # organization:<id>, project:<id>, repository:<id>) and the explicit administrative context.
+    scopes: Optional[List[str]] = None
+    org_id: Optional[str] = None
+    project_id: Optional[str] = None
+    repo_id: Optional[str] = None
 
 class BackupRequest(BaseModel):
     output: Optional[str] = None  # defaults to a timestamped zip in the home dir
