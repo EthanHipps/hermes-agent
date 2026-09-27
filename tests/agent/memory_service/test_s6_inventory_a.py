@@ -158,3 +158,18 @@ def test_mapped_gateway_user_binds_as_its_principal(authoritative_env):
 def test_local_surfaces_keep_the_configured_principal(authoritative_env):
     agent = _agent(authoritative_env.memory, session_id="cli-1")
     assert agent._memory_service.identity.principal_id == "ethan"
+
+
+def test_doctor_probes_negotiate_only_without_native_access(authoritative_env, native_dir, monkeypatch):
+    import hermes_cli.doctor as doctor
+    from hermes_constants import get_hermes_home
+    monkeypatch.setattr(doctor, "HERMES_HOME", get_hermes_home(), raising=False)
+    _write_config(authoritative_env.memory)
+    native_dir.mkdir(parents=True, exist_ok=True)
+    (native_dir / "MEMORY.md").write_text("dormant\n", encoding="utf-8")
+    from hermes_cli.doctor_state import _check_directory_structure, _check_memory_provider
+    with native_memory_sentinel(native_dir) as sentinel:
+        finding = _check_memory_provider(True)
+        _check_directory_structure(True)
+    sentinel.assert_untouched()
+    assert not finding.issues and [op for op, _ in authoritative_env.backends[-1].calls] == ["negotiate"]

@@ -1,10 +1,26 @@
 """§9.7 Doctor row: in authoritative mode, probe the provider contract without
 touching the native memory directory."""
 
+from types import SimpleNamespace
+
 import pytest
 import yaml
 
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
+
+
+@pytest.fixture
+def fake_provider(monkeypatch):
+    """Doctor probes the provider with negotiate only (ruling R41-6); the R36 fake answers it."""
+    from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore
+    store, backends = FakeProviderStore(epoch="EPOCHVALUEAAAA"), []   # distinctive, so its absence is meaningful
+
+    def factory(cfg):
+        backends.append(FakeAuthoritativeBackend(store, provider="example"))
+        return backends[-1]
+
+    monkeypatch.setattr("plugins.memory.load_authoritative_backend_factory", lambda name: factory)
+    return SimpleNamespace(store=store, backends=backends)
 
 
 @pytest.fixture
@@ -60,7 +76,7 @@ def test_additive_doctor_still_checks_the_native_directory(doctor_home):
     assert (doctor_home / "memories").exists(), "additive doctor must still ensure memories/"
 
 
-def test_authoritative_provider_probe_never_touches_the_native_directory(doctor_home, tmp_path):
+def test_authoritative_provider_probe_never_touches_the_native_directory(doctor_home, tmp_path, fake_provider):
     """The probe's whole job is to check the provider contract WITHOUT touching
     native memory. Prove it with the sentinel, not by reading the code."""
     exe = tmp_path / "p.exe"
@@ -101,3 +117,34 @@ def test_invalid_authoritative_config_is_reported_without_native_access(doctor_h
     sentinel.assert_untouched()
     assert any(invalid in issue for issue in finding.issues)
     assert memories.exists() is existing
+
+
+def _authoritative_config(home, tmp_path):
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    _write_config(home, {"provider": "example", "provider_mode": "authoritative",
+                         "provider_executable": str(exe), "principal_id": "ethan"})
+
+
+def test_doctor_probe_negotiates_once_and_never_binds(doctor_home, tmp_path, fake_provider, capsys):
+    _authoritative_config(doctor_home, tmp_path)
+    from hermes_cli.doctor_state import _check_memory_provider
+    finding = _check_memory_provider(True)
+    backend = fake_provider.backends[-1]
+    assert not finding.issues and [op for op, _ in backend.calls] == ["negotiate"] and backend.shutdown_calls == 1
+    assert fake_provider.store.epoch not in capsys.readouterr().out
+
+
+def test_doctor_reports_an_unreachable_provider_as_an_issue(doctor_home, tmp_path, fake_provider):
+    _authoritative_config(doctor_home, tmp_path)
+    fake_provider.store.fail_transport("negotiate")
+    from hermes_cli.doctor_state import _check_memory_provider
+    assert any("probe" in issue.lower() for issue in _check_memory_provider(True).issues)
+
+
+def test_doctor_reports_an_invalid_gateway_mapping(doctor_home, tmp_path, fake_provider):
+    _authoritative_config(doctor_home, tmp_path)
+    section = yaml.safe_load((doctor_home / "config.yaml").read_text(encoding="utf-8"))["memory"]
+    _write_config(doctor_home, {**section, "gateway_principals": ["telegram:1"]})
+    from hermes_cli.doctor_state import _check_memory_provider
+    assert any("gateway_principals" in issue for issue in _check_memory_provider(True).issues)

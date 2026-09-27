@@ -389,12 +389,13 @@ def _memory_provider_generic(name: str) -> None:
         check_warn(f"{name} plugin not found", "run: hermes memory setup")
 
 
-def _check_authoritative_provider(config) -> None:
-    """Probe the provider contract (§9.7 Doctor row) without touching native files.
-
-    Reachability and API shape only; typed mode/scope/health reporting is R41.
-    """
+def _check_authoritative_provider(config, section, issues: list) -> None:
+    """Probe the provider contract (§9.7 L1619) without touching native files: negotiate only
+    (ruling R41-6, D-R41-2; contract C6b-13), plus the explicit gateway mapping (I3, contract C6b-12)."""
     from pathlib import Path as _Path
+    from agent.memory_service.config import PROVIDER_API_VERSION, REQUIRED_OPERATIONS, MemoryConfigurationError
+    from agent.memory_service.principal import gateway_principals
+    from agent.memory_service.status import probe_provider
     check_ok(f"Curated memory authority: {config.provider} (authoritative)")
     check_ok(f"Failure policy: {config.failure_policy.value}")
     check_ok(f"Principal: {config.principal_id}")
@@ -404,9 +405,21 @@ def _check_authoritative_provider(config) -> None:
     else:
         check_warn(f"Provider executable not found: {executable}",
                    "run: hermes memory status")
-    from agent.memory_service.config import PROVIDER_API_VERSION, REQUIRED_OPERATIONS
-    check_ok(f"Requires provider API v{PROVIDER_API_VERSION} "
-             f"with {len(REQUIRED_OPERATIONS)} required operations")
+    probe = probe_provider(config)
+    if probe.ok:
+        check_ok(f"Provider {probe.provider} answered negotiate: API v{probe.api_version}, "
+                 f"{len(REQUIRED_OPERATIONS)} required operations present")
+        check_info(f"Optional operations: recall_context {'yes' if probe.recall_context else 'no'}, "
+                   f"capture_continuity {'yes' if probe.capture_continuity else 'no'}")
+    else:
+        _fail_and_issue("Authoritative memory provider probe failed", probe.error or "",
+                        f"Memory provider probe failed (API v{PROVIDER_API_VERSION} required): {probe.error}", issues)
+    try:
+        mapped = len(gateway_principals({"memory": section}))
+    except MemoryConfigurationError as exc:
+        _fail_and_issue("Invalid gateway principal mapping", str(exc), f"Fix memory.gateway_principals: {exc}", issues)
+    else:
+        check_info(f"{mapped} gateway user(s) mapped to a memory principal; unmapped users get no memory")
 
 
 @doctor_check()
@@ -423,7 +436,7 @@ def _check_memory_provider(should_fix: bool, f: Finding) -> None:
                 "Invalid authoritative memory configuration", str(exc),
                 f"Fix authoritative memory configuration: {exc}", f.issues,
             )
-        return _check_authoritative_provider(config)
+        return _check_authoritative_provider(config, section, f.issues)
     name = section.get("provider", "")
     if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")

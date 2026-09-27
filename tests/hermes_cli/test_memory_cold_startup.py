@@ -41,6 +41,12 @@ from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 entrypoint, mode = sys.argv[1:]
 native = Path(os.environ['HERMES_HOME']) / 'memories'
 with native_memory_sentinel(native) as sentinel:
+    # Both entrypoints reach the provider: doctor probes it with negotiate only (ruling R41-6).
+    from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
+    import plugins.memory
+    registry = FakeRegistry(directories={os.path.realpath(os.getcwd()): ('repo-1', 'proj-1', None)})
+    backend = FakeAuthoritativeBackend(FakeProviderStore(registry=registry), provider='example')
+    plugins.memory.load_authoritative_backend_factory = lambda name: lambda cfg: backend
     if entrypoint == 'doctor':
         import hermes_cli.doctor
         from hermes_cli.doctor_state import _check_directory_structure, _check_memory_provider
@@ -52,11 +58,6 @@ with native_memory_sentinel(native) as sentinel:
         from agent.memory_service.config import MemoryConfigurationError
         from agent.memory_service.service import MemoryDisposition
         from hermes_cli.config import load_config_readonly
-        from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
-        import plugins.memory
-        registry = FakeRegistry(directories={os.path.realpath(os.getcwd()): ('repo-1', 'proj-1', None)})
-        backend = FakeAuthoritativeBackend(FakeProviderStore(registry=registry), provider='example')
-        plugins.memory.load_authoritative_backend_factory = lambda name: lambda cfg: backend
         agent = SimpleNamespace(enabled_toolsets=None, disabled_toolsets=None, session_id='cold', tools=None)
         try:
             _init_memory(agent, load_config_readonly(), False, None)
