@@ -10,7 +10,6 @@ import pytest
 import yaml
 
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
-from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 
 def _tool_defs(*names):
