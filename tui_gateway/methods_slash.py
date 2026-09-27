@@ -194,9 +194,27 @@ def _format_live_status_output(sid: str, session: dict, arg: str) -> str:
     return str(response.get("result", {}).get("output") or "")
 
 
+def _format_live_memory_output(sid: str, session: Optional[dict], arg: str) -> Optional[str]:
+    """/memory from the live session's MemoryService (§9.7 L1605; ruling R41-4); ``None`` = the slash worker answers.
+
+    Additive sessions and sessions without a live agent fall through unchanged (the worker's CLI handler
+    never builds a native store in authoritative mode). ``approval on|off`` also falls through, so the
+    worker writes the session profile's own config.yaml (#40677)."""
+    agent = (session or {}).get("agent")
+    from agent.memory_service.service import is_provider_managed
+    if not is_provider_managed(getattr(agent, "_memory_service", None)) or _session_uses_compute_host(session):
+        return None
+    args = (arg or "").split()
+    if args and args[0].lower() in ("approval", "mode"):
+        return None
+    from hermes_cli.memory_command import provider_memory_command
+    return provider_memory_command(args, agent=agent, set_mode_fn=None, busy=bool(session.get("running")))
+
+
 # name → (reply when there is no session, formatter(sid, session, arg) or a fixed reply).
 # A None no-session reply means the formatter handles a missing session itself.
 _LIVE_SLASH_OUTPUT = {
+    "memory": (None, _format_live_memory_output),
     "compress": ("no active session for /compress",
                  lambda sid, session, arg: _mirror_slash_side_effects(sid, session, f"/compress {arg}".strip())),
     "usage": (_NO_AGENT_USAGE, _format_live_usage_output),

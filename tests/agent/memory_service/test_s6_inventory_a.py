@@ -6,8 +6,10 @@ not yet available (ruling R41-1); nothing touches the native directory; gateway 
 explicitly (I3, §13.1 L2191). Helpers are local (reconciliation rule 10: shared test support is
 frozen)."""
 
+import asyncio
 import json
 import os
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +19,8 @@ import yaml
 from agent.memory_service import wire as w
 from agent.memory_service.errors import MemoryBlockedError
 from agent.memory_service.service import MemoryDisposition
+from gateway.run import GatewayRunner
+from gateway.slash_commands import GatewaySlashCommandsMixin
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
@@ -173,3 +177,197 @@ def test_doctor_probes_negotiate_only_without_native_access(authoritative_env, n
         _check_directory_structure(True)
     sentinel.assert_untouched()
     assert not finding.issues and [op for op, _ in authoritative_env.backends[-1].calls] == ["negotiate"]
+
+
+def _cli(agent, running=False):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent, handler._agent_running = agent, running
+    return handler
+
+
+def test_cli_memory_status_uses_the_live_service(authoritative_env, native_dir, capsys):
+    from agent.memory_service.status import format_scope_ref
+    agent = _agent(authoritative_env.memory, session_id="cli-status")
+    loads = authoritative_env.backends[-1].count("load_curated")
+    with native_memory_sentinel(native_dir) as sentinel:
+        _cli(agent)._handle_memory_command("/memory status")
+    sentinel.assert_untouched()
+    out = capsys.readouterr().out
+    snapshot = agent._memory_service.load_curated("memory")
+    assert format_scope_ref(snapshot.default_write_scope) in out and agent._memory_service.identity.binding_revision in out
+    assert authoritative_env.backends[-1].count("load_curated") > loads and authoritative_env.backends[-1].count("bind_session") == 1
+    _no_opaque(out, agent._memory_service)
+
+
+def test_cli_memory_without_a_live_agent_never_reads_native_files(authoritative_env, native_dir, capsys):
+    _write_config(authoritative_env.memory)
+    native_dir.mkdir(parents=True, exist_ok=True)
+    (native_dir / "MEMORY.md").write_text("dormant\n", encoding="utf-8")
+    with native_memory_sentinel(native_dir) as sentinel:
+        _cli(None)._handle_memory_command("/memory")
+        _cli(None)._handle_memory_command("/memory approve all")
+    sentinel.assert_untouched()
+    assert "no live memory session" in capsys.readouterr().out.lower()
+
+
+def test_cli_memory_approve_never_applies_a_native_pending_record(authoritative_env, native_dir):
+    """H15 / C67-9e: holds before and after R39 merges; no base handler text is asserted."""
+    from tools import write_approval as wa
+    agent = _agent(authoritative_env.memory, session_id="cli-approve")
+    record = wa.stage_write(wa.MEMORY, {"action": "add", "target": "memory", "content": "legacy"}, summary="legacy",
+                            origin="foreground")
+    staged = wa._pending_path(wa.MEMORY, record["id"])
+    before = (sorted(p.name for p in staged.parent.iterdir()), staged.read_bytes())
+    with native_memory_sentinel(native_dir) as sentinel:
+        _cli(agent)._handle_memory_command("/memory approve all")
+    sentinel.assert_untouched()
+    assert wa.pending_count(wa.MEMORY) == 1
+    assert (sorted(p.name for p in staged.parent.iterdir()), staged.read_bytes()) == before
+
+
+def test_cli_memory_refuses_service_subcommands_while_a_turn_runs(authoritative_env, capsys):
+    agent = _agent(authoritative_env.memory, session_id="cli-busy")
+    loads = authoritative_env.backends[-1].count("load_curated")
+    _cli(agent, running=True)._handle_memory_command("/memory status")
+    assert "between turns" in capsys.readouterr().out and authoritative_env.backends[-1].count("load_curated") == loads
+
+
+def _tui_session(agent, running=False):
+    from tui_gateway.transport import StdioTransport
+    return {"agent": agent, "session_key": "tui-k", "history": [], "history_lock": threading.Lock(),
+            "running": running, "transport": StdioTransport(lambda: None, threading.Lock()), "cwd": "", "source": "tui"}
+
+
+def test_tui_live_memory_uses_the_session_service(authoritative_env, native_dir):
+    from tui_gateway import server
+    agent = _agent(authoritative_env.memory, session_id="tui-1")
+    with patch.object(server, "_session_uses_compute_host", return_value=False), native_memory_sentinel(native_dir) as sentinel:
+        out = server._live_slash_command_output("sid-1", _tui_session(agent), "memory", "status")
+        busy = server._live_slash_command_output("sid-1", _tui_session(agent, running=True), "memory", "")
+        approval = server._live_slash_command_output("sid-1", _tui_session(agent), "memory", "approval on")
+    sentinel.assert_untouched()
+    assert "repository:repo-1" in out and "between turns" in busy and approval is None
+    _no_opaque(out, agent._memory_service)
+
+
+def test_tui_live_memory_leaves_additive_sessions_to_the_worker(tmp_path, monkeypatch):
+    from tui_gateway import server
+    monkeypatch.chdir(tmp_path)
+    agent = _agent({"memory_enabled": True})
+    with patch.object(server, "_session_uses_compute_host", return_value=False):
+        assert server._live_slash_command_output("sid-2", _tui_session(agent), "memory", "") is None
+
+
+class _Gateway(GatewaySlashCommandsMixin):
+    """The tests/gateway/test_slash_config_writes_routed_profile.py L22-30 shape, plus a warm agent cache."""
+
+    _run_in_executor_with_context = GatewayRunner._run_in_executor_with_context
+    _get_executor = GatewayRunner._get_executor
+
+    def __init__(self, agent):
+        self._agent_cache, self._agent_cache_lock = {"k": (agent, "sig")}, threading.Lock()
+
+    def _session_key_for_source(self, _source):
+        return "k"
+
+    def _evict_cached_agent(self, _session_key):
+        pass
+
+
+def _event(args, user_id="111", alt=None):
+    source = SimpleNamespace(platform=SimpleNamespace(value="telegram"), user_id=user_id, user_id_alt=alt)
+    return SimpleNamespace(source=source, get_command_args=lambda: args)
+
+
+@pytest.fixture
+def gateway_home(monkeypatch):
+    import gateway.run as gateway_run
+    from hermes_constants import get_hermes_home
+    monkeypatch.setattr(gateway_run, "_hermes_home", get_hermes_home())
+
+
+def test_gateway_memory_uses_the_cached_session_service(authoritative_env, native_dir, gateway_home):
+    memory = {**authoritative_env.memory, "gateway_principals": GATEWAY}
+    agent = _agent(memory, platform="telegram", user_id="111", session_id="gw-status")
+    with native_memory_sentinel(native_dir) as sentinel:
+        out = asyncio.run(_Gateway(agent)._handle_memory_command(_event("status")))
+    sentinel.assert_untouched()
+    assert "repository:repo-1" in out and authoritative_env.backends[-1].count("bind_session") == 1
+    _no_opaque(out, agent._memory_service)
+
+
+def test_gateway_memory_refuses_an_unmapped_or_other_user(authoritative_env, gateway_home, monkeypatch):
+    memory = {**authoritative_env.memory, "gateway_principals": {**GATEWAY, "telegram:222": "other"}}
+    agent = _agent(memory, platform="telegram", user_id="111", session_id="gw-group")
+    loads = authoritative_env.backends[-1].count("load_curated")
+    calls = []
+    monkeypatch.setattr("hermes_cli.write_approval_commands.handle_pending_subcommand",
+                        lambda *a, **k: calls.append(a) or "listed")
+    runner = _Gateway(agent)
+    for event in (_event("status", user_id="999"), _event("", user_id="222"), _event("pending", user_id=None),
+                  _event("approve all", user_id="999")):
+        assert asyncio.run(runner._handle_memory_command(event)) == "Curated memory is not available in this chat."
+    assert authoritative_env.backends[-1].count("load_curated") == loads
+    assert calls == []          # an unmapped user's approve never reaches the shared handler (C67-9e)
+
+
+def test_additive_sessions_keep_the_pre_r41_memory_command(tmp_path, monkeypatch):
+    from hermes_cli.memory_command import provider_memory_command
+    monkeypatch.chdir(tmp_path)
+    agent = _agent({"memory_enabled": True})
+    assert provider_memory_command(["status"], agent=agent, set_mode_fn=None) is None
+    assert provider_memory_command([], agent=None, set_mode_fn=None) is None
+
+
+def test_gateway_provider_memory_runs_off_the_event_loop(authoritative_env, gateway_home):
+    """Ruling R41-22: provider-managed /memory is executed off-loop; additive never hops."""
+    agent = _agent({**authoritative_env.memory, "gateway_principals": GATEWAY}, platform="telegram", user_id="111",
+                   session_id="gw-hop")
+    runner, hops = _Gateway(agent), []
+    real = runner._run_in_executor_with_context
+
+    async def spy(func, *args):
+        hops.append(func)
+        return await real(func, *args)
+
+    runner._run_in_executor_with_context = spy
+    asyncio.run(runner._handle_memory_command(_event("status")))
+    assert len(hops) == 1
+
+
+def test_additive_gateway_memory_stays_on_the_base_path(tmp_path, monkeypatch, gateway_home):
+    _write_config({"memory_enabled": True})
+    runner, hops = _Gateway(None), []
+
+    async def spy(func, *args):
+        hops.append(func)
+        return func(*args)
+
+    runner._run_in_executor_with_context = spy
+    out = asyncio.run(runner._handle_memory_command(_event("")))
+    assert hops == [] and out.startswith("memory.write_approval")
+
+
+def test_a_multi_principal_gateway_never_reviews_pending_writes(authoritative_env, gateway_home, monkeypatch):
+    """Ruling R41-20: R39's review renders every principal's staged diff; a multi-principal gateway never calls it."""
+    from hermes_cli.memory_command import GATEWAY_REVIEW_UNAVAILABLE
+    agent = _agent({**authoritative_env.memory, "gateway_principals": {**GATEWAY, "telegram:222": "other"}},
+                   platform="telegram", user_id="111", session_id="gw-multi")
+    calls = []
+    monkeypatch.setattr("hermes_cli.write_approval_commands.handle_pending_subcommand",
+                        lambda *a, **k: calls.append(a) or "listed")
+    runner = _Gateway(agent)
+    for args in ("", "pending", "approve all", "reject abc"):
+        assert GATEWAY_REVIEW_UNAVAILABLE in asyncio.run(runner._handle_memory_command(_event(args)))
+    assert calls == []
+
+
+def test_a_single_principal_gateway_reaches_the_shared_handler(authoritative_env, gateway_home, monkeypatch):
+    agent = _agent({**authoritative_env.memory, "gateway_principals": GATEWAY}, platform="telegram", user_id="111",
+                   session_id="gw-single")
+    calls = []
+    monkeypatch.setattr("hermes_cli.write_approval_commands.handle_pending_subcommand",
+                        lambda *a, **k: calls.append(k.get("memory_store", "absent")) or "listed")
+    assert asyncio.run(_Gateway(agent)._handle_memory_command(_event("pending"))) == "listed"
+    assert calls == [None]      # memory_store=None: nothing native-shaped can be applied (H15)

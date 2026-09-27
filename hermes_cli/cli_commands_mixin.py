@@ -1865,6 +1865,14 @@ class CLICommandsMixin:
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         args = cmd.strip().split()[1:]
+        # Provider-managed memory (§9.7 L1605; rulings R41-4, R41-18): the live session's service answers and
+        # no native store is built. None = additive: the pre-R41 body below runs unchanged.
+        from hermes_cli.memory_command import provider_memory_command
+        managed = provider_memory_command(
+            args, agent=getattr(self, "agent", None), busy=bool(getattr(self, "_agent_running", False)),
+            set_mode_fn=lambda enabled: self._save_write_approval("memory", enabled))
+        if managed is not None:
+            return print(managed)
         store = getattr(self.agent, "_memory_store", None) if getattr(self, "agent", None) else None
         if store is None:
             # No live agent store (e.g. Desktop GUI): use a fresh on-disk store, as the gateway

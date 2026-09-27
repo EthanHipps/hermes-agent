@@ -840,14 +840,34 @@ class GatewaySlashCommandsMixin(
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         from tools.memory_tool import load_on_disk_store
+        args = event.get_command_args().strip().split()
+        set_mode_fn = self._write_approval_setter("memory", event)
+        managed = await self._provider_memory_reply(event, args, set_mode_fn)   # R41: None = additive, base path
+        if managed is not None:
+            return managed
         # Apply approved writes against a fresh on-disk store (the gateway has no long-lived agent;
         # the store persists to the same MEMORY/USER.md and honors the configured char limits).
-        out = handle_pending_subcommand(
-            wa.MEMORY, event.get_command_args().strip().split(), memory_store=load_on_disk_store(),
-            set_mode_fn=self._write_approval_setter("memory", event))
+        out = handle_pending_subcommand(wa.MEMORY, args, memory_store=load_on_disk_store(), set_mode_fn=set_mode_fn)
         return out if out is not None else (
             "Unknown /memory subcommand. Use: pending, approve <id>, reject <id>, approval <on|off>."
         )
+
+    async def _provider_memory_reply(self, event: MessageEvent, args, set_mode_fn):
+        """/memory for provider-managed memory (§9.7 L1606; rulings R41-4, R41-5, R41-20, R41-22), or None."""
+        from gateway.run import _gateway_config_home
+        from hermes_cli.memory_command import provider_memory_command, requests_provider_memory
+        home = _gateway_config_home()
+        if not requests_provider_memory(home):
+            return None
+        from agent.memory_service.principal import gateway_identity_from_source
+        source = getattr(event, "source", None)
+        agent = self._cached_agent_for(self._session_key_for_source(source)) if source is not None else None
+        identity = gateway_identity_from_source(source)
+        # Ruling R41-22: provider calls (the live service's loads, R39's replay transport) never run on the event
+        # loop; the per-session command guard (gateway/platforms/base.py) keeps a turn from starting meanwhile.
+        return await self._run_in_executor_with_context(
+            lambda: provider_memory_command(args, agent=agent, set_mode_fn=set_mode_fn, home=home,
+                                            gateway_identity=identity, require_gateway_principal=True))
 
     async def _handle_skills_command(self, event: MessageEvent) -> str:
         """Handle /skills on the gateway — pending skill-write review only (hub stays CLI-only). Gated
