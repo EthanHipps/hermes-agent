@@ -7,7 +7,9 @@ sentinel plus a byte-and-mtime snapshot, never inferred from output. Every non-m
 still imports, and an additive home is unchanged.
 """
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +18,7 @@ import yaml
 
 from hermes_cli import agent_import
 from hermes_cli.agent_import import AgentImporter
+from hermes_cli.backup_memory import home_disposition
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 # Ruling R44-3: the REQUESTED mode counts, even when the configuration is invalid.
@@ -182,3 +185,71 @@ def test_import_agent_command_names_provider_managed_memory(env, tmp_path, provi
     assert provider_calls == []
     # The settings-block notice (ruling R46-7). The skipped report rows use plain print(), not print_info.
     assert any(agent_import.PROVIDER_MANAGED_MEMORY_REASON in line for line in notices)
+
+
+# --- OpenClaw migration script: the target home's memory mode --------------------------------
+
+SCRIPT_PATH = (Path(__file__).resolve().parents[2] / "optional-skills" / "migration"
+               / "openclaw-migration" / "scripts" / "openclaw_to_hermes.py")
+
+
+def _load_script():
+    spec = importlib.util.spec_from_file_location("openclaw_to_hermes_r46", SCRIPT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module   # @dataclass needs the module registered (Python 3.11+)
+    spec.loader.exec_module(module)
+    return module
+
+
+PREDICATE_CASES = {
+    "absent": None, "empty": "", "no_memory": "model: x\n", "memory_null": "memory:\n",
+    "memory_list": "memory: [a]\n", "additive": "memory:\n  provider_mode: additive\n",
+    "authoritative": "memory:\n  provider: example\n  provider_mode: authoritative\n",
+    "padded": "memory:\n  provider_mode: '  authoritative '\n",
+    "capitalised": "memory:\n  provider_mode: Authoritative\n",
+    "non_string": "memory:\n  provider_mode: 1\n", "unparseable": "memory: [unclosed\n",
+    "top_level_list": "- a\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(PREDICATE_CASES))
+def test_standalone_predicate_agrees_with_hermes(tmp_path, case):
+    """The script's stdlib twin and Hermes' per-home predicate decide every plain config alike."""
+    mod = _load_script()
+    home = tmp_path / case
+    home.mkdir()
+    if PREDICATE_CASES[case] is not None:
+        (home / "config.yaml").write_text(PREDICATE_CASES[case], encoding="utf-8")
+    assert mod._inline_requests_authoritative(home) is (home_disposition(home) is not None)
+
+
+def test_hermes_predicate_is_used_whenever_hermes_is_importable(tmp_path, monkeypatch):
+    """Only Hermes' pipeline expands env references, so this passes only on the canonical path."""
+    mod = _load_script()
+    monkeypatch.setenv("R46_MEMORY_MODE", "authoritative")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text("memory:\n  provider_mode: ${R46_MEMORY_MODE}\n", encoding="utf-8")
+    assert mod.target_requests_authoritative_memory(home) is True
+    assert mod._inline_requests_authoritative(home) is False
+
+
+def test_standalone_fallback_when_hermes_is_not_importable(tmp_path, monkeypatch):
+    mod = _load_script()
+    monkeypatch.setitem(sys.modules, "hermes_cli.backup_memory", None)   # the import raises ImportError
+    auth, plain = _authoritative(tmp_path / "a"), tmp_path / "p"
+    plain.mkdir()
+    (plain / "config.yaml").write_text("model: x\n", encoding="utf-8")
+    assert mod.target_requests_authoritative_memory(auth) is True
+    assert mod.target_requests_authoritative_memory(plain) is False
+
+
+def test_without_pyyaml_any_provider_mode_counts_as_authoritative(tmp_path, monkeypatch):
+    """Ruling R46-4: refusing is recoverable, writing into a dormant store is not."""
+    mod = _load_script()
+    monkeypatch.setattr(mod, "yaml", None)
+    auth, plain = _authoritative(tmp_path / "a"), tmp_path / "p"
+    plain.mkdir()
+    (plain / "config.yaml").write_text("model: x\n", encoding="utf-8")
+    assert mod._inline_requests_authoritative(auth) is True
+    assert mod._inline_requests_authoritative(plain) is False   # no provider_mode key: additive, as at base

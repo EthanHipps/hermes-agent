@@ -242,6 +242,12 @@ STATUS_PLANNED = "planned"
 
 REASON_TARGET_EXISTS = "Target exists and overwrite is disabled"
 REASON_BLOCKED_BY_APPLY_CONFLICT = "blocked by earlier apply conflict"
+# Option ids whose destination is the Hermes native memory store (memories/MEMORY.md, USER.md).
+MEMORY_OPTION_IDS = frozenset({"memory", "user-profile", "daily-memory"})
+# Recorded instead of those options when the target home requests authoritative memory (§9.7).
+REASON_PROVIDER_MANAGED_MEMORY = (
+    "Curated memory is provider-managed (memory.provider_mode: authoritative); memory entries "
+    "are not imported and the native memory files stay dormant")
 
 
 @dataclass
@@ -462,6 +468,42 @@ def dump_yaml_file(path: Path, data: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def target_requests_authoritative_memory(target_root: Path) -> bool:
+    """Does the TARGET Hermes home request authoritative memory mode? Never raises.
+
+    Wherever Hermes is importable (always in-process: ``hermes claw migrate`` and the setup
+    wizard), this is Hermes' own per-home predicate (contract C6b-10): raw read, env expansion
+    and managed overlay, with the requested mode counting even when invalid. A standalone run
+    with only the stdlib falls back to :func:`_inline_requests_authoritative` (ruling R46-4).
+    """
+    try:
+        from hermes_cli.backup_memory import home_disposition
+    except ImportError:
+        return _inline_requests_authoritative(target_root)
+    return home_disposition(target_root) is not None
+
+
+def _inline_requests_authoritative(target_root: Path) -> bool:
+    """Stdlib twin of Hermes' predicate for standalone runs: no env expansion, no managed overlay.
+
+    Without PyYAML the mode cannot be parsed, so a config that mentions ``provider_mode`` counts
+    as authoritative. Refusing a memory import is recoverable; writing into a dormant store is not.
+    """
+    try:
+        raw = (target_root / "config.yaml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if yaml is None:
+        return "provider_mode" in raw
+    try:
+        data = yaml.safe_load(raw)
+    except Exception:
+        return False
+    memory = data.get("memory") if isinstance(data, dict) else None
+    mode = memory.get("provider_mode") if isinstance(memory, dict) else None
+    return isinstance(mode, str) and mode.strip() == "authoritative"
 
 
 def parse_env_file(path: Path) -> Dict[str, str]:
