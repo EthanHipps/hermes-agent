@@ -115,23 +115,38 @@ _MEMORY_ARGS: Tuple[_ArgSpec, ...] = (
     ("action", "action"), ("target", "target", "memory"), ("content", "content"),
     ("old_text", "old_text"), ("new_text", "new_text"), ("operations", "operations"),
 )
-# Ruling R38-3 (b), decided at Checkpoint A: surfaces §9.6 L1583 says must be refused before any read
-# or write until they receive an explicit frozen-identity service (R43). The review fork is detected
-# by its write origin. This must stay until R43, not only until R40: after R40 the fork resumes the
-# PARENT's frozen identity at its first turn (background_review.build_cache_parity_fork sets the
-# parent's session_id and clears _session_db), so this refusal is the only thing keeping it from
-# publishing under that identity. Attended /refine forks are is_background_review() too and are
-# refused; that side effect was accepted. Gateway hygiene agents are NOT refused here (R40's residual).
-_UNBOUND_MEMORY_PLATFORMS = frozenset({"cron"})
+# Rulings R43-2 / R43-3 (supersede R38-3): background and scheduled surfaces receive MemoryService as an
+# explicit dependency (agent/memory_service/view.py, contract C6b-7). These gates run before any load
+# (§9.6 L1585): an UnboundMemoryService, or a background-review / cron / subagent agent whose service was
+# NOT injected, has no explicit identity (R38-3's refusal, kept as the fallback); a read-only view (/btw)
+# never mutates; an unattended review may only add (native #105921 parity — the curated path stages
+# nothing in the pending store; approvals are R39's).
+_NO_IDENTITY = ("Memory is provider-managed, and this background surface has no explicit memory identity, "
+                "so it cannot read or write memory. Nothing was saved.")
+_READ_ONLY = "Memory is read-only on this surface. Nothing was saved."
+_ADD_ONLY = ("Background review may not change or remove memory entries unattended; 'add' is still "
+             "available. Nothing was saved.")
 
 
-def _unbound_memory_surface_refusal(agent) -> Optional[str]:
-    from tools.skill_provenance import is_background_review
+def _deletes(args: dict) -> bool:
+    from tools.memory_tool import _BG_DELETE_ACTIONS
+    ops = args.get("operations")
+    return args.get("action") in _BG_DELETE_ACTIONS or any(
+        isinstance(op, dict) and op.get("action") in _BG_DELETE_ACTIONS for op in (ops if isinstance(ops, list) else ()))
 
-    if is_background_review() or getattr(agent, "platform", None) in _UNBOUND_MEMORY_PLATFORMS:
-        return json.dumps({"success": False, "done": True, "error": (
-            "Memory is provider-managed, and this background surface has no explicit memory identity, "
-            "so it cannot read or write memory. Nothing was saved.")})
+
+def _background_memory_refusal(agent, service, args: dict) -> Optional[str]:
+    from agent.memory_service.view import UNBOUND_PLATFORMS, LimitedMemoryView, UnboundMemoryService, is_injected
+    from tools.skill_provenance import is_background_review, is_unattended_review
+
+    if isinstance(service, UnboundMemoryService) or (not is_injected(agent) and (
+            is_background_review() or getattr(agent, "platform", None) in UNBOUND_PLATFORMS)):
+        return json.dumps({"success": False, "done": True, "error": _NO_IDENTITY})
+    if isinstance(service, LimitedMemoryView):
+        if not service.mutations:
+            return json.dumps({"success": False, "done": True, "error": _READ_ONLY})
+        if is_unattended_review() and _deletes(args):
+            return json.dumps({"success": False, "error": _ADD_ONLY})
     return None
 
 
@@ -150,7 +165,7 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
     service = getattr(agent, "_memory_service", None)
     if is_provider_managed(service):
         # §9.7 L1599: MemoryService only — no store= argument, no notify_memory_tool_write, no mirroring.
-        refusal = _unbound_memory_surface_refusal(agent)
+        refusal = _background_memory_refusal(agent, service, args)
         if refusal is not None:
             return refusal
         return _call_tool("tools.memory_tool", "memory_tool", args, _MEMORY_ARGS,

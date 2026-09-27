@@ -158,3 +158,70 @@ def test_additive_init_is_unchanged(tmp_path, monkeypatch):
     agent = env.agent("additive-2")
     assert agent._memory_service.disposition is MemoryDisposition.BUILTIN and not is_injected(agent)
     assert agent._memory_store is not None and env.factory_calls == 0
+
+
+# ---- B. the memory-tool gates (Task 4) ------------------------------------------------------------
+
+def _injected_fork_agent(env, parent, surface="background_review"):
+    agent = env.agent("fork-ctor-1", memory_service=open_fork_view(capture_parent_memory(parent), surface=surface))
+    agent.session_id = parent.session_id
+    return agent
+
+
+def test_an_unattended_review_may_add(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    fork = _injected_fork_agent(env, parent)
+    with _origin(attended=False), native_memory_sentinel(_native_dir()) as sentinel:
+        out = json.loads(fork._invoke_tool("memory", ADD, "task-1"))
+    sentinel.assert_untouched()
+    assert out["success"] is True
+    assert [r.text for r in env.store.records_for(REPO, "memory")] == ["uses pnpm"]
+
+
+def test_an_unattended_review_cannot_replace_or_remove(tmp_path, monkeypatch):
+    from tools import write_approval as wa
+    env = Env(tmp_path, monkeypatch)
+    env.store.seed_record(REPO, "memory", "old rule")
+    parent = env.agent()
+    fork = _injected_fork_agent(env, parent)
+    view_backend = env.backends[-1]
+    loads = view_backend.count("load_curated")
+    for args in ({"action": "replace", "target": "memory", "old_text": "old rule", "content": "new"},
+                 {"action": "remove", "target": "memory", "old_text": "old rule"},
+                 {"operations": [{"action": "add", "content": "x"}, {"action": "remove", "old_text": "old rule"}]}):
+        with _origin(attended=False):
+            out = json.loads(fork._invoke_tool("memory", args, "task-1"))
+        assert out["success"] is False and "'add' is still available" in out["error"]
+    assert view_backend.count("load_curated") == loads and wa.list_pending(wa.MEMORY) == []
+    assert [r.text for r in env.store.records_for(REPO, "memory")] == ["old rule"]
+
+
+def test_an_attended_refine_keeps_the_full_operation_set(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    env.store.seed_record(REPO, "memory", "old rule")
+    parent = env.agent()
+    fork = _injected_fork_agent(env, parent)
+    with _origin(attended=True):
+        out = json.loads(fork._invoke_tool("memory", {"action": "replace", "target": "memory",
+                                                       "old_text": "old rule", "content": "new rule"}, "task-1"))
+    assert out["success"] is True
+    assert [r.text for r in env.store.records_for(REPO, "memory")] == ["new rule"]
+
+
+def test_a_read_only_view_refuses_before_any_load(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    fork = _injected_fork_agent(env, parent, surface="side_question")
+    view_backend = env.backends[-1]
+    with _origin("side_question"):
+        out = json.loads(fork._invoke_tool("memory", ADD, "task-1"))
+    assert out["success"] is False and "read-only" in out["error"]
+    assert view_backend.count("load_curated") == 0 and view_backend.count("stage_curated") == 0
+
+
+def test_an_unbound_service_names_the_missing_identity(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    agent = env.agent("cron_job_2_20260927_000000", platform="cron")
+    out = json.loads(agent._invoke_tool("memory", ADD, "task-1"))
+    assert out["success"] is False and "no explicit memory identity" in out["error"] and env.factory_calls == 0
