@@ -35,7 +35,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Union
 
 from agent.memory_service import wire as w
 from agent.memory_service.archive import archive_disposition
@@ -43,7 +43,7 @@ from agent.memory_service.config import (MemoryConfigurationError, MemoryMode, M
                                          resolve_memory_service_config)
 from agent.memory_service.errors import MemoryBlockedError, MemoryServiceError, ProviderTransportError
 from agent.memory_service.host_state import HOST_STATE_ROOT_DIRNAME, HostStateRecord
-from agent.memory_service.mutation import MutationOutcome, MutationStatus
+from agent.memory_service.mutation import MutationOutcome, MutationStatus, PlannedMutation, PlanShortCircuit
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,27 @@ def admin_service(raw_config: Any, *, context: AdminContext, backend_factory: An
         yield service
     finally:
         service.shutdown()
+
+
+def plan_reset(snapshot: w.CuratedSnapshot, scopes: Sequence[w.ScopeRef]) -> Union[PlannedMutation, PlanShortCircuit]:
+    """A §9.3 L1256 reset of exactly *scopes* (no delta, no candidates; L1294); the provider enumerates hidden state (L1296).
+
+    One target per plan (the snapshot's; D-R42-e). Every scope must be eligible for this identity.
+    """
+    ordered = tuple(dict.fromkeys(scopes))
+    if not ordered:
+        return PlanShortCircuit({"ok": False, "code": "invalid_request",
+                                 "message": "A reset needs at least one explicit scope. Nothing was changed."})
+    ineligible = [scope for scope in ordered if scope not in snapshot.eligible_write_scopes]
+    if ineligible:
+        named = [format_scope(s) for s in ineligible]
+        return PlanShortCircuit({"ok": False, "code": "unauthorized_scope", "scopes": named,
+                                 "message": "These scopes cannot be reset from this identity: "
+                                            + ", ".join(named) + ". Nothing was changed."})
+    return PlannedMutation(intent=w.MutationIntent(kind="reset", reset_scopes=ordered), mutation_delta=(),
+                           candidate_entries=(), requested_write_scopes=ordered,
+                           projected_texts=tuple(e.text for e in snapshot.mutation_entries if e.origin_scope not in ordered),
+                           message=f"Reset {snapshot.target} memory in {len(ordered)} scope(s).")
 
 
 def authority_report(raw_config: Any) -> Optional[Dict[str, Any]]:

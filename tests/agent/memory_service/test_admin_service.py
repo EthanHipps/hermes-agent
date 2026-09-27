@@ -5,13 +5,15 @@ import types
 
 import pytest
 
+from agent.memory_service import wire as w
 from agent.memory_service.admin import (ADMIN_PLATFORM, AdminContext, AdminIdentityError, admin_service,
                                         admin_state_path, authority_report, format_scope, outcome_payload,
-                                        parse_scope_selector)
+                                        parse_scope_selector, plan_reset)
 from agent.memory_service.archive import archive_disposition
 from agent.memory_service.config import MemoryConfigurationError, resolve_memory_service_config
 from agent.memory_service.errors import MemoryBlockedError
-from agent.memory_service.mutation import MutationOutcome, MutationStatus
+from agent.memory_service.mutation import (MutationOutcome, MutationStatus, PlannedMutation, PlanShortCircuit,
+                                           predict_approval_requirements)
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
 
 REPO_CTX = AdminContext(repo_id="repo-1", project_id="proj-1")
@@ -157,3 +159,30 @@ def test_additive_or_invalid_configuration_never_reaches_a_provider(env):
             with admin_service(cfg, context=AdminContext(), backend_factory=env.factory):
                 pass
     assert env.backends == []
+
+
+# -- plan_reset (ruling R42-9) --------------------------------------------------------------------------
+
+REPO, PROJ, USER = (w.ScopeRef(kind="repository", id="repo-1"), w.ScopeRef(kind="project", id="proj-1"),
+                    w.ScopeRef(kind="principal_global", id="ethan"))
+
+
+def test_reset_plans_exactly_the_requested_eligible_scopes(env):
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        memory, user = service.load_curated("memory"), service.load_curated("user")
+    plan = plan_reset(memory, [REPO, REPO])
+    assert isinstance(plan, PlannedMutation) and plan.intent.kind == "reset"
+    assert plan.intent.reset_scopes == (REPO,) and plan.requested_write_scopes == (REPO,)
+    assert plan.mutation_delta == () and plan.candidate_entries == ()
+    assert predict_approval_requirements(memory, plan) == ("reset",)
+    assert predict_approval_requirements(memory, plan_reset(memory, [PROJ])) == ("non_default_scope", "reset")
+    assert predict_approval_requirements(user, plan_reset(user, [USER])) == ("target_user", "reset")
+
+
+def test_reset_refuses_missing_or_ineligible_scopes(env):
+    with admin_service(env.cfg, context=REPO_CTX, backend_factory=env.factory) as service:
+        memory = service.load_curated("memory")
+    empty, foreign = plan_reset(memory, []), plan_reset(memory, [USER])
+    assert isinstance(empty, PlanShortCircuit) and empty.response["code"] == "invalid_request"
+    assert isinstance(foreign, PlanShortCircuit) and foreign.response["code"] == "unauthorized_scope"
+    assert foreign.response["scopes"] == ["global:ethan"]
