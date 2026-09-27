@@ -377,8 +377,13 @@ def _(rid, params: dict) -> dict:
         model_set = _best_effort(lambda: _pin_profile_model(path, provider, model))
     elif is_truthy_value(params.get("mirror_credentials", True)):
         mirrored["model_inherited"] = _try(lambda: _inherit_launch_model(path), False)
-    return _ok(rid, {"ok": True, "name": name, "path": str(path), "soul_written": soul_written,
-                     "model_set": model_set, "mirrored": mirrored})
+    result = {"ok": True, "name": name, "path": str(path), "soul_written": soul_written,
+              "model_set": model_set, "mirrored": mirrored}
+    if clone_from or clone_all:
+        from hermes_cli.backup_memory import home_disposition
+        if (disposition := home_disposition(path)) is not None:
+            result["curated_memory"] = disposition.as_mapping()   # R44-11 typed TUI field (§9.8 L1629; ruling R41-17)
+    return _ok(rid, result)
 
 
 def _describe_toolsets(cfg):

@@ -5,6 +5,16 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 from hermes_cli.profiles import get_profile_dir
 from tools.memory_tool import load_on_disk_store, memory_tool
 
+PROVIDER_MANAGED_ONBOARDING = (
+    'Curated memory is provider-managed (memory.provider_mode: authoritative); saving onboarding facts needs an '
+    'approval this version cannot request yet, so nothing was saved.')
+
+
+def _default_profile_is_provider_managed() -> bool:
+    """Ruling R41-19 (§9.7 L1605, §9.5 L1532, L1538): the default profile's requested mode, one pipeline (C6b-10)."""
+    from hermes_cli.backup_memory import home_disposition
+    return home_disposition(get_profile_dir('default')) is not None
+
 
 def remember_onboarding(answers: dict) -> dict:
     if not isinstance(answers, dict):
@@ -28,6 +38,8 @@ def remember_onboarding(answers: dict) -> dict:
     content = 'Agreed during onboarding:\n' + '\n'.join(facts)
     if len(content) > 2000:
         raise ValueError('Onboarding facts are too long to remember')
+    if _default_profile_is_provider_managed():
+        raise ValueError(PROVIDER_MANAGED_ONBOARDING)   # no USER.md and no provider contact (R41-19)
 
     # The entry must land in the 'default' profile directory even when this RPC arrives on the guide's
     # backend or under a custom Hermes home.

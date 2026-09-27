@@ -371,3 +371,52 @@ def test_a_single_principal_gateway_reaches_the_shared_handler(authoritative_env
                         lambda *a, **k: calls.append(k.get("memory_store", "absent")) or "listed")
     assert asyncio.run(_Gateway(agent)._handle_memory_command(_event("pending"))) == "listed"
     assert calls == [None]      # memory_store=None: nothing native-shaped can be applied (H15)
+
+
+def test_load_on_disk_store_refuses_in_authoritative_mode(authoritative_env, native_dir):
+    from tools.memory_tool import load_on_disk_store
+    _write_config(authoritative_env.memory)
+    with native_memory_sentinel(native_dir) as sentinel, pytest.raises(MemoryBlockedError) as refused:
+        load_on_disk_store()
+    sentinel.assert_untouched()
+    assert refused.value.code == "native_dormant"
+
+
+def test_onboarding_personalization_never_writes_user_md(authoritative_env, tmp_path, monkeypatch):
+    """§9.7 L1605 (R41-19): fails closed before any provider contact; the target:user mutation is the R41 follow-up's."""
+    from hermes_cli.profiles import get_profile_dir
+    from tui_gateway.onboarding_personalization import remember_onboarding
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    default = get_profile_dir("default")
+    _write_config(authoritative_env.memory, home=default)
+    native = default / "memories"
+    native.mkdir(parents=True, exist_ok=True)
+    (native / "USER.md").write_text("dormant profile\n", encoding="utf-8")
+    before = (native / "USER.md").stat()
+    with native_memory_sentinel(native) as sentinel, pytest.raises(ValueError, match="approval"):
+        remember_onboarding({"name": "Ethan"})
+    sentinel.assert_untouched()
+    assert (native / "USER.md").stat().st_mtime_ns == before.st_mtime_ns
+    assert authoritative_env.backends == []   # C67-10b: no provider contact
+
+
+def _create_clone():
+    from tui_gateway import server
+    return server._methods["profiles.create"]("r-1", {"name": "coder", "clone_from": "default", "no_alias": True,
+                                                      "mirror_credentials": False})["result"]
+
+
+def test_tui_profile_clone_reports_the_typed_disposition(authoritative_env, tmp_path, monkeypatch):
+    from hermes_cli.profiles import get_profile_dir
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _write_config({**authoritative_env.memory, "provider": "example"}, home=get_profile_dir("default"))
+    assert _create_clone()["curated_memory"] == {"authority": "provider", "provider": "example", "provider_api": 1,
+                                                 "included": False, "disposition": "provider-managed",
+                                                 "restore_action": "reconnect-provider"}
+
+
+def test_tui_profile_clone_of_an_additive_home_has_no_disposition(tmp_path, monkeypatch):
+    from hermes_cli.profiles import get_profile_dir
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _write_config({"memory_enabled": True}, home=get_profile_dir("default"))
+    assert "curated_memory" not in _create_clone()
