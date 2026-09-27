@@ -620,11 +620,18 @@ def _hydrate_from_history(agent: Any, conversation_history: Optional[List[Any]])
                 agent._turns_since_memory = prior_user_turns % agent._memory_nudge_interval
 
 
+def _review_memory_available(agent: Any) -> bool:
+    """Ruling R43-5: a provider-managed session reviews through its service (C7); additive keeps the store test."""
+    from agent.memory_service.lifecycle import memory_guidance_flags
+    flags = memory_guidance_flags(agent)
+    return any(flags) if flags is not None else bool(agent._memory_store)
+
+
 def _tick_memory_nudge(agent: Any) -> bool:
     """Advance the turn-based memory nudge counter; ``True`` when the review should fire."""
     if (agent._memory_nudge_interval > 0
             and "memory" in agent.valid_tool_names
-            and agent._memory_store):
+            and _review_memory_available(agent)):
         agent._turns_since_memory += 1
         if agent._turns_since_memory >= agent._memory_nudge_interval:
             agent._turns_since_memory = 0

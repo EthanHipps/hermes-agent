@@ -225,3 +225,114 @@ def test_an_unbound_service_names_the_missing_identity(tmp_path, monkeypatch):
     agent = env.agent("cron_job_2_20260927_000000", platform="cron")
     out = json.loads(agent._invoke_tool("memory", ADD, "task-1"))
     assert out["success"] is False and "no explicit memory identity" in out["error"] and env.factory_calls == 0
+
+
+# ---- C. background review and /btw (Task 5) -------------------------------------------------------
+
+def test_a_review_fork_gets_a_view_of_the_parent_identity_and_binds_nothing(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    binds, records = env.count("bind_session"), _records()
+    with native_memory_sentinel(_native_dir()) as sentinel:
+        fork = env.fork(parent)
+    sentinel.assert_untouched()
+    view = fork._memory_service
+    assert isinstance(view, LimitedMemoryView) and view.surface == "background_review" and view.mutations
+    assert view.identity == parent._memory_service.identity and is_injected(fork)
+    assert env.count("bind_session") == binds and _records() == records
+    assert env.backends[-1].count("validate_session") == 1 and env.backends[-1].count("bind_session") == 0
+
+
+def test_a_review_fork_commits_under_the_parent_identity_with_its_surface(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    fork = env.fork(parent)
+    records = _records()
+    with _origin(attended=False), native_memory_sentinel(_native_dir()) as sentinel:
+        out = json.loads(fork._invoke_tool("memory", ADD, "task-1"))
+    sentinel.assert_untouched()
+    stage = [req for op, req in env.backends[-1].calls if op == "stage_curated"][-1]
+    assert out["success"] is True and stage.provenance.initiating_surface == "background_review"
+    assert stage.frozen_identity == parent._memory_service.identity.to_wire() and _records() == records
+
+
+def test_the_review_identity_is_frozen_when_the_review_is_spawned(tmp_path, monkeypatch):
+    from agent.memory_service.lifecycle import follow_session_binding
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent("session-a")
+    started = []
+    monkeypatch.setattr("run_agent.threading.Thread",
+                        lambda target=None, daemon=None, name=None: type("T", (), {"start": lambda self: started.append(target)})())
+    monkeypatch.setattr("run_agent._review_should_defer", lambda agent, cfg: False)
+    parent._spawn_background_review(messages_snapshot=[{"role": "user", "content": "hi"}], review_memory=True)
+    run = parent._background_review_run
+    old_identity = parent._memory_service.identity
+    assert started and run.memory_parent.state.identity == old_identity
+    parent.session_id = "session-b"                  # /new before the (deferred) review runs
+    follow_session_binding(parent)
+    assert parent._memory_service.identity != old_identity
+    fork = env.fork(parent, memory_parent=run.memory_parent)
+    assert fork._memory_service.identity == old_identity
+
+
+def test_side_question_fork_is_read_only_and_gates_through_its_view(tmp_path, monkeypatch):
+    from agent.memory_service.lifecycle import curated_request_gate, ensure_session_binding
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    fork = env.fork(parent, write_origin="side_question")
+    view_backend = env.backends[-1]
+    assert isinstance(fork._memory_service, LimitedMemoryView) and fork._memory_service.mutations is False
+    ensure_session_binding(fork)
+    assert curated_request_gate(fork) is None
+    assert view_backend.count("load_curated") == 2           # §9.6 L1566: both enabled targets, own transport
+
+
+def test_a_released_fork_closes_its_view_once(tmp_path, monkeypatch):
+    from agent.background_review import _release_fork_clients
+    env = Env(tmp_path, monkeypatch)
+    fork = env.fork(env.agent())
+    _release_fork_clients(fork)
+    _release_fork_clients(fork)
+    assert env.backends[-1].shutdown_calls == 1
+
+
+def test_a_stateless_parent_forks_stateless_without_provider_contact(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch, authoritative_failure_policy="stateless")
+    env.store.fail_transport("negotiate")
+    parent = env.agent()
+    calls = env.factory_calls
+    fork = env.fork(parent)
+    assert fork._memory_service.disposition is MemoryDisposition.STATELESS and env.factory_calls == calls
+
+
+def test_an_additive_fork_is_built_exactly_as_before(tmp_path, monkeypatch):
+    import run_agent
+    env = Env(tmp_path, monkeypatch, additive=True, memory_enabled=True, user_profile_enabled=True)
+    parent = env.agent("additive-3")
+    real, seen = run_agent.AIAgent, []
+    monkeypatch.setattr(run_agent, "AIAgent", lambda **kw: (seen.append(kw), real(**kw))[1])
+    fork = env.fork(parent)
+    assert "memory_service" not in seen[-1] and not is_injected(fork)
+    assert fork._memory_store is parent._memory_store
+
+
+def test_an_authoritative_parent_runs_memory_review_on_its_interval(tmp_path, monkeypatch):
+    from agent.turn_context import _tick_memory_nudge
+    env = Env(tmp_path, monkeypatch, nudge_interval=2)
+    parent = env.agent()
+    assert [_tick_memory_nudge(parent) for _ in range(2)] == [False, True]
+
+
+def test_the_review_whitelist_follows_the_fork_service(tmp_path, monkeypatch):
+    from agent.background_review import _review_tool_whitelist
+    env = Env(tmp_path, monkeypatch)
+    whitelist, _ = _review_tool_whitelist(env.fork(env.agent()), None, review_memory=True)
+    assert "memory" in whitelist
+
+
+def test_a_stateless_fork_gets_no_memory_in_its_whitelist(tmp_path, monkeypatch):
+    from agent.background_review import _review_tool_whitelist
+    env = Env(tmp_path, monkeypatch, authoritative_failure_policy="stateless")
+    env.store.fail_transport("negotiate")
+    whitelist, _ = _review_tool_whitelist(env.fork(env.agent()), None, review_memory=True)
+    assert "memory" not in whitelist
