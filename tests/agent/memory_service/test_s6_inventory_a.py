@@ -6,6 +6,7 @@ not yet available (ruling R41-1); nothing touches the native directory; gateway 
 explicitly (I3, §13.1 L2191). Helpers are local (reconciliation rule 10: shared test support is
 frozen)."""
 
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,7 +16,9 @@ import yaml
 
 from agent.memory_service import wire as w
 from agent.memory_service.errors import MemoryBlockedError
+from agent.memory_service.service import MemoryDisposition
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
+from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 EPOCH_A, EPOCH_B = "EPOCHVALUEAAAA", "EPOCHVALUEBBBB"
 REPO = w.ScopeRef(kind="repository", id="repo-1")
@@ -62,8 +65,10 @@ def _write_config(memory_section, home=None):
 
 
 def _agent(memory_section, **kwargs):
-    from run_agent import AIAgent
+    # Config first: the first ``run_agent`` import in a process runs ensure_hermes_home() (load_config at
+    # import), which must already see the requested mode, as it does in production.
     _write_config(memory_section)
+    from run_agent import AIAgent
     with patch("model_tools.get_tool_definitions", return_value=_tool_defs("memory", "web_search")), \
          patch("model_tools.check_toolset_requirements", return_value={}), \
          patch("agent.process_bootstrap.OpenAI"):
@@ -121,3 +126,35 @@ def test_negotiate_only_negotiates_and_nothing_else(authoritative_env):
     assert negotiation.provider == "example" and negotiation.selected_api_version == 1
     assert [op for op, _ in backend.calls] == ["negotiate"]
     assert service.identity is None and not service.blocked
+
+
+GATEWAY = {"telegram:111": "ethan"}
+
+
+def test_unmapped_gateway_user_gets_no_memory_and_no_provider_call(authoritative_env, native_dir):
+    with native_memory_sentinel(native_dir) as sentinel:
+        agent = _agent({**authoritative_env.memory, "gateway_principals": GATEWAY}, platform="telegram",
+                       user_id="999", session_id="gw-unmapped")
+    sentinel.assert_untouched()
+    assert agent._memory_service.disposition is MemoryDisposition.STATELESS
+    assert authoritative_env.backends == []          # no bind, no load: never a degraded_global_only result (I3)
+    out = json.loads(agent._invoke_tool("memory", {"action": "add", "target": "user", "content": "x"}, "t"))
+    assert out["success"] is False
+
+
+def test_ambiguous_gateway_user_gets_no_memory(authoritative_env):
+    agent = _agent({**authoritative_env.memory, "gateway_principals": {**GATEWAY, "telegram:alt-9": "other"}},
+                   platform="telegram", user_id="111", user_id_alt="alt-9", session_id="gw-ambiguous")
+    assert agent._memory_service.disposition is MemoryDisposition.STATELESS and authoritative_env.backends == []
+
+
+def test_mapped_gateway_user_binds_as_its_principal(authoritative_env):
+    agent = _agent({**authoritative_env.memory, "gateway_principals": GATEWAY}, platform="telegram", user_id="111",
+                   session_id="gw-mapped")
+    assert agent._memory_service.identity.principal_id == "ethan"
+    assert authoritative_env.backends[-1].count("bind_session") == 1
+
+
+def test_local_surfaces_keep_the_configured_principal(authoritative_env):
+    agent = _agent(authoritative_env.memory, session_id="cli-1")
+    assert agent._memory_service.identity.principal_id == "ethan"

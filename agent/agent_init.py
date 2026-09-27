@@ -1256,6 +1256,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     if not skip_memory or _memory_toolset_requested:
         from agent.memory_service.bootstrap import init_memory_service, requests_authoritative_mode
         from agent.memory_service.service import is_provider_managed
+        from agent.memory_service.principal import gateway_identity_of
 
         _authoritative_requested = requests_authoritative_mode(_agent_cfg)
         try:
@@ -1317,6 +1318,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
                     platform=platform or "cli",
                     store_factory=_build_native_store,
                     session_db=getattr(agent, "_session_db", None),
+                    gateway_identity=gateway_identity_of(agent),   # ruling R41-5 (I3)
                 )
             except Exception:
                 if _authoritative_requested:

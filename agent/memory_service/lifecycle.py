@@ -73,6 +73,7 @@ def follow_session_binding(agent: Any) -> None:
     if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
         return
     from agent.memory_service.bootstrap import init_memory_service, resolve_session_binding
+    from agent.memory_service.principal import gateway_identity_of
 
     current = agent._memory_service
     binding = resolve_session_binding(session_id, session_db=getattr(agent, "_session_db", None))
@@ -85,6 +86,7 @@ def follow_session_binding(agent: Any) -> None:
     replacement, _ = init_memory_service(
         agent._memory_boot_config, logical_session_id=session_id, platform=getattr(agent, "platform", None) or "cli",
         store_factory=_no_native_store, session_db=getattr(agent, "_session_db", None),
+        gateway_identity=gateway_identity_of(agent),
     )
     agent._memory_service, agent._memory_session_key = replacement, session_id
     agent._curated_prompt_render = None
