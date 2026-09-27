@@ -8,6 +8,9 @@ import sys
 
 
 def _cmd_memory_off():
+    from hermes_cli.memory_authoritative import off_command, requested_authoritative_config
+    if (authoritative := requested_authoritative_config()) is not None:
+        sys.exit(off_command(authoritative))              # ruling R41-7: never switches authority, writes nothing
     from hermes_cli.config import load_config, save_config
     config = load_config()
     if not isinstance(config.get("memory"), dict):

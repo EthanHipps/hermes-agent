@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import threading
+from argparse import Namespace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -420,3 +421,20 @@ def test_tui_profile_clone_of_an_additive_home_has_no_disposition(tmp_path, monk
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     _write_config({"memory_enabled": True}, home=get_profile_dir("default"))
     assert "curated_memory" not in _create_clone()
+
+
+def test_hermes_memory_status_setup_off_never_touch_native_memory(authoritative_env, native_dir):
+    """§9.7 L1618 (R41-7): status and setup show and validate; off refuses; none of them reaches memories/."""
+    from hermes_cli.main_agent_cmds import _cmd_memory_off, cmd_memory
+    _write_config(authoritative_env.memory)
+    native_dir.mkdir(parents=True, exist_ok=True)
+    (native_dir / "MEMORY.md").write_text("dormant\n", encoding="utf-8")
+    with native_memory_sentinel(native_dir) as sentinel:
+        for args in (Namespace(memory_command="status", session=None), Namespace(memory_command="setup", provider=None)):
+            try:
+                cmd_memory(args)
+            except SystemExit:
+                pass
+        with pytest.raises(SystemExit):
+            _cmd_memory_off()
+    sentinel.assert_untouched()

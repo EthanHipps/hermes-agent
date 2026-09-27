@@ -22,7 +22,10 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     _setup_parser.add_argument(
         "provider", nargs="?", default=None,
         help="Provider to configure directly (e.g. honcho), skipping the picker")
-    memory_sub.add_parser("status", help="Show current memory provider config")
+    _status_parser = memory_sub.add_parser("status", help="Show current memory provider config")
+    _status_parser.add_argument(
+        "--session", default=None,
+        help="authoritative only: show this Hermes session's frozen identity and scopes")
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset", help="Erase all built-in memory (MEMORY.md and USER.md)")

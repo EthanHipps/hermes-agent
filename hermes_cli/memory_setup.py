@@ -383,6 +383,13 @@ def _mark(enabled) -> str:
 
 def cmd_status(args) -> None:
     """Show current memory provider config."""
+    from hermes_cli.memory_authoritative import requested_authoritative_config
+    if (authoritative := requested_authoritative_config()) is not None:   # ruling R41-7; §9.7 L1618
+        from hermes_cli.memory_authoritative import status_command
+        code = status_command(authoritative, args)
+        if code:
+            sys.exit(code)
+        return
     from hermes_cli.config import load_config
 
     config = load_config()
@@ -457,6 +464,12 @@ def cmd_status(args) -> None:
 def memory_command(args) -> None:
     """Route memory subcommands."""
     if getattr(args, "memory_command", None) == "setup":
+        from hermes_cli.memory_authoritative import requested_authoritative_config, setup_command
+        if (authoritative := requested_authoritative_config()) is not None:
+            code = setup_command(authoritative, args)   # ruling R41-7: shows and validates, writes nothing
+            if code:
+                sys.exit(code)
+            return
         provider = getattr(args, "provider", None)
         if provider:
             cmd_setup_provider(provider)
