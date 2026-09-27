@@ -93,3 +93,19 @@ def inherit_host_state(parent_session_id: str, child_session_id: str, *, hermes_
     child = replace(parent, session_id=child_session_id)
     save_host_state(child, hermes_home=hermes_home)
     return child
+
+
+def remove_host_state(session_id: str, *, hermes_home: Optional[Path] = None) -> bool:
+    """Delete one session's record because the session was deleted (contract C6b-11; X-5; ruling R41-13).
+
+    Never raises, and touches nothing outside ``memory_service/sessions/`` (not R39's ``approvals/`` nor
+    R42's ``admin/``). v1 has no end operation, so the provider handle stays live until R28 closes it (K-2).
+    """
+    try:
+        _path(session_id, hermes_home).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning("memory host session state could not be removed")
+        return False

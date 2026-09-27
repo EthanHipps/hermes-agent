@@ -488,3 +488,15 @@ def test_additive_reset_refuses_authoritative_flags_and_still_deletes_without_th
     assert refused.value.code == 2 and (native_dir / "MEMORY.md").exists()
     cmd_memory(Namespace(memory_command="reset", target="memory", yes=True, scope=None))
     assert not (native_dir / "MEMORY.md").exists() and (native_dir / "USER.md").exists()
+
+
+def test_prompt_size_inspection_binds_no_session_and_touches_nothing(authoritative_env, native_dir):
+    """Ruling R41-11 (X-5), under the native sentinel: no bind, no host record, no native access."""
+    from hermes_constants import get_hermes_home
+    _write_config(authoritative_env.memory)
+    from hermes_cli.prompt_size import compute_prompt_breakdown
+    with native_memory_sentinel(native_dir) as sentinel:
+        data = compute_prompt_breakdown("cli")
+    sentinel.assert_untouched()
+    assert authoritative_env.backends == [] and not (get_hermes_home() / "memory_service").exists()
+    assert "provider-managed" in data["curated_memory"]

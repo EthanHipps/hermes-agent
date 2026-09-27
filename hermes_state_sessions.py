@@ -1434,10 +1434,11 @@ class SessionSessionsMixin:
             return False, ""
         return self._is_explicit_fork_child_row(session), str(session.get("source") or "").strip()
 
-    @staticmethod
-    def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
-        """Remove ``<id>.json``/``.jsonl`` and gateway ``request_dump_<id>_*.json``; OSError is swallowed
-        so a filesystem hiccup never blocks a DB operation."""
+    def _remove_session_files(self, sessions_dir: Optional[Path], session_id: str) -> None:
+        """Remove ``<id>.json``/``.jsonl`` and gateway ``request_dump_<id>_*.json``, and the session's memory
+        host-state record (X-5; ruling R41-13), with or without *sessions_dir*; OSError is swallowed so a
+        filesystem hiccup never blocks a DB operation."""
+        self._remove_memory_host_state(session_id)
         if sessions_dir is None:
             return
         targets = [sessions_dir / f"{session_id}{suffix}" for suffix in (".json", ".jsonl")]
@@ -1450,6 +1451,14 @@ class SessionSessionsMixin:
                 p.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _remove_memory_host_state(self, session_id: str) -> None:
+        """The record lives under this database's own home (profile-correct under multiplexing); C6b-11."""
+        db_path = str(getattr(self, "db_path", "") or "")
+        if not db_path or db_path == ":memory:":
+            return
+        from agent.memory_service.host_state import remove_host_state
+        remove_host_state(session_id, hermes_home=Path(db_path).parent)
 
     def get_session_delete_targets(self, session_id: str) -> List[str]:
         """Rows :meth:`delete_session` would remove: the session, then its recursive delegate children
