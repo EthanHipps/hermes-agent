@@ -2157,38 +2157,49 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
-        model=setup.model,
-        api_key=runtime.get("api_key"),
-        base_url=runtime.get("base_url"),
-        provider=runtime.get("provider"),
-        requested_provider=runtime.get("requested_provider"),
-        api_mode=runtime.get("api_mode"),
-        request_overrides=runtime.get("request_overrides"),
-        acp_command=runtime.get("command"),
-        acp_args=runtime.get("args"),
-        max_iterations=setup.max_iterations,
-        reasoning_config=setup.reasoning_config,
-        prefill_messages=setup.prefill_messages,
-        fallback_model=setup.fallback_model,
-        credential_pool=setup.credential_pool,
-        providers_allowed=pr.get("only"),
-        providers_ignored=pr.get("ignore"),
-        providers_order=pr.get("order"),
-        provider_sort=pr.get("sort"),
-        openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-        enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-        disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
-        quiet_mode=True,
-        # Project context files only with a configured workdir; SOUL.md always.
-        skip_context_files=not bool(workdir),
-        load_soul_identity=True,
-        skip_memory=False,
-        skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
-        platform="cron",
-        session_id=session_id,
-        session_db=session_db,
-    )
+    # Rulings R43-6/R43-7 (§9.7 L1613; C6b-8): an explicit frozen-identity MemoryService in authoritative mode;
+    # None keeps the additive path byte-unchanged (skip_memory=False, native memory as before).
+    from cron.scheduler_memory import resolve_cron_memory_service
+    memory_service = resolve_cron_memory_service(session_id=session_id)
+    extra = {"memory_service": memory_service} if memory_service is not None else {}
+    try:
+        return AIAgent(
+            model=setup.model,
+            api_key=runtime.get("api_key"),
+            base_url=runtime.get("base_url"),
+            provider=runtime.get("provider"),
+            requested_provider=runtime.get("requested_provider"),
+            api_mode=runtime.get("api_mode"),
+            request_overrides=runtime.get("request_overrides"),
+            acp_command=runtime.get("command"),
+            acp_args=runtime.get("args"),
+            max_iterations=setup.max_iterations,
+            reasoning_config=setup.reasoning_config,
+            prefill_messages=setup.prefill_messages,
+            fallback_model=setup.fallback_model,
+            credential_pool=setup.credential_pool,
+            providers_allowed=pr.get("only"),
+            providers_ignored=pr.get("ignore"),
+            providers_order=pr.get("order"),
+            provider_sort=pr.get("sort"),
+            openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
+            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
+            disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+            quiet_mode=True,
+            # Project context files only with a configured workdir; SOUL.md always.
+            skip_context_files=not bool(workdir),
+            load_soul_identity=True,
+            skip_memory=False,
+            skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
+            platform="cron",
+            session_id=session_id,
+            session_db=session_db,
+            **extra,
+        )
+    except BaseException:
+        if memory_service is not None:
+            memory_service.shutdown()
+        raise
 
 
 class _FireAudit:
