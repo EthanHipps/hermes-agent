@@ -565,6 +565,8 @@ def import_agent_command(args) -> None:
     print_info(f"Target:      {hermes_home}")
     print_info(f"Overwrite:   {'yes' if overwrite else 'no (skip conflicts)'}")
     print_info("Secrets:     never imported — run 'hermes setup' for credentials")
+    if home_disposition(hermes_home) is not None:
+        print_info(f"Memory:      {PROVIDER_MANAGED_MEMORY_REASON}")
     # Ensure config.yaml exists before the import tries to merge into it
     if not get_config_path().exists():
         save_config(load_config())

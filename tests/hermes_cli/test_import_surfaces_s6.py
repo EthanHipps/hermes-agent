@@ -9,6 +9,7 @@ still imports, and an additive home is unchanged.
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -160,3 +161,24 @@ def test_additive_import_agent_still_merges_into_native_memory(env, tmp_path):
     [memory] = _items(report, "claude-md")
     assert memory["status"] == "imported"
     assert "Always use type hints" in (home / "memories" / "MEMORY.md").read_text(encoding="utf-8")
+
+
+def test_import_agent_command_names_provider_managed_memory(env, tmp_path, provider_calls, monkeypatch):
+    import hermes_cli.setup as setup_mod
+    from hermes_cli.agent_import import import_agent_command
+
+    # import_agent_command imports print_info from hermes_cli.setup at call time: patch where it reads.
+    notices = []
+    monkeypatch.setattr(setup_mod, "print_info", lambda *a, **k: notices.append(" ".join(map(str, a))))
+    home = _authoritative(env)
+    native = _dormant(home)
+    before = _snapshot(native)
+    tree = _claude_tree(tmp_path / ".claude")
+    args = SimpleNamespace(agent="claude-code", source=str(tree), dry_run=False, overwrite=False, yes=True)
+    with native_memory_sentinel(native) as sentinel:
+        import_agent_command(args)
+    sentinel.assert_untouched()
+    assert _snapshot(native) == before
+    assert provider_calls == []
+    # The settings-block notice (ruling R46-7). The skipped report rows use plain print(), not print_info.
+    assert any(agent_import.PROVIDER_MANAGED_MEMORY_REASON in line for line in notices)
