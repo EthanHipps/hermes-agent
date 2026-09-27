@@ -24,19 +24,11 @@ def _honcho_is_configured_for_doctor() -> bool:
 
 
 def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
-    """Return the effective memory section used by doctor diagnostics."""
+    """The memory section doctor diagnoses: the archive pipeline, one code path (D-R44-e; ruling R41-10),
+    last-known-good aware (ruling R41-9)."""
+    from hermes_cli.backup_memory import home_memory_section
     from hermes_cli.doctor import HERMES_HOME
-    try:
-        from hermes_cli.config import _expand_env_vars, read_user_config_raw
-        config_path = (hermes_home if hermes_home is not None else HERMES_HOME) / "config.yaml"
-        config = _expand_env_vars(read_user_config_raw(config_path))
-        with warn_on_error(""):
-            from hermes_cli import managed_scope
-            config = managed_scope.apply_managed_overlay(config)
-        section = config.get("memory") if isinstance(config, dict) else None
-        return section if isinstance(section, dict) else {}
-    except Exception:
-        return {}
+    return home_memory_section(hermes_home if hermes_home is not None else HERMES_HOME)
 
 
 # state.db size threshold — advisory only; deliberately a module constant, not config (doctor warnings are guidance, not policy).

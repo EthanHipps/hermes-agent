@@ -42,19 +42,19 @@ def _ensure_directory(path: Path, *, create: bool, secure: bool) -> None:
 
 def initialize_home(home: Path, subdirs: tuple[str, ...], ensured: set[str]) -> None:
     from agent.memory_service.bootstrap import requests_authoritative_mode
-    from hermes_cli.config import _ensure_default_soul_md, _expand_env_vars, is_managed, read_raw_config
-    from hermes_cli.managed_scope import apply_managed_overlay
+    from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.config import _ensure_default_soul_md, is_managed
 
     managed = is_managed()
     old_umask = os.umask(0o007) if managed else None
     try:
         _ensure_directory(home, create=not managed, secure=not managed)
         required = ("cron", "sessions", "logs", "memories") if managed else subdirs
-        # load_config calls us before reading settings, so use its raw reader
-        # plus expansion/managed overlay without recursing into load_config.
-        # Invalid provider settings must not revive the native memory skeleton.
-        config = apply_managed_overlay(_expand_env_vars(read_raw_config()))
-        if requests_authoritative_mode(config):
+        # load_config calls us before reading settings, so use the archive/doctor pipeline (raw read,
+        # expansion, tolerant managed overlay; never load_config). Invalid provider settings, and an
+        # unparseable config.yaml with a last-known-good copy, must not revive the native memory
+        # skeleton (rulings R41-9, R41-10).
+        if requests_authoritative_mode({"memory": home_memory_section(home)}):
             required = tuple(subdir for subdir in required if subdir != "memories")
         for subdir in required:
             _ensure_directory(home / subdir, create=not managed, secure=not managed)
