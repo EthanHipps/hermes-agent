@@ -270,8 +270,12 @@ class AIAgent(
         checkpoint_max_total_size_mb: int = 500, checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False, requested_provider: str = None,
         capabilities: Dict[str, bool] | None = None,
+        memory_service: Any = None,
     ):
-        """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
+        """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``).
+
+        ``memory_service``: an explicit provider-managed MemoryService (R43, C6b-7); ``None`` keeps the normal resolution.
+        """
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
         if tool_delay is not None:
             warnings.warn("tool_delay is deprecated and ignored; sequential tool calls "

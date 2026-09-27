@@ -1,0 +1,160 @@
+"""S6 inventory suite C (§13.1 L2211; §14.1 row 43 L2313): background review, /btw, cron-platform agents,
+delegated children and memory-less workers receive MemoryService only as an explicit dependency
+(§9.7 L1610, L1613, L1625; §9.6 L1585; contract C6b-7)."""
+
+import json
+import os
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
+
+import pytest
+import yaml
+
+from agent.memory_service import wire as w
+from agent.memory_service.host_state import host_state_dir
+from agent.memory_service.service import MemoryDisposition
+from agent.memory_service.view import (LimitedMemoryView, UnboundMemoryService, capture_parent_memory,
+                                       is_injected, open_fork_view)
+from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
+from tests.agent.memory_service.native_sentinel import native_memory_sentinel
+
+REPO = w.ScopeRef(kind="repository", id="repo-1")
+ADD = {"action": "add", "target": "memory", "content": "uses pnpm"}
+
+
+def _tool_defs(*names):
+    return [{"type": "function", "function": {"name": n, "description": f"{n} tool",
+                                              "parameters": {"type": "object", "properties": {}}}} for n in names]
+
+
+@contextmanager
+def _construction_patches(*tools):
+    with patch("model_tools.get_tool_definitions", return_value=_tool_defs(*tools)), \
+         patch("model_tools.check_toolset_requirements", return_value={}), \
+         patch("agent.process_bootstrap.OpenAI"):
+        yield
+
+
+def _native_dir():
+    from tools.memory_tool import get_memory_dir
+    return get_memory_dir()
+
+
+def _records():
+    root = host_state_dir()
+    return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.glob("*.json")} if root.exists() else {}
+
+
+@contextmanager
+def _origin(origin="background_review", attended=False):
+    from tools.skill_provenance import (reset_current_write_origin, reset_review_attended,
+                                        set_current_write_origin, set_review_attended)
+    t_origin, t_att = set_current_write_origin(origin), set_review_attended(attended)
+    try:
+        yield
+    finally:
+        reset_review_attended(t_att)
+        reset_current_write_origin(t_origin)
+
+
+class Env:
+    def __init__(self, tmp_path, monkeypatch, *, additive=False, **memory_extra):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.chdir(repo)
+        self.store = FakeProviderStore(registry=FakeRegistry(
+            directories={os.path.realpath(os.getcwd()): ("repo-1", "proj-1", None)}))
+        self.backends, self.factory_calls = [], 0
+        monkeypatch.setattr("plugins.memory.load_authoritative_backend_factory", lambda name: self._factory)
+        exe = tmp_path / "provider.exe"
+        exe.write_bytes(b"MZ")
+        self.memory = dict(memory_extra) if additive else {
+            "provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe),
+            "principal_id": "ethan", **memory_extra}
+        from hermes_constants import get_hermes_home
+        config_path = get_hermes_home() / "config.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(yaml.safe_dump({"memory": self.memory}), encoding="utf-8")
+        from hermes_state import SessionDB
+        self.db = SessionDB(db_path=tmp_path / "state.db")
+
+    def _factory(self, cfg):
+        self.factory_calls += 1
+        self.backends.append(FakeAuthoritativeBackend(self.store, provider=cfg.provider))
+        return self.backends[-1]
+
+    def count(self, op):
+        return sum(b.count(op) for b in self.backends)
+
+    def agent(self, session_id="parent-1", *, tools=("memory", "web_search"), **kwargs):
+        from run_agent import AIAgent
+        kwargs.setdefault("enabled_toolsets", ["memory"])
+        with _construction_patches(*tools):
+            agent = AIAgent(api_key="test-key-1234567890", base_url="https://openrouter.ai/api/v1", quiet_mode=True,
+                            skip_context_files=True, session_id=session_id, session_db=self.db, **kwargs)
+        agent.client = MagicMock()
+        agent._use_prompt_caching = agent.save_trajectories = agent.compression_enabled = False
+        return agent
+
+    def fork(self, parent, **kwargs):
+        from agent.background_review import build_cache_parity_fork
+        with _construction_patches("memory", "web_search"):
+            fork, _rt, _routed = build_cache_parity_fork(parent, {}, max_iterations=2, **kwargs)
+        return fork
+
+
+# ---- A. the seam (Task 3) -------------------------------------------------------------------------
+
+def test_injected_service_is_installed_without_resolving_anything(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    view = open_fork_view(capture_parent_memory(parent), surface="background_review")
+    binds, calls, records = env.count("bind_session"), env.factory_calls, _records()
+    with native_memory_sentinel(_native_dir()) as sentinel:
+        agent = env.agent("injected-1", memory_service=view)
+    sentinel.assert_untouched()
+    assert agent._memory_service is view and is_injected(agent)
+    assert agent._memory_store is None and agent._memory_manager is None
+    assert env.count("bind_session") == binds and env.factory_calls == calls and _records() == records
+
+
+def test_a_builtin_service_cannot_be_injected(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch, additive=True)
+    additive = env.agent("additive-1")
+    with pytest.raises(ValueError):
+        env.agent("injected-2", memory_service=additive._memory_service)
+
+
+def test_an_injected_service_is_never_re_resolved_or_recorded(tmp_path, monkeypatch):
+    from agent.memory_service.lifecycle import follow_session_binding, record_curated_prompt
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    view = open_fork_view(capture_parent_memory(parent), surface="background_review")
+    agent = env.agent("injected-3", memory_service=view)
+    agent.session_id = parent.session_id                    # a fork shares the parent's session id
+    calls, records = env.factory_calls, _records()
+    follow_session_binding(agent)
+    record_curated_prompt(agent, "a fork's own prompt")
+    assert agent._memory_service is view and agent._memory_session_key == parent.session_id
+    assert env.factory_calls == calls and _records() == records   # the parent's record is untouched
+
+
+def test_a_cron_platform_agent_without_a_service_is_rejected_before_provider_contact(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    with native_memory_sentinel(_native_dir()) as sentinel:
+        agent = env.agent("cron_job_1_20260927_000000", platform="cron")
+    sentinel.assert_untouched()
+    assert isinstance(agent._memory_service, UnboundMemoryService)
+    assert env.factory_calls == 0 and _records() == {}
+
+
+def test_a_provider_managed_agent_reads_the_configured_review_cadence(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch, nudge_interval=3)
+    assert env.agent()._memory_nudge_interval == 3
+
+
+def test_additive_init_is_unchanged(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch, additive=True, memory_enabled=True, user_profile_enabled=True)
+    agent = env.agent("additive-2")
+    assert agent._memory_service.disposition is MemoryDisposition.BUILTIN and not is_injected(agent)
+    assert agent._memory_store is not None and env.factory_calls == 0

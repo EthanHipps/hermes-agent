@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -170,3 +171,24 @@ def open_fork_view(parent: ParentMemory, *, surface: str,
         raise MemoryBlockedError("could not open a memory view for this background surface",
                                  code=getattr(exc, "code", None) or "view_unavailable") from None
     return LimitedMemoryView(inner, surface=surface, mutations=surface in _MUTATING_SURFACES)
+
+
+def install_injected_service(agent: Any, service: MemoryService, agent_cfg: Any) -> None:
+    """Ruling R43-1: install an explicit dependency; nothing is resolved, bound, built or recorded."""
+    if not is_provider_managed(service):
+        raise ValueError("memory_service= accepts only a provider-managed (authoritative or stateless) MemoryService")
+    agent._memory_service = service
+    setattr(agent, _INJECTED_ATTR, True)
+    agent._memory_session_key = getattr(agent, "session_id", None)
+    agent._memory_boot_config = agent_cfg
+
+
+def is_injected(agent: Any) -> bool:
+    return bool(getattr(agent, _INJECTED_ATTR, False))
+
+
+def release_injected_service(agent: Any) -> None:
+    """Close an injected service's transport; idempotent, a no-op for anything else."""
+    if is_injected(agent):
+        with suppress(Exception):
+            agent._memory_service.shutdown()

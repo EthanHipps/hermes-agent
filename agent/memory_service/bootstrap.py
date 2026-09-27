@@ -198,6 +198,11 @@ def init_memory_service(
     from agent.memory_service.errors import MemoryBlockedError
     from agent.memory_service.host_state import HostStateRecord, save_host_state
     from agent.memory_service.service import FailurePolicy, StatelessMemoryService
+    from agent.memory_service.view import UNBOUND_PLATFORMS, UnboundMemoryService
+    if platform in UNBOUND_PLATFORMS:
+        # Ruling R43-8 (§9.6 L1585, §9.3 L1229): a scheduled or delegated agent with no explicit
+        # service never binds for itself — rejected before any provider contact, with no record.
+        return UnboundMemoryService(config, surface=platform), None
 
     binding = (
         resolve_session_binding(logical_session_id, session_db=session_db)
