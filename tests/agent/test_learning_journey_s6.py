@@ -104,19 +104,17 @@ def test_additive_graph_is_unchanged(tmp_path):
 # -- detail, edit and delete by stable entry ID (rulings R42-1, R42-6, R42-7) ------------------------------
 
 
-@pytest.mark.parametrize("pick", [0, 1])
-def test_edit_supersedes_exactly_the_addressed_record(env, pick):
-    # Identical text: ID addressing, not first-wins (R38-6). Each of the two records is addressed once, so
-    # whichever sorts first in the snapshot, one case addresses the second-listed record.
-    pair = [env.store.seed_record(REPO, "memory", "same text") for _ in range(2)]
-    addressed, other = pair[pick], pair[1 - pick]
+def test_edit_supersedes_exactly_the_addressed_record(env):
+    for _ in range(2):
+        env.store.seed_record(REPO, "memory", "same text")           # identical text: ID addressing, not first-wins (R38-6)
+    # Address the entry the snapshot lists second, so a first-equal-text match can never pass.
+    other, addressed = [c["entry_id"] for c in learning_graph.build_learning_graph(memory_context=REPO_CTX)["memory"]]
     before = _native_state(env.native)
     with native_memory_sentinel(env.native) as sentinel:
-        out = lm.edit_node(f"memory:memory:{addressed.id}", "renamed", memory_context=REPO_CTX)
+        out = lm.edit_node(f"memory:memory:{addressed}", "renamed", memory_context=REPO_CTX)
     sentinel.assert_untouched()
     assert out["ok"] is True
-    assert env.store.records[other.id].lifecycle == "active"
-    assert env.store.records[addressed.id].lifecycle == "superseded"
+    assert env.store.records[other].lifecycle == "active" and env.store.records[addressed].lifecycle == "superseded"
     assert sorted(r.text for r in env.store.records_for(REPO, "memory")) == ["renamed", "same text"]
     assert _native_state(env.native) == before
 
