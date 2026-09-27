@@ -26,7 +26,7 @@ from hermes_cli.config import get_config_path, get_env_path
 from hermes_constants import get_process_hermes_home, profile_name_for_home
 from hermes_cli.web_models import CuratorPause, LearningNodeRef, LearningNodeEdit, DebugShareRequest
 from hermes_cli.web_routers._common import scoped_to_thread
-from hermes_cli.web_server_memory import admin_context_or_400
+from hermes_cli.web_server_memory import admin_context_or_400, rest_disposition
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -724,8 +724,13 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
         _log.exception("debug share failed")
         raise HTTPException(status_code=500, detail=f"Failed: {exc}")
 
-    return {"ok": True, "urls": result.urls, "failures": result.failures,
-            "redacted": result.redacted, "auto_delete_seconds": result.auto_delete_seconds}
+    response = {"ok": True, "urls": result.urls, "failures": result.failures,
+                "redacted": result.redacted, "auto_delete_seconds": result.auto_delete_seconds}
+    # Ruling R42-10 (ledger R44-11): the live home's typed §9.8 disposition, authoritative homes only.
+    curated = await asyncio.to_thread(rest_disposition, get_hermes_home(), kind="diagnostic bundle")
+    if curated is not None:
+        response["curated_memory"] = curated
+    return response
 
 
 @logs_router.get("/api/logs")

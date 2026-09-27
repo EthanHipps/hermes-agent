@@ -26,6 +26,7 @@ from hermes_cli.web_server_files import _path_is_under
 from hermes_cli.web_server_gateway import _restart_gateway_after
 from hermes_cli.web_server_memory import (
     _normalize_memory_provider_name, _require_memory_provider_ready, curated_memory_status, curated_reset,
+    rest_archive_dispositions,
 )
 from hermes_cli.web_models import (
     BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
@@ -546,6 +547,10 @@ async def run_backup(body: BackupRequest):
     response = _spawn_action(["backup", "-o", output], "backup", log_msg="Failed to spawn backup", prefix="Failed to run backup")
     if archive is not None:
         response["archive"] = str(archive)
+    # Ruling R42-10 (ledger R44-11): per-home typed dispositions; completion is the spawned child's to report.
+    curated = await asyncio.to_thread(rest_archive_dispositions)
+    if curated is not None:
+        response["curated_memory"] = curated
     return response
 
 
@@ -569,6 +574,8 @@ async def download_dashboard_backup(archive: str):
 
 
 def _spawn_import(archive: str, force: bool) -> dict:
+    # No typed curated_memory here (ruling R42-10): each archived home's disposition is known only once the
+    # spawned child reads the archive; R44 prints it in the action log.
     args = ["import", archive]
     if force:
         args.append("--force")

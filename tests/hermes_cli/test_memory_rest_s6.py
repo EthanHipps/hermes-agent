@@ -1,5 +1,6 @@
 """S6 inventory suite B part 3: desktop/web memory status, reset and journey REST (§9.7 L1607-L1609)."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -135,3 +136,104 @@ def test_journey_rest_routes_by_stable_id(env):
     assert client.get("/api/learning/graph", params={"repo_id": "a\nb"}).status_code == 400
     new_id = next(x.id for x in env.store.records_for(w.ScopeRef(kind="repository", id="repo-1"), "memory"))
     assert client.request("DELETE", "/api/learning/node", json={"id": f"memory:memory:{new_id}", **ctx}).status_code == 200
+
+
+# -- typed disposition fields on REST archive routes (ruling R42-10; ledger R44-11) -----------------------
+
+
+@pytest.fixture
+def profile_env(tmp_path, monkeypatch):
+    """Path.home() and HERMES_HOME both redirected (root AGENTS.md, Testing)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    default_home = tmp_path / ".hermes"
+    default_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    return tmp_path
+
+
+def _profile_like(home: Path, *, provider=None) -> Path:
+    """Write a config.yaml into an arbitrary home directory, plus dormant native memory files."""
+    home.mkdir(parents=True, exist_ok=True)
+    if provider:
+        exe = home.parent / f"{home.name}-provider.exe"
+        exe.write_bytes(b"MZ")
+        (home / "config.yaml").write_text(yaml.safe_dump({"memory": {
+            "provider": provider, "provider_mode": "authoritative", "provider_executable": str(exe),
+            "principal_id": "ethan"}}), encoding="utf-8")
+    else:
+        (home / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    native = home / "memories"
+    native.mkdir(exist_ok=True)
+    (native / "MEMORY.md").write_text(f"{POISON} memory", encoding="utf-8")
+    return home
+
+
+def _mapping(home: Path) -> dict:
+    return archive_disposition(yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))).as_mapping()
+
+
+def test_profile_export_carries_the_typed_disposition(profile_env):
+    coder = _profile_like(profile_env / ".hermes" / "profiles" / "coder", provider="example")
+    _profile_like(profile_env / ".hermes" / "profiles" / "plain")
+    client = _client()
+    with native_memory_sentinel(coder / "memories") as sentinel:
+        body = client.post("/api/profiles/coder/export", json={"output": str(profile_env / "coder.tar.gz")}).json()
+    sentinel.assert_untouched()
+    assert {k: body["curated_memory"][k] for k in _mapping(coder)} == _mapping(coder)
+    assert "provider-managed and not included" in body["curated_memory"]["message"]
+    plain = client.post("/api/profiles/plain/export", json={"output": str(profile_env / "plain.tar.gz")}).json()
+    assert plain["ok"] is True and "curated_memory" not in plain
+
+
+def test_profile_import_and_clone_carry_the_restore_or_clone_sentence(profile_env, monkeypatch):
+    import hermes_cli.profiles as profiles_mod
+    imported = _profile_like(profile_env / ".hermes" / "profiles" / "imported", provider="example")
+    cloned = _profile_like(profile_env / ".hermes" / "profiles" / "cloned", provider="example")
+    monkeypatch.setattr(profiles_mod, "import_profile", lambda archive, name=None: imported)
+    monkeypatch.setattr(profiles_mod, "create_profile", lambda **kwargs: cloned)
+    monkeypatch.setattr(profiles_mod, "check_alias_collision", lambda name: "x")
+    monkeypatch.setattr(profiles_mod, "seed_profile_skills", lambda *a, **k: None)
+    monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda *a, **k: None)
+    client = _client()
+    with native_memory_sentinel(imported / "memories") as sentinel:
+        restored = client.post("/api/profiles/import", json={"archive": str(profile_env / "x.tar.gz")}).json()
+    sentinel.assert_untouched()
+    assert {k: restored["curated_memory"][k] for k in _mapping(imported)} == _mapping(imported)
+    assert "was not restored" in restored["curated_memory"]["message"]
+    with native_memory_sentinel(cloned / "memories") as sentinel:
+        clone = client.post("/api/profiles", json={"name": "cloned", "clone_from": "default"}).json()
+    sentinel.assert_untouched()
+    assert {k: clone["curated_memory"][k] for k in _mapping(cloned)} == _mapping(cloned)
+    assert "clone complete" in clone["curated_memory"]["message"]
+
+
+def test_backup_lists_authoritative_homes_without_a_completion_sentence(profile_env, monkeypatch):
+    monkeypatch.setattr("hermes_cli.web_server_gateway._spawn_hermes_action",
+                        lambda argv, name: SimpleNamespace(pid=1))
+    _profile_like(profile_env / ".hermes")
+    coder = _profile_like(profile_env / ".hermes" / "profiles" / "coder", provider="example")
+    client = _client()
+    with native_memory_sentinel(coder / "memories") as sentinel:
+        body = client.post("/api/ops/backup", json={}).json()
+    sentinel.assert_untouched()
+    assert body["curated_memory"] == [{"home": "profiles/coder/", **_mapping(coder)}]
+    _profile_like(coder)                                                           # every home additive now
+    assert "curated_memory" not in client.post("/api/ops/backup", json={}).json()
+
+
+def test_debug_share_carries_the_typed_disposition(profile_env, monkeypatch):
+    import hermes_cli.debug as dbg
+    monkeypatch.setattr(dbg, "upload_to_pastebin", lambda c, expiry_days=7: "https://paste.rs/x")
+    monkeypatch.setattr(dbg, "_schedule_auto_delete", lambda *a, **k: None)
+    monkeypatch.setattr(dbg, "_best_effort_sweep_expired_pastes", lambda: None)
+    monkeypatch.setattr("hermes_cli.dump.run_dump", lambda a: None)
+    home = _profile_like(get_hermes_home(), provider="example")
+    logs = home / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    for name in ("agent.log", "errors.log", "gateway.log"):
+        (logs / name).write_text("line\n", encoding="utf-8")
+    with native_memory_sentinel(home / "memories") as sentinel:
+        body = _client().post("/api/ops/debug-share", json={}).json()
+    sentinel.assert_untouched()
+    assert {k: body["curated_memory"][k] for k in _mapping(home)} == _mapping(home)
+    assert "provider-managed and not included" in body["curated_memory"]["message"]

@@ -469,3 +469,31 @@ def curated_reset(cfg: Any, body: Any) -> Dict[str, Any]:
     status, error = _RESET_FAILURES.get(payload.get("code"), (503, "memory_unavailable"))
     raise HTTPException(status_code=status,
                         detail={**payload, "error": error, "target": target, "scopes": list(body.scopes)})
+
+
+def rest_disposition(home: Path, *, kind: str) -> Optional[Dict[str, Any]]:
+    """The typed §9.8 block plus its L1637 sentence for one Hermes home, or None when additive (R42-10, R44-11).
+
+    Config-only (R44-2): never contacts the provider and never stats native files.
+    """
+    from hermes_cli import backup_memory
+
+    disposition = backup_memory.home_disposition(home)
+    if disposition is None:
+        return None
+    return {**disposition.as_mapping(), "message": backup_memory.disposition_line(home, kind=kind)}
+
+
+def rest_archive_dispositions() -> Optional[List[Dict[str, Any]]]:
+    """Per-home typed blocks for the spawned full backup, or None when every home is additive (R42-10).
+
+    No completion sentence: the spawned child decides completion (R44 prints it in the action log).
+    The homes are the ones ``hermes_cli/backup.py::run_backup`` archives (``get_default_hermes_root``).
+    """
+    from hermes_cli.backup_memory import archive_homes, home_disposition
+    from hermes_constants import get_default_hermes_root
+
+    blocks = [{"home": rel or ".", **disposition.as_mapping()}
+              for rel, home in archive_homes(get_default_hermes_root())
+              if (disposition := home_disposition(home)) is not None]
+    return blocks or None

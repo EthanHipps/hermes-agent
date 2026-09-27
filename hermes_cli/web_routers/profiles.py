@@ -30,6 +30,7 @@ from fastapi import APIRouter, HTTPException, Query
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_config import _apply_main_model_assignment, _normalize_main_model_assignment
 from hermes_cli.web_server_gateway import _strip_session_list_rows
+from hermes_cli.web_server_memory import rest_disposition
 from hermes_cli.web_server_profiles import (
     _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
 )
@@ -704,9 +705,15 @@ async def create_profile_endpoint(body: ProfileCreate):
             fn=lambda: _spawn_install(ident))}
         for ident in ((i or "").strip() for i in body.hub_skills) if ident]
 
-    return {"ok": True, "name": body.name, "path": str(path), "model_set": model_set,
-            "mcp_written": mcp_written, "skills_disabled": skills_disabled,
-            "hub_installs": hub_installs}
+    response = {"ok": True, "name": body.name, "path": str(path), "model_set": model_set,
+                "mcp_written": mcp_written, "skills_disabled": skills_disabled,
+                "hub_installs": hub_installs}
+    if clone:
+        # Ruling R42-10 (ledger R44-11): a clone of an authoritative home carries the typed §9.8 disposition.
+        curated = await run_in_threadpool(rest_disposition, path, kind="clone")
+        if curated is not None:
+            response["curated_memory"] = curated
+    return response
 
 
 @router.get("/api/profiles/active")
@@ -926,7 +933,12 @@ async def export_profile_endpoint(name: str, body: ProfileExport):
     with _profile_errors("POST /api/profiles/%s/export failed", name):
         result = await run_in_threadpool(
             profiles_mod.export_profile, name, output, extra_files=body.extra_files or None)
-    return {"ok": True, "archive": str(result)}
+    response = {"ok": True, "archive": str(result)}
+    # Ruling R42-10 (ledger R44-11): typed §9.8 disposition, authoritative homes only (config read, no stat).
+    curated = await run_in_threadpool(rest_disposition, profiles_mod.get_profile_dir(name), kind="export")
+    if curated is not None:
+        response["curated_memory"] = curated
+    return response
 
 
 @router.post("/api/profiles/import")
@@ -954,7 +966,12 @@ async def import_profile_endpoint(body: ProfileImport):
         desktop_overlay = _best_effort(
             "Reading desktop.json from imported profile %s failed", imported,
             fn=lambda: _read_desktop_overlay(profile_dir))
-    return {"ok": True, "name": imported, "path": str(profile_dir), "desktop": desktop_overlay}
+    response = {"ok": True, "name": imported, "path": str(profile_dir), "desktop": desktop_overlay}
+    # Ruling R42-10 (ledger R44-11): the §9.8 restore disposition, authoritative homes only.
+    curated = await run_in_threadpool(rest_disposition, profile_dir, kind="restore")
+    if curated is not None:
+        response["curated_memory"] = curated
+    return response
 
 
 @router.get("/api/profiles/{name}/desktop-overlay")
