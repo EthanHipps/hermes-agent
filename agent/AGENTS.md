@@ -102,8 +102,8 @@ plugins; `agent/context_engine.py` drives context-engine plugins; `agent/image_g
 image-gen plugins (all in `plugins/AGENTS.md`). `agent/curator.py` + `curator_backup.py` implement
 the skill curator (`skills/AGENTS.md`). Cron agents are built with `skip_memory=False` and
 `platform="cron"` (`cron/scheduler.py::_construct_cron_agent`), so memory — and a configured external
-memory provider — loads as in any other session; in a provider-managed session the memory tool
-refuses cron calls before any load until cron receives an explicit frozen-identity service.
+memory provider — loads as in any other session; in authoritative mode cron instead receives an
+explicit `MemoryService` (`cron/scheduler_memory.py`) and never binds from a directory.
 
 `agent/memory_service/` is the host-owned generic memory service: `agent_init._init_memory`
 selects the router via `bootstrap.init_memory_service` **before** any native `MemoryStore` is
@@ -122,6 +122,21 @@ authority mode, even when provider validation fails. Cold-process tests arm the 
 before imports/config loading. Bootstrap binds to `runtime_cwd.resolve_agent_cwd()` (unless
 an explicit working directory is supplied), and the default agent platform binds as `cli`.
 
+Background and scheduled surfaces receive `MemoryService` as an explicit dependency
+(`AIAgent(memory_service=...)`, `agent/memory_service/view.py`). `_init_memory` then resolves, binds
+and builds nothing, and such a service is never re-resolved and never gets a host-state record. A
+background-review fork and a `/btw` fork get `open_fork_view`: their own transport over the parent's
+persisted frozen identity, captured when the review is spawned (`capture_parent_memory`). The view
+has no bind, recall or continuity and never commits an approval; it is read-only for `/btw` and
+add-only while a review is unattended. Cron (`cron/scheduler_memory.py`) binds one `new_session` per
+run from the operator's `memory.cron_scope` IDs (`resolution_source: explicit_ids`; `{}` =
+principal-global only). With no scope configured it gets `UnboundMemoryService`, which rejects every
+read and write, and `init_memory_service` gives a `cron` or `subagent` agent built without an
+explicit service the same rejection before any provider contact. Delegated children stay memory-less
+(`DELEGATE_BLOCKED_TOOLS`, `skip_memory=True`); a child that ever needs memory must receive
+`open_fork_view` of its parent, never discover one. Gateway hygiene and manual-compression agents are
+compression surfaces and resume the live session's record.
+
 Archives follow the same dormancy: `hermes_cli/backup_memory.py` decides each Hermes home's mode
 from its own config, so an authoritative home's `memories/` is never walked, copied, created or
 restored by backup, export, clone or import; every such archive carries
@@ -137,8 +152,7 @@ dispatches only through `MemoryService`: `inline_tool_executors._memory` passes 
 result into an explicit intent and an ID-based delta; `memory_service/mutation.py::run_curated_mutation`
 loads fresh, stages, commits, replays `version_conflict` with a new request ID and reloads every
 enabled target after a commit. Mutations that need approval fail closed until the approval flow
-lands, and cron and background-review calls are refused before any load until they receive an
-explicit frozen-identity service.
+lands.
 
 In authoritative or stateless mode the system prompt's curated region comes only from
 `agent/memory_service/render.py`, through `lifecycle.curated_prompt_parts` — one structured
