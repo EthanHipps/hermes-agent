@@ -22,6 +22,12 @@ def _cmd_memory_off():
 
 
 def _cmd_memory_reset(args):
+    from hermes_cli.memory_authoritative import authoritative_only_flags, requested_authoritative_config, reset_command
+    if (config := requested_authoritative_config()) is not None:
+        sys.exit(reset_command(config, args))              # always non-zero in wave 6b (R41-1)
+    if flags := authoritative_only_flags(args):
+        print(f"\n  {', '.join(flags)} applies only to authoritative memory. Nothing was reset.\n")
+        sys.exit(2)
     from hermes_constants import get_hermes_home, display_hermes_home
     mem_dir = get_hermes_home() / "memories"
     target = getattr(args, "target", "all")

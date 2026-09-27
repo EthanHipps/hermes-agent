@@ -113,3 +113,39 @@ def off_command(config: Mapping[str, Any]) -> int:
           "  of memory.provider_mode; the dormant MEMORY.md/USER.md are stale and authoritative changes are not\n"
           "  in them. Nothing was changed.\n")
     return 2
+
+
+def authoritative_only_flags(args: Any) -> Tuple[str, ...]:
+    """Flags that mean something only to authoritative memory; additive refuses them (ruling R41-8)."""
+    return ("--scope",) if getattr(args, "scope", None) else ()
+
+
+def reset_command(config: Mapping[str, Any], args: Any) -> int:
+    """§9.7 L1620 in wave 6b: an explicit target and scope, then the mandatory approval (§9.5 L1535), which this
+    version cannot request, so the reset fails closed before any provider contact (rulings R41-1, R41-8; §9.5 L1538).
+    Never a native delete (§9.1 L950). The approved scoped commit is the R41 follow-up's (C6b-5, C6b-2)."""
+    from agent.memory_service.status import format_scope_ref, parse_scope_ref
+    target = getattr(args, "target", "all")
+    if target not in ("memory", "user"):
+        print("\n  Authoritative reset names one target: --target memory or --target user. Nothing was reset.\n")
+        return 2
+    if getattr(args, "yes", False):
+        print("\n  --yes cannot waive the mandatory reset approval (§9.5). Nothing was reset.\n")
+        return 2
+    try:
+        scopes = tuple(parse_scope_ref(s) for s in (getattr(args, "scope", None) or ()))
+    except ValueError as exc:
+        print(f"\n  {exc}. Nothing was reset.\n")
+        return 2
+    if not scopes or len(set(scopes)) != len(scopes):
+        print("\n  Name each scope to reset once with --scope, e.g. --scope repository:<id>. Nothing was reset.\n")
+        return 2
+    try:
+        resolve_memory_service_config(config)
+    except MemoryConfigurationError as exc:
+        print(f"\n  Invalid authoritative memory configuration: {exc}. Nothing was reset.\n")
+        return 1
+    needs = (("target_user",) if target == "user" else ()) + ("reset",)   # §9.3 L1336 order; §9.5 L1532, L1535
+    print(f"\n  Resetting {target} in {', '.join(format_scope_ref(s) for s in scopes)} needs approval "
+          f"({', '.join(needs)}), which this version of Hermes cannot request yet; nothing was staged or changed.\n")
+    return 1

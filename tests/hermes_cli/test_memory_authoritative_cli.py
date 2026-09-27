@@ -130,3 +130,19 @@ def test_dashboard_provider_switch_refuses_in_authoritative_mode(authoritative_e
     before = (path.read_bytes(), path.stat().st_mtime_ns)
     response = client.put("/api/memory/provider", json={"provider": "built-in"})
     assert response.status_code == 409 and (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_reset_of_the_user_target_names_both_approvals_and_refuses(authoritative_env, capsys):
+    """Ruling R41-1/R41-8: the mandatory approvals are named, and nothing contacts the provider."""
+    from hermes_cli.memory_authoritative import reset_command
+    code = reset_command({"memory": authoritative_env.memory},
+                         Namespace(target="user", yes=False, scope=["global:ethan"]))
+    out = capsys.readouterr().out
+    assert code == 1 and "target_user" in out and "reset" in out and "global:ethan" in out
+    assert authoritative_env.backends == []
+
+
+def test_reset_refuses_a_malformed_scope_with_the_encoding_hint(authoritative_env, capsys):
+    from hermes_cli.memory_authoritative import reset_command
+    code = reset_command({"memory": authoritative_env.memory}, Namespace(target="memory", yes=False, scope=["repo:x"]))
+    assert code == 2 and "repository:<id>" in capsys.readouterr().out

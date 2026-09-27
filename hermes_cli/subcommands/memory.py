@@ -33,4 +33,8 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     _reset_parser.add_argument(
         "--target", choices=["all", "memory", "user"], default="all",
         help="Which store to reset: 'all' (default), 'memory', or 'user'")
+    _reset_parser.add_argument(
+        "--scope", action="append", metavar="SCOPE", default=None,
+        help="authoritative only: a scope to reset — global:<principal>, organization:<id>, project:<id> "
+             "or repository:<id>; repeatable")
     memory_parser.set_defaults(func=cmd_memory)

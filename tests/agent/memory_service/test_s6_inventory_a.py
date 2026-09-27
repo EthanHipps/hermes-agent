@@ -438,3 +438,53 @@ def test_hermes_memory_status_setup_off_never_touch_native_memory(authoritative_
         with pytest.raises(SystemExit):
             _cmd_memory_off()
     sentinel.assert_untouched()
+
+
+def _reset_args(**over):
+    base = dict(memory_command="reset", target="memory", yes=False, scope=["repository:repo-1"])
+    return Namespace(**{**base, **over})
+
+
+def _poison(native_dir):
+    native_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("MEMORY.md", "USER.md"):
+        (native_dir / name).write_text(f"dormant {name}\n", encoding="utf-8")
+    return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()}
+
+
+@pytest.mark.parametrize("over,code", [({}, 1), ({"yes": True}, 2), ({"scope": None}, 2), ({"target": "all"}, 2),
+                                       ({"scope": ["repo:x"]}, 2)])
+def test_cli_reset_requires_scope_and_approval_and_deletes_nothing(authoritative_env, native_dir, over, code, capsys):
+    from hermes_cli.main_agent_cmds import cmd_memory
+    _write_config(authoritative_env.memory)
+    before = _poison(native_dir)
+    with native_memory_sentinel(native_dir) as sentinel, pytest.raises(SystemExit) as exited:
+        cmd_memory(_reset_args(**over))
+    sentinel.assert_untouched()
+    assert exited.value.code == code
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
+    assert authoritative_env.backends == []          # no case contacts the provider (R41-1)
+    if not over:
+        out = capsys.readouterr().out
+        assert "reset" in out and "repository:repo-1" in out
+
+
+def test_invalid_authoritative_config_reset_deletes_nothing(authoritative_env, native_dir):
+    from hermes_cli.main_agent_cmds import cmd_memory
+    _write_config({**authoritative_env.memory, "principal_id": ""})
+    before = _poison(native_dir)
+    with native_memory_sentinel(native_dir) as sentinel, pytest.raises(SystemExit) as exited:
+        cmd_memory(_reset_args())
+    sentinel.assert_untouched()
+    assert exited.value.code == 1 and {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
+
+
+def test_additive_reset_refuses_authoritative_flags_and_still_deletes_without_them(tmp_path, native_dir):
+    from hermes_cli.main_agent_cmds import cmd_memory
+    _write_config({"memory_enabled": True})
+    _poison(native_dir)
+    with pytest.raises(SystemExit) as refused:
+        cmd_memory(_reset_args(yes=True))
+    assert refused.value.code == 2 and (native_dir / "MEMORY.md").exists()
+    cmd_memory(Namespace(memory_command="reset", target="memory", yes=True, scope=None))
+    assert not (native_dir / "MEMORY.md").exists() and (native_dir / "USER.md").exists()
