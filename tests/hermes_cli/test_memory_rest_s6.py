@@ -116,3 +116,22 @@ def test_reset_with_the_provider_down_is_503(env):
     env.store.fail_transport("negotiate")
     resp = _client().post("/api/memory/reset", json={"target": "user", "scopes": ["global:ethan"]})
     assert resp.status_code == 503 and resp.json()["detail"]["error"] == "memory_unavailable"
+
+
+# -- journey REST routes take the explicit selector (ruling R42-12) --------------------------------------
+
+
+def test_journey_rest_routes_by_stable_id(env):
+    r = env.store.seed_record(w.ScopeRef(kind="repository", id="repo-1"), "memory", "uses pnpm")
+    ctx, node = {"repo_id": "repo-1", "project_id": "proj-1"}, f"memory:memory:{r.id}"
+    client = _client()
+    with native_memory_sentinel(env.native) as sentinel:
+        graph = client.get("/api/learning/graph", params=ctx).json()
+        detail = client.get("/api/learning/node", params={"id": node, **ctx}).json()
+        edited = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 9", **ctx})
+    sentinel.assert_untouched()
+    assert node in {n["id"] for n in graph["nodes"]} and detail["content"] == "uses pnpm"
+    assert edited.status_code == 200 and env.store.records[r.id].lifecycle == "superseded"
+    assert client.get("/api/learning/graph", params={"repo_id": "a\nb"}).status_code == 400
+    new_id = next(x.id for x in env.store.records_for(w.ScopeRef(kind="repository", id="repo-1"), "memory"))
+    assert client.request("DELETE", "/api/learning/node", json={"id": f"memory:memory:{new_id}", **ctx}).status_code == 200

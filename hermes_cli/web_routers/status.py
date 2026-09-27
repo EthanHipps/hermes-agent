@@ -26,6 +26,7 @@ from hermes_cli.config import get_config_path, get_env_path
 from hermes_constants import get_process_hermes_home, profile_name_for_home
 from hermes_cli.web_models import CuratorPause, LearningNodeRef, LearningNodeEdit, DebugShareRequest
 from hermes_cli.web_routers._common import scoped_to_thread
+from hermes_cli.web_server_memory import admin_context_or_400
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -581,11 +582,17 @@ async def run_curator():
 
 
 @router.get("/api/learning/graph")
-async def get_learning_graph(profile: Optional[str] = None):
-    """Learning graph for the desktop panel: profile-scoped learned skills + memory chunks."""
+async def get_learning_graph(profile: Optional[str] = None, org_id: Optional[str] = None,
+                             project_id: Optional[str] = None, repo_id: Optional[str] = None):
+    """Learning graph for the desktop panel: profile-scoped learned skills + memory chunks.
+
+    ``org_id``/``project_id``/``repo_id`` are the explicit administrative scope for provider-managed
+    memory (ruling R42-12); none means principal-global (R42-4)."""
+    ctx = admin_context_or_400(org_id, project_id, repo_id)
+
     def _run():
         from agent.learning_graph import build_learning_graph
-        return build_learning_graph()
+        return build_learning_graph(memory_context=ctx)
 
     try:
         # _profile_scope takes _SKILLS_PROFILE_LOCK and the graph build reads skills/memories
@@ -606,26 +613,30 @@ async def _learning_mutation(profile: Optional[str], fn, status: int, fallback: 
 
 
 @router.get("/api/learning/node")
-async def get_learning_node(id: str, profile: Optional[str] = None):
+async def get_learning_node(id: str, profile: Optional[str] = None, org_id: Optional[str] = None,
+                            project_id: Optional[str] = None, repo_id: Optional[str] = None):
     """Current content of a journey node (skill SKILL.md or memory chunk), for an edit prefill."""
     from agent.learning_mutations import node_detail
-    return await _learning_mutation(profile, lambda: node_detail(id), 404, "not found")
+    ctx = admin_context_or_400(org_id, project_id, repo_id)
+    return await _learning_mutation(profile, lambda: node_detail(id, memory_context=ctx), 404, "not found")
 
 
 @router.delete("/api/learning/node")
 async def delete_learning_node(body: LearningNodeRef):
     """Delete a journey node — skills are archived (restorable), memories removed."""
     from agent.learning_mutations import delete_node
+    ctx = admin_context_or_400(body.org_id, body.project_id, body.repo_id)
     return await _learning_mutation(
-        body.profile, lambda: delete_node(body.id), 400, "delete failed")
+        body.profile, lambda: delete_node(body.id, memory_context=ctx), 400, "delete failed")
 
 
 @router.put("/api/learning/node")
 async def update_learning_node(body: LearningNodeEdit):
     """Rewrite a journey node's content (SKILL.md or memory chunk)."""
     from agent.learning_mutations import edit_node
+    ctx = admin_context_or_400(body.org_id, body.project_id, body.repo_id)
     return await _learning_mutation(
-        body.profile, lambda: edit_node(body.id, body.content), 400, "edit failed")
+        body.profile, lambda: edit_node(body.id, body.content, memory_context=ctx), 400, "edit failed")
 
 
 # Portal — Nous Portal auth + Tool Gateway routing status (read-only).
