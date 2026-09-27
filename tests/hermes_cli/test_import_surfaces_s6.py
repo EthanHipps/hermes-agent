@@ -253,3 +253,95 @@ def test_without_pyyaml_any_provider_mode_counts_as_authoritative(tmp_path, monk
     (plain / "config.yaml").write_text("model: x\n", encoding="utf-8")
     assert mod._inline_requests_authoritative(auth) is True
     assert mod._inline_requests_authoritative(plain) is False   # no provider_mode key: additive, as at base
+
+
+# --- OpenClaw migration script -------------------------------------------------------------
+
+MEMORY_KINDS = ("memory", "user-profile", "daily-memory")   # the script's native-store option ids
+
+
+def _openclaw_source(root: Path, *, daily: bool = True) -> Path:
+    ws = root / "workspace"
+    ws.mkdir(parents=True)
+    (ws / "MEMORY.md").write_text("# Notes\n\n- prefers tabs over spaces\n", encoding="utf-8")
+    (ws / "USER.md").write_text("- lives in Portland\n", encoding="utf-8")
+    if daily:
+        (ws / "memory").mkdir()
+        (ws / "memory" / "2026-01-01.md").write_text("- shipped the release\n", encoding="utf-8")
+    (ws / "SOUL.md").write_text("You are a careful assistant.\n", encoding="utf-8")
+    return root
+
+
+def _migrator(mod, source, home, report_dir, *, execute):
+    return mod.Migrator(source_root=source, target_root=home, execute=execute, workspace_target=None,
+                        overwrite=False, migrate_secrets=False, output_dir=report_dir)
+
+
+def _by_kind(report):
+    return {i["kind"]: i for i in report["items"]}
+
+
+@pytest.mark.parametrize("execute", [True, False], ids=["execute", "dry_run"])
+@pytest.mark.parametrize("variant", sorted(VARIANTS))
+def test_authoritative_openclaw_migration_never_touches_native_memory(env, tmp_path, provider_calls, execute, variant):
+    mod = _load_script()
+    home = _authoritative(env, **VARIANTS[variant])
+    native = _dormant(home)
+    before = _snapshot(native)
+    report_dir = tmp_path / "report"
+    with native_memory_sentinel(native) as sentinel:
+        report = _migrator(mod, _openclaw_source(tmp_path / ".openclaw"), home, report_dir, execute=execute).migrate()
+    sentinel.assert_untouched()
+    assert _snapshot(native) == before
+    assert provider_calls == [] and not (home / "migrations").exists()
+    items = _by_kind(report)
+    for kind in MEMORY_KINDS:
+        assert (items[kind]["status"], items[kind]["reason"], items[kind]["destination"]) == (
+            mod.STATUS_SKIPPED, mod.REASON_PROVIDER_MANAGED_MEMORY, None)
+    assert items["soul"]["status"] == mod.STATUS_MIGRATED          # ruling R46-2
+    assert not (report_dir / "overflow").exists()
+
+
+def test_authoritative_openclaw_migration_never_creates_the_native_directory(env, tmp_path, provider_calls):
+    mod = _load_script()
+    home = _authoritative(env)
+    native = home / "memories"
+    with native_memory_sentinel(native) as sentinel:
+        _migrator(mod, _openclaw_source(tmp_path / ".openclaw"), home, tmp_path / "report", execute=True).migrate()
+    sentinel.assert_untouched()
+    assert not native.exists()
+
+
+def test_hermes_claw_migrate_path_skips_memory_in_authoritative_mode(env, tmp_path, provider_calls):
+    """The in-process loader ``hermes claw migrate`` uses (the setup wizard builds the same Migrator)."""
+    from hermes_cli import claw
+
+    home = _authoritative(env)
+    native = _dormant(home)
+    before = _snapshot(native)
+    opts = SimpleNamespace(source_dir=_openclaw_source(tmp_path / ".openclaw"), hermes_home=home, preset="full",
+                           workspace_target=None, overwrite=False, migrate_secrets=False, skill_conflict="skip")
+    run = claw._load_migrator(SCRIPT_PATH, opts)
+    with native_memory_sentinel(native) as sentinel:
+        report = run(True)
+    sentinel.assert_untouched()
+    assert _snapshot(native) == before
+    items = _by_kind(report)
+    assert [items[kind]["status"] for kind in MEMORY_KINDS] == ["skipped"] * 3
+
+
+def test_additive_openclaw_migration_still_writes_native_memory(env, tmp_path):
+    """Additive freeze (§9.10 L1674).
+
+    No daily-memory source: merging a second option into the MEMORY.md this run just wrote backs
+    it up under a mirror of its absolute path, which exceeds Windows MAX_PATH under the canonical
+    runner's temp root (a pre-existing, mode-independent limit of ``backup_existing``).
+    """
+    mod = _load_script()
+    home = _additive(env)
+    source = _openclaw_source(tmp_path / ".openclaw", daily=False)
+    report = _migrator(mod, source, home, tmp_path / "report", execute=True).migrate()
+    items = _by_kind(report)
+    assert (items["memory"]["status"], items["user-profile"]["status"]) == (mod.STATUS_MIGRATED,) * 2
+    assert "prefers tabs over spaces" in (home / "memories" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "lives in Portland" in (home / "memories" / "USER.md").read_text(encoding="utf-8")

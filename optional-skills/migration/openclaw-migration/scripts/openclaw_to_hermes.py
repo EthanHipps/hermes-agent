@@ -941,6 +941,9 @@ class Migrator:
                 + ", ".join(sorted(SKILL_CONFLICT_MODES))
             )
 
+        # §9.7 "OpenClaw migration script": decided once, for the TARGET home (rulings R46-3, R46-4).
+        self.memory_provider_managed = target_requests_authoritative_memory(self.target_root)
+
     def is_selected(self, option_id: str) -> bool:
         return option_id in self.selected_options
 
@@ -1125,6 +1128,13 @@ class Migrator:
         if not self.is_selected(option_id):
             meta = MIGRATION_OPTION_METADATA[option_id]
             self.record(option_id, None, None, "skipped", "Not selected for this run", option_label=meta["label"])
+            return
+        if option_id in MEMORY_OPTION_IDS and self.memory_provider_managed:
+            # §9.1 L950: memories/ is never stat'd, read or written in an authoritative home, not even
+            # for a dry-run preview (rulings R46-1, R46-7).
+            meta = MIGRATION_OPTION_METADATA[option_id]
+            self.record(option_id, None, None, STATUS_SKIPPED, REASON_PROVIDER_MANAGED_MEMORY,
+                        option_label=meta["label"])
             return
         # If a previous config.yaml write hit a conflict/error during apply,
         # skip remaining config-mutating options rather than risk a partial
