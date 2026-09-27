@@ -161,3 +161,114 @@ def test_native_pending_records_stay_dormant(env, native_dir):
     sentinel.assert_untouched()
     assert _tree(_home() / "pending") == before and [r["id"] for r in wa.list_pending(wa.MEMORY)] == [native["id"]]
     assert not any("native body" in out for out in outputs)
+
+
+def test_an_approval_required_write_waits_as_a_handle_only_record(env, native_dir):
+    agent = _agent(env.memory)
+    with native_memory_sentinel(native_dir) as sentinel:
+        out = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))
+    sentinel.assert_untouched()
+    assert out["success"] is True and out["staged"] is True and out["approval_required"] == ["target_user"]
+    assert wa.list_pending(wa.MEMORY) == []
+    [(pid, record)] = list_pending_approvals()
+    assert pid == out["pending_id"] and record.decision == "pending" and record.session_id == agent.session_id
+    raw = (approvals_dir() / f"{pid}.json").read_bytes()
+    assert b"prefers terse replies" not in raw
+    assert all(h.canonical_sha256.encode() not in raw
+               for h in env.store.stages[record.stage_handle_b64url].result.candidate_hashes)
+    assert _calls(env, "inspect_staged") == [] and _calls(env, "commit_curated") == []   # ruling R39-6
+
+
+@pytest.mark.parametrize("site", ["sequential", "concurrent"])
+def test_inline_approval_commits_the_inspected_stage_at_both_dispatch_sites(env, native_dir, answer, site):
+    agent = _agent(env.memory)
+    seen = answer("once")
+    with native_memory_sentinel(native_dir) as sentinel:
+        out = _dispatch(agent, site, USER_ADD)
+    sentinel.assert_untouched()
+    assert out["success"] is True and sorted(r.text for r in env.store.records_for(GLOBAL, "user")) == ["prefers terse replies"]
+    command, description = seen[-1]
+    assert "prefers terse replies" in command and "target_user" in command and "Save to memory" in description
+    [commit] = _calls(env, "commit_curated")
+    assert len(_calls(env, "inspect_staged")) == 1 and commit.authorization.kind == "approved"
+    assert commit.authorization.approved_by_principal_id == "ethan"
+    assert commit.authorization.approval_binding_sha256 == commit.approval_binding_sha256
+    assert list_pending_approvals() == []                           # the write-ahead record was settled
+
+
+def test_inline_denial_drops_the_handle_and_persists_nothing(env, native_dir, answer):
+    agent = _agent(env.memory)
+    answer("deny")
+    before = _sinks()
+    with native_memory_sentinel(native_dir) as sentinel:
+        out = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))
+    sentinel.assert_untouched()
+    assert out["success"] is False and "denied" in out["error"]
+    assert _sinks() == before and not approvals_dir().exists()
+    assert _calls(env, "commit_curated") == [] and env.store.records_for(GLOBAL, "user") == []
+
+
+def test_an_unknown_outcome_is_reported_until_a_typed_outcome(env, native_dir):
+    agent = _agent(env.memory)
+    pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
+    env.store.fail_transport("commit_curated", phase="after_publish", times=2)
+    first = handle_pending_subcommand(wa.MEMORY, ["approve", pid])
+    assert "did not confirm" in first and load_pending_approval(pid).outcome == "unknown"
+    assert handle_pending_subcommand(wa.MEMORY, ["approve", pid]) == f"{pid}: approved and saved."
+    commits = [w.canonical_json(c.to_wire()) for c in _calls(env, "commit_curated")]
+    assert len(commits) == 3 and len(set(commits)) == 1            # §9.5 L1562: only the identical request
+    assert list_pending_approvals() == []
+
+
+def test_an_expired_stage_is_reported_and_dropped_on_review(env, native_dir):
+    agent = _agent(env.memory)
+    json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))
+    env.store.clock.advance(3601)
+    listing = handle_pending_subcommand(wa.MEMORY, ["pending"])
+    assert "expired before approval; nothing was saved" in listing and list_pending_approvals() == []
+
+
+def test_reject_persists_nothing_and_calls_no_provider(env, native_dir):
+    agent = _agent(env.memory)
+    pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
+    views = len(env.backends)
+    assert handle_pending_subcommand(wa.MEMORY, ["reject", pid]) == f"Rejected pending memory write '{pid}'. Nothing was saved."
+    assert len(env.backends) == views and list_pending_approvals() == [] and _calls(env, "commit_curated") == []
+
+
+def test_a_mandatory_approval_fails_closed_without_any_channel(env, native_dir):
+    """No inline callback and no persisted session to wait under: refused before staging (§9.5 L1538)."""
+    agent = _agent(env.memory)
+    stages = len(_calls(env, "stage_curated"))
+    out = json.loads(memory_tool(**USER_ADD, service=agent._memory_service, budget=ConsolidationBudget()))
+    assert out["success"] is False and out["approval_required"] == ["target_user"]
+    assert len(_calls(env, "stage_curated")) == stages and list_pending_approvals() == []
+
+
+def test_write_approval_adds_a_requirement_and_an_unrecognized_value_counts_as_on(env, native_dir):
+    agent = _agent({**env.memory, "write_approval": "maybe"})
+    out = json.loads(agent._invoke_tool("memory", MEMORY_ADD, "task-1"))
+    assert out["staged"] is True and out["approval_required"] == ["memory.write_approval"]
+
+
+def test_write_approval_off_never_removes_a_mandatory_approval(env, native_dir):
+    agent = _agent({**env.memory, "write_approval": False})
+    out = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))
+    assert out["staged"] is True and out["approval_required"] == ["target_user"]
+
+
+def test_no_provider_token_reaches_the_model_or_the_ui(env, native_dir, answer):
+    """§9.3 L987 / D-R39-3."""
+    agent = _agent(env.memory)
+    tool_out = agent._invoke_tool("memory", USER_ADD, "task-1")
+    pid = json.loads(tool_out)["pending_id"]
+    record = load_pending_approval(pid)
+    listing = handle_pending_subcommand(wa.MEMORY, ["pending"])
+    approved = handle_pending_subcommand(wa.MEMORY, ["approve", pid])
+    seen = answer("once")
+    inline_out = agent._invoke_tool("memory", {"action": "add", "target": "user", "content": "likes tea"}, "task-2")
+    handle = agent._memory_service.identity.opaque_binding_b64url
+    tokens = {record.stage_handle_b64url, record.approval_binding_sha256, record.request_id, EPOCH, handle,
+              env.store.token_for(handle, "user")} | {c.authorization.approval_id for c in _calls(env, "commit_curated")}
+    surfaces = [tool_out, listing, approved, inline_out] + [c + d for c, d in seen]
+    assert not any(token and token in text for token in tokens for text in surfaces)
