@@ -336,3 +336,34 @@ def test_a_stateless_fork_gets_no_memory_in_its_whitelist(tmp_path, monkeypatch)
     env.store.fail_transport("negotiate")
     whitelist, _ = _review_tool_whitelist(env.fork(env.agent()), None, review_memory=True)
     assert "memory" not in whitelist
+
+
+# ---- D. delegation and memory-less workers (Task 7) -----------------------------------------------
+
+def test_a_delegate_child_touches_no_memory(tmp_path, monkeypatch):
+    """Ruling R43-9 (a): children stay memory-less; R40-4b's resolver never inherits via _delegate_from."""
+    from tools import delegate_tool as dt
+    import tools.delegate_tool_config as dtc
+    env = Env(tmp_path, monkeypatch)
+    monkeypatch.setattr(dt, "_load_config", lambda: {})
+    monkeypatch.setattr(dtc, "_load_config", lambda: {})
+    parent = env.agent(enabled_toolsets=["memory", "file"], tools=("memory", "read_file"))
+    counts = {op: env.count(op) for op in ("negotiate", "bind_session", "validate_session", "load_curated")}
+    records = _records()
+    with native_memory_sentinel(_native_dir()) as sentinel, _construction_patches("read_file"):
+        child = dt._build_child_agent(task_index=0, goal="goal", context=None, toolsets=["file"], model=None,
+                                      max_iterations=4, task_count=1, parent_agent=parent)
+    sentinel.assert_untouched()
+    try:
+        assert child._memory_service is None and child._memory_store is None and not is_injected(child)
+        assert "memory" not in (child.valid_tool_names or set())
+        assert {op: env.count(op) for op in counts} == counts and _records() == records
+    finally:
+        child.close()
+
+
+def test_a_skip_memory_worker_agent_has_no_service(tmp_path, monkeypatch):
+    """Curator, batch and Feishu comment agents: skip_memory=True with no memory toolset (R43-11)."""
+    env = Env(tmp_path, monkeypatch)
+    worker = env.agent("worker-1", platform="curator", skip_memory=True, enabled_toolsets=["skills"], tools=("skills_list",))
+    assert worker._memory_service is None and env.factory_calls == 0 and _records() == {}
