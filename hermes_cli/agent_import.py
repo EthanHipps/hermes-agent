@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
+from hermes_cli.backup_memory import home_disposition
 from utils import atomic_write_text, atomic_yaml_write
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,12 @@ MEMORY_CHAR_LIMIT = 20_000
 SUPPORTED_AGENTS = ("claude-code", "codex")
 _AGENT_DEFAULT_DIRS = {"claude-code": ".claude", "codex": ".codex"}
 _SKILL_CATEGORY = {"claude-code": "claude-code-imports", "codex": "codex-imports"}
+# Recorded instead of a memory import when the TARGET home requests authoritative mode (§9.7
+# "Agent import", §9.1 L950: MEMORY.md is never read or written there, not even for a preview).
+# Content-free: it names no path, entry or provider (rulings R46-1, R46-7).
+PROVIDER_MANAGED_MEMORY_REASON = (
+    "Curated memory is provider-managed (memory.provider_mode: authoritative); memory entries "
+    "are not imported and the native memory files stay dormant")
 
 # Env var names that look like credentials — never copied into config.yaml.
 _SECRET_KEY_RE = re.compile(
@@ -245,6 +252,9 @@ class AgentImporter:
         self.overwrite = overwrite
         self.items: List[Dict[str, Any]] = []
         self.stripped_secrets: List[str] = []
+        # Requested mode of the target home, never raising (R44-2/R44-3's predicate, contract
+        # C6b-10; ruling R46-3).
+        self.memory_provider_managed = home_disposition(self.target_root) is not None
 
     def record(self, kind: str, source, destination, status: str,
                reason: str = "", **details) -> None:
@@ -357,10 +367,15 @@ class AgentImporter:
                                missing_reason: str, single_file: bool = False) -> None:
         """Extract entries from ``files`` (None = source missing) and merge into memories/MEMORY.md.
         An unreadable file records an error; a directory import then still reports "no entries"
-        when nothing was extracted, while a single-file import stops at the error."""
+        when nothing was extracted, while a single-file import stops at the error.
+        In a provider-managed home the item is skipped before anything is read (§9.7, R46)."""
         destination = self.target_root / "memories" / "MEMORY.md"
         if files is None:
             self.record(kind, None, destination, "skipped", missing_reason)
+            return
+        if self.memory_provider_managed:
+            # Before any source read and before the destination is stat'd (ruling R46-7).
+            self.record(kind, source, None, "skipped", PROVIDER_MANAGED_MEMORY_REASON)
             return
         incoming: List[str] = []
         failed = False
