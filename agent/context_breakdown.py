@@ -62,6 +62,10 @@ def _split_tools(tools: Sequence[dict]) -> Tuple[List[dict], List[dict], List[di
 
 
 def _memory_blocks(agent: Any) -> Tuple[str, str]:
+    from agent.memory_service.lifecycle import curated_region_text
+    from agent.memory_service.service import is_provider_managed
+    if is_provider_managed(getattr(agent, "_memory_service", None)):
+        return curated_region_text(agent), ""          # ruling R41-12: stripped from the volatile tier below
     memory_block = user_block = ""
     store = getattr(agent, "_memory_store", None)
     try:

@@ -500,3 +500,43 @@ def test_prompt_size_inspection_binds_no_session_and_touches_nothing(authoritati
     sentinel.assert_untouched()
     assert authoritative_env.backends == [] and not (get_hermes_home() / "memory_service").exists()
     assert "provider-managed" in data["curated_memory"]
+
+
+def test_context_breakdown_counts_the_curated_region(authoritative_env):
+    """Ruling R41-12: /context counts the curated region the last prompt build validated; no extra provider call."""
+    from agent.context_breakdown import _chars_to_tokens, compute_session_context_breakdown
+    authoritative_env.store.seed_record(REPO, "memory", "uses pnpm for every workspace package")
+    agent = _agent(authoritative_env.memory, session_id="ctx-1")
+    data = compute_session_context_breakdown(agent, [])
+    render = agent._curated_prompt_render[1]
+    memory = next(c for c in data["categories"] if c["id"] == "memory")
+    assert render.text and memory["tokens"] == _chars_to_tokens(render.text)
+
+
+def _stateless_agent(authoritative_env, session_id):
+    authoritative_env.store.fail_transport("negotiate")
+    return _agent({**authoritative_env.memory, "authoritative_failure_policy": "stateless"}, session_id=session_id)
+
+
+def test_stateless_session_warns_once_per_session(authoritative_env):
+    """Ruling R41-14 (§9.1 L948): the durable degraded-state warning, once per session id at turn start."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+    agent = _stateless_agent(authoritative_env, "st-1")
+    seen = []
+    agent._emit_warning = seen.append
+    ensure_session_binding(agent)
+    ensure_session_binding(agent)
+    assert len(seen) == 1 and "stateless" in seen[0].lower()
+    _no_opaque(seen[0])
+
+
+def test_an_injected_agent_never_emits_the_parent_sessions_stateless_warning(authoritative_env):
+    """C67-14 / C6b-7: an injected fork or cron service's warning belongs to its parent session."""
+    from agent.memory_service.lifecycle import ensure_session_binding
+    agent = _stateless_agent(authoritative_env, "st-2")
+    seen = []
+    agent._emit_warning = seen.append
+    agent._memory_service_injected = True
+    ensure_session_binding(agent)
+    ensure_session_binding(agent)
+    assert seen == []

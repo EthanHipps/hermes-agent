@@ -47,6 +47,7 @@ def ensure_session_binding(agent: Any, conversation_history: Optional[list] = No
     # compaction re-arms the flag (§9.6 L1564, L1573).
     agent._curated_fresh_for_next_request = False
     follow_session_binding(agent)
+    _warn_stateless_once(agent)
 
 
 def follow_session_binding(agent: Any) -> None:
@@ -310,3 +311,33 @@ def memory_guidance_flags(agent: Any) -> Optional[Tuple[bool, bool]]:
         return (False, False)
     service = agent._memory_service
     return (bool(service.target_enabled("memory")), bool(service.target_enabled("user")))
+
+
+def curated_region_text(agent: Any) -> str:
+    """The curated region the last prompt build validated for this identity, or "" (ruling R41-12).
+
+    Read-only accounting for ``/context``; it never loads. A stateless session renders nothing."""
+    if not _managed(agent):
+        return ""
+    prior = getattr(agent, "_curated_prompt_render", None)
+    service = getattr(agent, "_memory_service", None)
+    if prior is None or prior[0] != getattr(service, "identity", None):
+        return ""
+    return prior[1].text or ""
+
+
+def _warn_stateless_once(agent: Any) -> None:
+    """§9.1 L948's durable degraded-state warning, once per session id per agent (ruling R41-14)."""
+    if getattr(agent, "_memory_service_injected", False):   # contract C6b-7: an injected fork/cron service's
+        return                                              # warning belongs to its parent session (R41-14)
+    if _disposition(agent) != "stateless":
+        return
+    session_id = getattr(agent, "session_id", None)
+    if getattr(agent, "_memory_warned_session", None) == session_id:
+        return
+    agent._memory_warned_session = session_id
+    degraded = getattr(agent._memory_service, "degraded_warning", None)   # C1 readers duck-type the service
+    warning = degraded() if callable(degraded) else None
+    emit = getattr(agent, "_emit_warning", None)
+    if warning and callable(emit):
+        emit(warning)
