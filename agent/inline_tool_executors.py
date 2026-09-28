@@ -170,7 +170,8 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
         if refusal is not None:
             return refusal
         return _call_tool("tools.memory_tool", "memory_tool", args, _MEMORY_ARGS,
-                          service=service, budget=_curated_memory_budget(agent))
+                          service=service, budget=_curated_memory_budget(agent),
+                          approval_session_id=getattr(agent, "_memory_session_key", None))  # ruling R39-4
     result = _call_tool("tools.memory_tool", "memory_tool", args, _MEMORY_ARGS, store=agent._memory_store)
     # Mirror built-in memory writes to external providers; gating lives in
     # MemoryManager.notify_memory_tool_write.

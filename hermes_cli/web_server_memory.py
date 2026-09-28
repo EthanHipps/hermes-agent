@@ -401,3 +401,99 @@ def _require_memory_provider_ready(name: str) -> None:
                 f"({row['status'].replace('_', ' ')}). Configure it in the dashboard first."
             ),
         )
+
+
+# -- Provider-managed (authoritative) memory: status, reset, typed dispositions (R42, §9.7 L1607) ----------
+# Every administrative call goes through agent/memory_service/admin.py (contract C6b-5): an explicit
+# administrative identity, never the process directory, and never a native MEMORY.md/USER.md touch.
+
+#: ``payload["code"]`` -> (HTTP status, ``error``) for a refused provider-managed reset; anything else is 503.
+_RESET_FAILURES = {
+    "approval_unavailable": (409, "approval_unavailable"),
+    "unauthorized_scope": (400, "unauthorized_scope"),
+    "invalid_request": (400, "invalid_request"),
+    "configuration_error": (409, "memory_configuration_error"),
+    "target_disabled": (409, "target_disabled"),
+}
+
+
+def admin_context_or_400(org_id: Any, project_id: Any, repo_id: Any):
+    """The explicit administrative context from REST fields; a malformed identifier is a 400."""
+    from agent.memory_service.admin import AdminContext, AdminIdentityError
+
+    try:
+        return AdminContext.from_fields(org_id, project_id, repo_id)
+    except AdminIdentityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def curated_memory_status(cfg: Any) -> Optional[Dict[str, Any]]:
+    """Config-derived provider-managed authority (ruling R42-8), or None in additive mode. No probe, no stat."""
+    from agent.memory_service.admin import authority_report
+
+    return authority_report(cfg)
+
+
+def curated_reset(cfg: Any, body: Any) -> Dict[str, Any]:
+    """A scoped ``reset`` mutation for one target (rulings R42-9, R42-1 final (c)); never deletes a native file.
+
+    Reset is a mandatory approval (§9.5 L1530-L1538), so until the R42 follow-up adopts R39's flow
+    (X6b-4, C6b-9) an eligible reset fails closed with 409 ``approval_unavailable`` before any stage.
+    """
+    from agent.memory_service.admin import (ADMIN_FAILURES, AdminIdentityError, admin_service, outcome_payload,
+                                            parse_scope_selector, plan_reset, unavailable_payload)
+    from agent.memory_service.mutation import run_curated_mutation
+
+    target = (body.target or "all").strip().lower()
+    if target == "all":
+        raise HTTPException(status_code=400, detail=(
+            "Provider-managed memory is reset one target at a time (memory or user), with explicit scopes."))
+    if not body.scopes:
+        raise HTTPException(status_code=400, detail=(
+            "Provider-managed memory reset needs explicit scopes: global:<principal>, organization:<id>, "
+            "project:<id> or repository:<id>."))
+    try:
+        scopes = [parse_scope_selector(text) for text in body.scopes]
+    except AdminIdentityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    context = admin_context_or_400(body.org_id, body.project_id, body.repo_id)
+    try:
+        with admin_service(cfg, context=context) as service:
+            outcome = run_curated_mutation(service, target, lambda snapshot: plan_reset(snapshot, scopes),
+                                           actor_kind="human", initiating_surface="memory.reset")
+        payload = outcome_payload(outcome)
+    except ADMIN_FAILURES as exc:
+        payload = unavailable_payload(exc)
+    if payload.get("ok"):
+        return payload
+    status, error = _RESET_FAILURES.get(payload.get("code"), (503, "memory_unavailable"))
+    raise HTTPException(status_code=status,
+                        detail={**payload, "error": error, "target": target, "scopes": list(body.scopes)})
+
+
+def rest_disposition(home: Path, *, kind: str) -> Optional[Dict[str, Any]]:
+    """The typed §9.8 block plus its L1637 sentence for one Hermes home, or None when additive (R42-10, R44-11).
+
+    Config-only (R44-2): never contacts the provider and never stats native files.
+    """
+    from hermes_cli import backup_memory
+
+    disposition = backup_memory.home_disposition(home)
+    if disposition is None:
+        return None
+    return {**disposition.as_mapping(), "message": backup_memory.disposition_line(home, kind=kind)}
+
+
+def rest_archive_dispositions() -> Optional[List[Dict[str, Any]]]:
+    """Per-home typed blocks for the spawned full backup, or None when every home is additive (R42-10).
+
+    No completion sentence: the spawned child decides completion (R44 prints it in the action log).
+    The homes are the ones ``hermes_cli/backup.py::run_backup`` archives (``get_default_hermes_root``).
+    """
+    from hermes_cli.backup_memory import archive_homes, home_disposition
+    from hermes_constants import get_default_hermes_root
+
+    blocks = [{"home": rel or ".", **disposition.as_mapping()}
+              for rel, home in archive_homes(get_default_hermes_root())
+              if (disposition := home_disposition(home)) is not None]
+    return blocks or None

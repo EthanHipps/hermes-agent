@@ -355,6 +355,12 @@ def _request_relay_metadata(body: Any) -> Dict[str, Any]:
     return dict(metadata)
 
 
+def _has_client_history(history: Any) -> bool:
+    """Did the client send an old conversation (ruling R42-11, C6b-6)? A system or developer prefix
+    alone is instructions, not history; every other item, a non-dict one included, counts."""
+    return any(not isinstance(m, dict) or m.get("role") not in ("system", "developer") for m in history or ())
+
+
 def _is_compressed_summary_message(message: Any) -> bool:
     """Recognize every compaction carrier shape via the compressor's own classifier
     (SessionDB drops the in-process marker; a prefix scan misses merge-into-tail carriers)."""
@@ -2121,11 +2127,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model_options: Optional[Dict[str, Any]] = None, route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[Dict[str, Any]] = None,
-        room_execution_policy: Optional[Dict[str, Any]] = None) -> Any:
+        room_execution_policy: Optional[Dict[str, Any]] = None, has_history: bool = False) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
-        session ``/model`` override, disables the fallback chain and fails closed."""
+        session ``/model`` override, disables the fallback chain and fails closed.
+        ``has_history``: the client sent its own conversation history (contract C6b-6)."""
+        if has_history:  # ruling R42-11: never bind a new logical session into a client-held conversation
+            from agent.memory_service.bootstrap import claim_history_continuation
+            from hermes_cli.config import load_config_readonly
+            claim_history_continuation(load_config_readonly(), session_id or "", has_history=True,
+                                       session_db=self._ensure_session_db())
         from run_agent import AIAgent
         from gateway.run import (
             _checkpoint_agent_kwargs, _current_max_iterations, _resolve_runtime_agent_kwargs,
@@ -3705,7 +3717,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
-                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
+                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
+                        has_history=_has_client_history(conversation_history))
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if active_run_id:

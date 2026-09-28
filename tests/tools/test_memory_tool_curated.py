@@ -289,7 +289,7 @@ def test_user_target_fails_closed_without_staging_or_pending_records(tmp_path, n
 
 def test_write_approval_on_fails_closed(tmp_path, native_dir, monkeypatch):
     from tools import write_approval as wa
-    monkeypatch.setattr("tools.write_approval.write_approval_enabled", lambda subsystem: True)
+    monkeypatch.setattr("tools.write_approval.write_approval_enabled", lambda subsystem, **kw: True)
     service, backend = _service(tmp_path, _provider())
     out = _call(service, action="add", target="memory", content="x")
     assert out["approval_required"] == ["memory.write_approval"]
