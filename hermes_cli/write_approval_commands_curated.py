@@ -25,6 +25,8 @@ _REVIEW_LINE = {
     ReviewState.EXPIRED: "expired before approval; nothing was saved (removed)",
     ReviewState.COMMITTED: "saved (removed from the list)",
     ReviewState.VOID: "can no longer be approved (its memory binding or target is gone); nothing was saved (removed)",
+    ReviewState.VOID_UNCONFIRMED: ("approved, but the result was never confirmed and can no longer be settled (its memory "
+                                   "binding or target is gone); it may have been saved (removed)"),
     ReviewState.UNAVAILABLE: "details unavailable: the memory provider could not be reached",
     ReviewState.UNREADABLE: "unreadable approval record — /memory reject {id} removes it",
 }
@@ -35,6 +37,8 @@ _REPLAY_TEXT = {
     ReplayStatus.CONFLICT: "{id}: memory changed after this was staged, so nothing was saved; ask for the change again.",
     ReplayStatus.REJECTED: "{id}: the memory provider refused the approved change ({code}); nothing was saved.",
     ReplayStatus.VOID: "{id}: this change can no longer be approved ({code}); nothing was saved.",
+    ReplayStatus.VOID_UNCONFIRMED: ("{id}: this approved change can no longer be settled ({code}); its result is "
+                                    "unconfirmed and it may have been saved."),
     ReplayStatus.UNKNOWN: "{id}: the memory provider did not confirm the result; /memory approve {id} retries the identical request.",
     ReplayStatus.UNAVAILABLE: "{id}: the approval was not applied ({code}); the request is kept.",
 }

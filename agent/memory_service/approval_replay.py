@@ -38,6 +38,7 @@ class ReviewState(str, Enum):
     EXPIRED = "expired"
     COMMITTED = "committed"
     VOID = "void"
+    VOID_UNCONFIRMED = "void_unconfirmed"  # an approved record: its commit may have landed (R39-7; correction R-5)
     UNAVAILABLE = "unavailable"
     UNREADABLE = "unreadable"
 
@@ -49,6 +50,7 @@ class ReplayStatus(str, Enum):
     CONFLICT = "conflict"
     REJECTED = "rejected"
     VOID = "void"
+    VOID_UNCONFIRMED = "void_unconfirmed"  # an approved record: its commit may have landed (R39-7; correction R-5)
     UNKNOWN = "unknown"
     UNAVAILABLE = "unavailable"
 
@@ -147,11 +149,12 @@ def _settled_review(exc: ProviderError) -> Optional[ReviewState]:
 
 def _review_one(record: PendingApproval, raw_config: Any, backend_factory) -> PendingReview:
     pid = record.pending_id
+    void = ReviewState.VOID_UNCONFIRMED if record.decision == "approved" else ReviewState.VOID  # §9.5 L1562
     view, status, _ = _open_view(record, raw_config, backend_factory)
     if view is None:
         if status is ReplayStatus.VOID:
             _drop(pid)
-            return PendingReview(pid, ReviewState.VOID, record)
+            return PendingReview(pid, void, record)
         return PendingReview(pid, ReviewState.UNAVAILABLE, record)
     try:
         inspection = _inspect(view, record)
@@ -160,11 +163,11 @@ def _review_one(record: PendingApproval, raw_config: Any, backend_factory) -> Pe
         if state is None:
             return PendingReview(pid, ReviewState.UNAVAILABLE, record)
         _drop(pid)
-        return PendingReview(pid, state, record)
+        return PendingReview(pid, void if state is ReviewState.VOID else state, record)
     except MemoryBlockedError as exc:
         if _voided(exc):
             _drop(pid)
-            return PendingReview(pid, ReviewState.VOID, record)
+            return PendingReview(pid, void, record)
         return PendingReview(pid, ReviewState.UNAVAILABLE, record)
     except (MemoryServiceError, w.WireError):
         return PendingReview(pid, ReviewState.UNAVAILABLE, record)
@@ -172,7 +175,7 @@ def _review_one(record: PendingApproval, raw_config: Any, backend_factory) -> Pe
         view.shutdown()
     if inspection.summary.approval_binding_sha256 != record.approval_binding_sha256:
         _drop(pid)
-        return PendingReview(pid, ReviewState.VOID, record)
+        return PendingReview(pid, void, record)
     text = render_stage_inspection(inspection, intent_kind=record.intent_kind, requirements=record.approval_requirements)
     return PendingReview(pid, ReviewState.AWAITING if record.decision == "pending" else ReviewState.UNKNOWN,
                          record, text)
@@ -213,6 +216,8 @@ def _settle(record: PendingApproval, exc: ProviderError) -> ReplayReport:
 
 def _replay_on(view, record: PendingApproval, clock: Callable[[], datetime]) -> ReplayReport:
     pid, stage_admissions = record.pending_id, None
+    # As loaded: a pending record approved below and then refused by a typed block was not saved (§9.5 L1562).
+    void = ReplayStatus.VOID_UNCONFIRMED if record.decision == "approved" else ReplayStatus.VOID
     try:
         if record.decision == "pending":
             inspection = _inspect(view, record)  # ruling R39-6: inspect before this decision
@@ -239,11 +244,11 @@ def _replay_on(view, record: PendingApproval, clock: Callable[[], datetime]) -> 
     except MemoryBlockedError as exc:
         if _voided(exc):
             _drop(pid)
-            return ReplayReport(pid, ReplayStatus.VOID, exc.code or "provider_epoch_changed")
+            return ReplayReport(pid, void, exc.code or "provider_epoch_changed")
         return ReplayReport(pid, ReplayStatus.UNAVAILABLE, "unavailable")
     except TargetDisabledError:
         _drop(pid)
-        return ReplayReport(pid, ReplayStatus.VOID, "target_disabled")
+        return ReplayReport(pid, void, "target_disabled")
     except (MemoryServiceError, w.WireError):
         return ReplayReport(pid, ReplayStatus.UNAVAILABLE, "unavailable")
     _drop(pid)
@@ -270,6 +275,8 @@ def replay_pending_approval(pending_id: str, *, raw_config: Any, backend_factory
     if view is None:
         if status is ReplayStatus.VOID:
             _drop(pending_id)
+            if record.decision == "approved":  # its commit may have landed (§9.5 L1562)
+                status = ReplayStatus.VOID_UNCONFIRMED
         return ReplayReport(pending_id, status, code)
     try:
         return _replay_on(view, record, clock)

@@ -17,6 +17,7 @@ from agent.memory_service.approval_store import list_pending_approvals, load_pen
 from agent.memory_service.bootstrap import init_memory_service
 from agent.memory_service.host_state import host_state_dir
 from agent.memory_service.mutation import MutationStatus, PlannedMutation, run_curated_mutation
+from hermes_cli.write_approval_commands_curated import _REPLAY_TEXT, _REVIEW_LINE
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeClock, FakeProviderStore, FakeRegistry
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
@@ -191,3 +192,30 @@ def test_review_of_a_committed_unknown_record_reports_it_saved(env):
     _replay(env, pid)
     [review] = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
     assert review.state is ReviewState.COMMITTED and list_pending_approvals() == []
+
+
+@pytest.mark.parametrize("void", [lambda env: env.store.set_epoch("ep-2") or env.raw,
+                                  lambda env: shutil.rmtree(host_state_dir()) or env.raw,
+                                  lambda env: {"memory": {**env.raw["memory"], "user_profile_enabled": False}}],
+                         ids=["epoch_changed", "host_state_gone", "target_disabled"])
+def test_a_void_approved_record_is_dropped_without_claiming_nothing_was_saved(env, void):
+    """§9.5 L1562 and correction R-5: an approved record is written before its first send (R39-7), so its commit
+    may have landed. Voiding drops it (D-R39-8, D-R39-9), but the report stays unconfirmed."""
+    pids = []
+    for text in ("prefers terse replies", "likes tea"):
+        pid = _defer(env, text)
+        env.store.fail_transport("commit_curated", phase="after_publish", times=2)
+        assert _replay(env, pid).status is ReplayStatus.UNKNOWN
+        pids.append(pid)
+    assert _user_texts(env) == ["likes tea", "prefers terse replies"]     # both commits landed
+    raw = void(env)
+    with native_memory_sentinel(env.native_dir) as sentinel:
+        replayed = replay_pending_approval(pids[1], raw_config=raw, backend_factory=env.factory,
+                                           clock=env.store.clock.now)
+        [review] = review_pending_approvals(raw_config=raw, backend_factory=env.factory)
+    sentinel.assert_untouched()
+    assert replayed.status is ReplayStatus.VOID_UNCONFIRMED
+    assert review.pending_id == pids[0] and review.state is ReviewState.VOID_UNCONFIRMED
+    assert list_pending_approvals() == []
+    assert "nothing was saved" not in _REVIEW_LINE[ReviewState.VOID_UNCONFIRMED].format(id=pids[0])
+    assert "nothing was saved" not in _REPLAY_TEXT[ReplayStatus.VOID_UNCONFIRMED].format(id=pids[1], code=replayed.code)
