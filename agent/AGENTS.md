@@ -148,7 +148,8 @@ counts as on. Such a mutation is staged, inspected with `inspect_staged`, and ap
 denied through the terminal approval callback (never inline in a background-review fork, as
 with native `evaluate_gate`). When nobody can answer, it waits for `/memory pending`, but only
 when the session's persisted host-state record equals the staging identity, so replay can
-resume it. With neither an answer nor such an identity, it fails closed before staging.
+resume it. Without such an identity it fails closed: before staging when nobody can be asked,
+and after staging (the stage then expires) when an inline prompt goes unanswered.
 Only the stage handle, binding hash, IDs, revision, scopes, decision and expiry are persisted,
 never candidate text or an entry body: one owner-only record per approval under
 `<home>/memory_service/approvals/` (`approval_store.py`), which no archive carries. In a home
