@@ -140,9 +140,11 @@ provider and write no `migrations/` state; every non-memory item still imports. 
 import: Provider API v1's `ImportSourceIdentity` has no source kind for Claude Code, Codex or
 OpenClaw files, so the supported path is importing while the home is additive and then the
 explicit native-memory migration. Honcho's native-file upload (`SessionMigrationMixin.
-migrate_memory_files`) runs only from its own session init or `hermes honcho migrate`, which an
-authoritative home never reaches: only the additive branch sets the provider config, and naming
-an additive provider as the authoritative one is a configuration error.
+migrate_memory_files`) never runs at session init in such a home: only the additive branch sets
+the provider config, and naming an additive provider as the authoritative one is a configuration
+error. `hermes honcho migrate` still registers whenever `memory.provider` is `honcho`, in any
+mode, and uploads the `USER.md`/`MEMORY.md` it finds in the working directory or `~/.openclaw`; a
+guard there is R48's.
 
 In a provider-managed session (`memory_service.service.is_provider_managed`) the memory tool
 dispatches only through `MemoryService`: `inline_tool_executors._memory` passes `service=` (never
