@@ -119,8 +119,9 @@ _MEMORY_ARGS: Tuple[_ArgSpec, ...] = (
 # explicit dependency (agent/memory_service/view.py, contract C6b-7). These gates run before any load
 # (§9.6 L1585): an UnboundMemoryService, or a background-review / cron / subagent agent whose service was
 # NOT injected, has no explicit identity (R38-3's refusal, kept as the fallback); a read-only view (/btw)
-# never mutates; an unattended review may only add (native #105921 parity — the curated path stages
-# nothing in the pending store; approvals are R39's).
+# never mutates; an unattended review may only add (the curated counterpart of native #105921's gate:
+# native stages the op in its pending store, the curated path refuses and stages nothing; no row owns
+# curated staging of it).
 _NO_IDENTITY = ("Memory is provider-managed, and this background surface has no explicit memory identity, "
                 "so it cannot read or write memory. Nothing was saved.")
 _READ_ONLY = "Memory is read-only on this surface. Nothing was saved."
