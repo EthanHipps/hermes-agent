@@ -236,10 +236,32 @@ def _committed(outcome: MutationOutcome, budget: ConsolidationBudget) -> Dict[st
 
 
 def _approval_unavailable(outcome: MutationOutcome, budget: ConsolidationBudget) -> Dict[str, Any]:
+    reason = ("the approval could not be recorded" if outcome.error_code == "approval_store_unavailable"
+              else "approval is not available for provider-managed memory in this session")
     return {"success": False, "done": True, "approval_required": list(outcome.approval_requirements), "error": (
-        f"This change needs explicit approval ({', '.join(outcome.approval_requirements)}) and "
-        "approval is not available for provider-managed memory in this session, so nothing was "
-        "saved. Do not retry it this turn.")}
+        f"This change needs explicit approval ({', '.join(outcome.approval_requirements)}) and {reason}, "
+        "so nothing was saved. Do not retry it this turn.")}
+
+
+def _pending_approval(outcome: MutationOutcome, budget: ConsolidationBudget) -> Dict[str, Any]:
+    return {"success": True, "done": True, "staged": True, "pending_id": outcome.pending_id,
+            "approval_required": list(outcome.approval_requirements),
+            "message": (f"Staged for approval ({', '.join(outcome.approval_requirements)}). Not yet saved — "
+                        "the user reviews it with /memory pending.")}
+
+
+def _denied(outcome: MutationOutcome, budget: ConsolidationBudget) -> Dict[str, Any]:
+    return {"success": False, "done": True, "error": "Memory write denied by user. The change was not saved."}
+
+
+def _outcome_unknown(outcome: MutationOutcome, budget: ConsolidationBudget) -> Dict[str, Any]:
+    response = {"success": False, "done": True, "code": "outcome_unknown", "error": (
+        "The memory provider did not confirm whether this change was saved. Do not repeat it this turn; "
+        "if it was saved it will be visible on the next load.")}
+    if outcome.pending_id:
+        response["pending_id"] = outcome.pending_id
+        response["error"] += " The user can settle it with /memory pending."
+    return response
 
 
 _REJECTIONS: Dict[str, Callable[[Optional[str]], str]] = {
@@ -270,23 +292,30 @@ _RESPONSES: Dict[MutationStatus, Callable[[MutationOutcome, ConsolidationBudget]
     MutationStatus.CONFLICT_EXHAUSTED: _conflict_exhausted,
     MutationStatus.UNAVAILABLE: lambda outcome, budget: {"success": False, "done": True, "code": outcome.error_code, "error": (
         f"Curated memory is unavailable for this session ({outcome.error_code}). Nothing was saved.")},
-    MutationStatus.OUTCOME_UNKNOWN: lambda outcome, budget: {"success": False, "done": True, "code": "outcome_unknown", "error": (
-        "The memory provider did not confirm whether this change was saved. Do not repeat it this turn; "
-        "if it was saved it will be visible on the next load.")},
+    MutationStatus.OUTCOME_UNKNOWN: _outcome_unknown,
+    MutationStatus.DENIED: _denied,
+    MutationStatus.PENDING_APPROVAL: _pending_approval,
 }
 
 
 def _host_write_approval() -> Optional[str]:
     from tools import write_approval as wa
-    return "memory.write_approval" if wa.write_approval_enabled(wa.MEMORY) else None
+    # Checkpoint B carry-forward; ruling R39-12: an unreadable or unrecognized value counts as on.
+    return "memory.write_approval" if wa.write_approval_enabled(wa.MEMORY, fail_closed=True) else None
 
 
 def curated_memory_tool(service: MemoryService, *, action: Optional[str] = None, target: Optional[str] = "memory",
                         content: Optional[str] = None, old_text: Optional[str] = None,
                         new_text: Optional[str] = None, operations: Any = None,
-                        budget: Optional[ConsolidationBudget] = None) -> str:
-    """The memory tool in a provider-managed session; returns the tool's JSON string."""
+                        budget: Optional[ConsolidationBudget] = None,
+                        approval_session_id: Optional[str] = None) -> str:
+    """The memory tool in a provider-managed session; returns the tool's JSON string.
+
+    ``approval_session_id`` names the Hermes session whose persisted identity an approval may
+    wait under (ruling R39-4; contract C6b-1).
+    """
     from tools import memory_tool as facade
+    from tools.write_approval_curated import memory_tool_approval_channel
 
     budget = budget if budget is not None else ConsolidationBudget()
     if content is None and new_text is not None:
@@ -306,5 +335,6 @@ def curated_memory_tool(service: MemoryService, *, action: Optional[str] = None,
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
     call = NativeCall(action=action, content=content, old_text=old_text, operations=operations or None)
     outcome = run_curated_mutation(service, target, lambda snapshot: plan_native_call(snapshot, call, budget),
-                                   extra_approval=_host_write_approval())
+                                   extra_approval=_host_write_approval(),
+                                   approval=memory_tool_approval_channel(approval_session_id))
     return json.dumps(_RESPONSES[outcome.status](outcome, budget), ensure_ascii=False)
