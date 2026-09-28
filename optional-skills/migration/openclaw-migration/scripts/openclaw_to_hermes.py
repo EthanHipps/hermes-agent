@@ -486,7 +486,7 @@ def target_requests_authoritative_memory(target_root: Path) -> bool:
 
 
 def _inline_requests_authoritative(target_root: Path) -> bool:
-    """Stdlib twin of Hermes' predicate for standalone runs: no env expansion, no managed overlay.
+    """Stdlib twin of Hermes' predicate for standalone runs: no env expansion, no managed overlay, no last-known-good fallback.
 
     Without PyYAML the mode cannot be parsed, so a config that mentions ``provider_mode`` counts
     as authoritative. Refusing a memory import is recoverable; writing into a dormant store is not.
