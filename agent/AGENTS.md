@@ -130,6 +130,22 @@ restored by backup, export, clone or import; every such archive carries
 `memory_service/` never enter an archive in any mode and are never restored; and an active
 migration manifest refuses backup/export/clone with `MIGRATION_IN_PROGRESS`.
 
+Import surfaces keep the same dormancy. When a home's config requests authoritative mode
+(`hermes_cli/backup_memory.home_disposition`: the requested mode, even when invalid), `hermes
+import-agent` (`hermes_cli/agent_import.py`) and the OpenClaw migration script
+(`optional-skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py`, whose standalone
+runs fall back to the stdlib twin `_inline_requests_authoritative`) record their memory items as
+skipped with a content-free reason before reading a source or touching `memories/`, contact no
+provider and write no `migrations/` state; every non-memory item still imports. They stage no
+import: Provider API v1's `ImportSourceIdentity` has no source kind for Claude Code, Codex or
+OpenClaw files, so the supported path is importing while the home is additive and then the
+explicit native-memory migration. Honcho's native-file upload (`SessionMigrationMixin.
+migrate_memory_files`) never runs at session init in such a home: only the additive branch sets
+the provider config, and naming an additive provider as the authoritative one is a configuration
+error. `hermes honcho migrate` still registers whenever `memory.provider` is `honcho`, in any
+mode, and uploads the `USER.md`/`MEMORY.md` it finds in the working directory or `~/.openclaw`; a
+guard there is R48's.
+
 In a provider-managed session (`memory_service.service.is_provider_managed`) the memory tool
 dispatches only through `MemoryService`: `inline_tool_executors._memory` passes `service=` (never
 `store=`) and never calls `notify_memory_tool_write`; `tools/memory_tool_curated.py` runs the native
