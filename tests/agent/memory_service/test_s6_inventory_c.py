@@ -139,10 +139,13 @@ def test_an_injected_service_is_never_re_resolved_or_recorded(tmp_path, monkeypa
     assert env.factory_calls == calls and _records() == records   # the parent's record is untouched
 
 
-def test_a_cron_platform_agent_without_a_service_is_rejected_before_provider_contact(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("platform", "session_id"), [("cron", "cron_job_1_20260927_000000"),
+                                                      ("subagent", "subagent-1")])
+def test_a_cron_or_subagent_platform_agent_without_a_service_is_rejected_before_provider_contact(
+        tmp_path, monkeypatch, platform, session_id):
     env = Env(tmp_path, monkeypatch)
     with native_memory_sentinel(_native_dir()) as sentinel:
-        agent = env.agent("cron_job_1_20260927_000000", platform="cron")
+        agent = env.agent(session_id, platform=platform)
     sentinel.assert_untouched()
     assert isinstance(agent._memory_service, UnboundMemoryService)
     assert env.factory_calls == 0 and _records() == {}
