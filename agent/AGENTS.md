@@ -203,6 +203,20 @@ revision ledger's "Wave 6 fork decisions: R38, R40, R44 (2026-09-22)" section, w
 as the owner of host recall wiring and of §9.6's host-visible recall warning (L1574) and
 recall-ambiguity blocking (L1576) cells.
 
+Desktop/web, journey and REST memory surfaces route through `MemoryService` too, and none of them
+infers identity from the process directory. `agent/memory_service/admin.py::admin_service` binds an
+explicit administrative identity (`AdminContext`: an explicit org/project/repository chain, or none
+for principal-global) with `platform: admin`. It keeps that binding's host state under
+`<home>/memory_service/admin/` and resumes it on later calls. In authoritative mode the journey
+(`agent/learning_graph.py`, `agent/learning_mutations.py` via `agent/learning_curated.py`) builds
+memory cards from a snapshot's addressable entries. Node ids are `memory:<memory|profile>:<entry-id>`
+plus the origin scope, and edit or delete addresses that id through `run_curated_mutation`.
+`GET /api/memory` reports the provider-managed disposition and never stats native files.
+`POST /api/memory/reset` takes one target and explicit scopes, and fails closed with a typed
+`approval_unavailable` until its approval adoption (the R42 follow-up to R39's flow) lands. A REST
+chat continuation that carries history but has no persisted identity fails `binding_invalid` (or
+starts stateless) before an agent is built (`bootstrap.claim_history_continuation`).
+
 ## Tests
 
 Loop/phase tests go in `tests/agent/`; patch the binding the phase actually reads (siblings often

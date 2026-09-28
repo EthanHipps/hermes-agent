@@ -162,19 +162,40 @@ def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNo
             ((score, name) for name, tokens, name_lower in skill_meta if (score := (6 if name_lower in text else 0) + len(tokens & text_tokens)) > 0),
             key=lambda x: (-x[0], x[1]),
         )
-        edges.extend((f"memory:{card['source']}:{idx}", name) for _, name in scored[:4])
+        edges.extend((_memory_node_id(card, idx), name) for _, name in scored[:4])
     return edges
 
 
-def build_learning_graph() -> dict[str, Any]:
+def _memory_node_id(card: dict[str, Any], idx: int) -> str:
+    """Provider-managed cards carry a stable entry-ID node id; native cards are positional."""
+    return card.get("id") or f"memory:{card['source']}:{idx}"
+
+
+def _journey_memory(memory_context: Any) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Native ``MEMORY.md``/``USER.md`` cards, or -- when authoritative mode is requested -- cards from
+    the provider's addressable entries through an explicit administrative identity (§9.7 L1608)."""
+    from agent.memory_service.bootstrap import requests_authoritative_mode
+    from hermes_cli.config import load_config_readonly
+
+    cfg = load_config_readonly()
+    if not requests_authoritative_mode(cfg):
+        return _memory_cards(), None
+    from agent.learning_curated import curated_graph_memory
+    return curated_graph_memory(cfg, memory_context)
+
+
+def build_learning_graph(*, memory_context: Any = None) -> dict[str, Any]:
     """Full payload for the desktop learning panel: non-base skills with real
-    learning signal (agent-created or used) plus memory chunks as graph nodes."""
+    learning signal (agent-created or used) plus memory chunks as graph nodes.
+
+    ``memory_context`` is the explicit administrative scope (an ``AdminContext``) for
+    provider-managed memory; ``None`` is principal-global (ruling R42-4). Unused in additive mode."""
     roots = [("base", Path(__file__).resolve().parent.parent / "skills"), ("profile", get_hermes_home() / "skills")]
     learned_skills = {
         name: node for name, node in build_skill_nodes(roots).items()
         if node.source != "base" and (node.created_by == "agent" or node.use_count > 0)
     }
-    skill_edges, memory_cards = build_edges(learned_skills), _memory_cards()
+    (memory_cards, curated), skill_edges = _journey_memory(memory_context), build_edges(learned_skills)
     memory_edges = _memory_skill_edges(memory_cards, list(learned_skills.values()))
     clusters = Counter(node.category for node in learned_skills.values())
     if memory_cards:
@@ -188,13 +209,13 @@ def build_learning_graph() -> dict[str, Any]:
         for n in learned_skills.values()
     ] + [
         {
-            "id": f"memory:{card['source']}:{i}", "label": card["title"], "kind": "memory",
+            "id": _memory_node_id(card, i), "label": card["title"], "kind": "memory",
             "memorySource": card["source"], "timestamp": card.get("timestamp"), "category": "memory",
             "useCount": 0, "state": "active", "createdBy": "memory", "pinned": False,
         }
         for i, card in enumerate(memory_cards)
     ]
-    return {
+    graph = {
         "nodes": graph_nodes,
         "edges": [{"source": a, "target": b} for a, b in skill_edges + memory_edges],
         "clusters": [{"category": c, "count": n} for c, n in sorted(clusters.items(), key=lambda kv: -kv[1])],
@@ -204,3 +225,6 @@ def build_learning_graph() -> dict[str, Any]:
             "memory_nodes": len(memory_cards), "memory_skill_edges": len(memory_edges), "learned_skills": len(learned_skills),
         },
     }
+    if curated is not None:  # authoritative only: additive keys and order are unchanged (D-R42-a)
+        graph["curated_memory"] = curated
+    return graph
