@@ -21,6 +21,20 @@ from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, Fa
 HISTORY = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
 
 
+def _prefixed(role, *history):
+    """A multi-item ``input``: a developer/system item, optional history, then the user turn."""
+    return [{"role": role, "content": "x"}, *history, {"role": "user", "content": "hi"}]
+
+
+# A developer or system prefix alone is not an old conversation (ruling R42-11, option A).
+INPUT_CASES = [  # (multi-item input, the client sent history, test id)
+    (_prefixed("developer"), False, "developer-prefix-only"),
+    (_prefixed("system"), False, "system-prefix-only"),
+    (_prefixed("developer", *HISTORY), True, "prefix-and-history"),
+]
+INPUT_PARAMS = [pytest.param({"input": raw_input}, expected, id=name) for raw_input, expected, name in INPUT_CASES]
+
+
 @pytest.fixture
 def env(tmp_path):
     store = FakeProviderStore(registry=FakeRegistry())
@@ -96,10 +110,13 @@ def _runs_app(adapter: APIServerAdapter) -> web.Application:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("history,expected", [(HISTORY, True), (None, False)])
-async def test_runs_route_declares_whether_the_client_sent_history(history, expected):
+@pytest.mark.parametrize("body,expected", [
+    pytest.param({"input": "hello", "conversation_history": HISTORY}, True, id="body-history"),
+    pytest.param({"input": "hello"}, False, id="no-history"),
+    *INPUT_PARAMS,
+])
+async def test_runs_route_declares_whether_the_client_sent_history(body, expected):
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
-    body = {"input": "hello", **({"conversation_history": history} if history else {})}
     async with TestClient(TestServer(_runs_app(adapter))) as cli:
         with patch.object(adapter, "_create_agent") as mock_create:
             mock_agent = MagicMock()
@@ -114,4 +131,26 @@ async def test_runs_route_declares_whether_the_client_sent_history(history, expe
                 if mock_create.call_args is not None:
                     break
                 await asyncio.sleep(0.05)
+    assert mock_create.call_args.kwargs["has_history"] is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,expected", [pytest.param({"input": "hi"}, False, id="no-history"), *INPUT_PARAMS])
+async def test_responses_route_declares_whether_the_client_sent_history(body, expected):
+    """The real ``_run_agent`` computes the flag; ``_create_agent`` is stubbed one layer lower
+    (shape of tests/gateway/test_api_server_declared_conversation.py::_stub_agent)."""
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
+    app = web.Application()
+    app["api_server_adapter"] = adapter
+    app.router.add_post("/v1/responses", adapter._handle_responses)
+    async with TestClient(TestServer(app)) as cli:
+        with patch.object(adapter, "_create_agent") as mock_create:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "done", "messages": [], "api_calls": 1}
+            mock_agent.session_prompt_tokens = 0
+            mock_agent.session_completion_tokens = 0
+            mock_agent.session_total_tokens = 0
+            mock_create.return_value = mock_agent
+            resp = await cli.post("/v1/responses", json=body)
+            assert resp.status == 200
     assert mock_create.call_args.kwargs["has_history"] is expected

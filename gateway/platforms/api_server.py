@@ -355,6 +355,12 @@ def _request_relay_metadata(body: Any) -> Dict[str, Any]:
     return dict(metadata)
 
 
+def _has_client_history(history: Any) -> bool:
+    """Did the client send an old conversation (ruling R42-11, C6b-6)? A system or developer prefix
+    alone is instructions, not history; every other item, a non-dict one included, counts."""
+    return any(not isinstance(m, dict) or m.get("role") not in ("system", "developer") for m in history or ())
+
+
 def _is_compressed_summary_message(message: Any) -> bool:
     """Recognize every compaction carrier shape via the compressor's own classifier
     (SessionDB drops the in-process marker; a prefix scan misses merge-into-tail carriers)."""
@@ -3712,7 +3718,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-                        has_history=bool(conversation_history))
+                        has_history=_has_client_history(conversation_history))
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if active_run_id:
