@@ -152,9 +152,31 @@ dispatches only through `MemoryService`: `inline_tool_executors._memory` passes 
 `MemoryStore` semantics over one complete snapshot in memory (`SnapshotMemoryStore`) and turns the
 result into an explicit intent and an ID-based delta; `memory_service/mutation.py::run_curated_mutation`
 loads fresh, stages, commits, replays `version_conflict` with a new request ID and reloads every
-enabled target after a commit. Mutations that need approval fail closed until the approval flow
-lands, and cron and background-review calls are refused before any load until they receive an
+enabled target after a commit. Mutations that need approval are staged and approved as described
+below, and cron and background-review calls are refused before any load until they receive an
 explicit frozen-identity service.
+
+Approvals in a provider-managed session go through the `approval=` channel of
+`memory_service/mutation.py::run_curated_mutation` (`memory_service/approval.py::ApprovalChannel`).
+Hermes predicts which mutations need approval: `target:user`, a non-default scope, `bulk_edit`,
+reset, import, threat, or `memory.write_approval`, whose unreadable or unrecognized value
+counts as on. Such a mutation is staged, inspected with `inspect_staged`, and approved or
+denied through the terminal approval callback (never inline in a background-review fork, as
+with native `evaluate_gate`). When nobody can answer, it waits for `/memory pending`, but only
+when the session's persisted host-state record equals the staging identity, so replay can
+resume it. Without such an identity it fails closed: before staging when nobody can be asked,
+and after staging (the stage then expires) when an inline prompt goes unanswered.
+Only the stage handle, binding hash, IDs, revision, scopes, decision and expiry are persisted,
+never candidate text or an entry body: one owner-only record per approval under
+`<home>/memory_service/approvals/` (`approval_store.py`), which no archive carries. In a home
+that requests authoritative mode, `/memory pending|approve|reject`
+(`hermes_cli/write_approval_commands_curated.py`) renders the live inspection. It replays
+the byte-free `commit_curated` from the staging session's persisted identity on its own
+transport (`approval_replay.py`), and it retries an unknown outcome only with the identical
+request. It drops a record on denial, expiry, conflict or a void binding. Native
+`pending/memory/` records stay dormant. The memory tool still refuses threat-pattern content,
+as native memory does. A caller that sets `PlannedMutation.threat_decision_id` gets
+mandatory approval instead.
 
 In authoritative or stateless mode the system prompt's curated region comes only from
 `agent/memory_service/render.py`, through `lifecycle.curated_prompt_parts` — one structured
