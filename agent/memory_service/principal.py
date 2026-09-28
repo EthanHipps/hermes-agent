@@ -39,9 +39,17 @@ def _identity(platform: Any, user_id: Any, user_id_alt: Any) -> Optional[Gateway
 
 
 def gateway_identity_of(agent: Any) -> Optional[GatewayIdentity]:
-    """The gateway user an agent serves (``agent._user_id``/``_user_id_alt``), or ``None``."""
-    return _identity(getattr(agent, "platform", ""), getattr(agent, "_user_id", None),
-                     getattr(agent, "_user_id_alt", None))
+    """The gateway user an agent serves (``agent._user_id``/``_user_id_alt``), or ``None``.
+
+    A gateway turn whose source has no user id (anonymous admins, channel or bot posts, keyless relay
+    deliveries) still carries ``agent._chat_id``: it gets a keyless identity that maps to nothing, so it
+    gets no memory (EDD-67-A3). Local surfaces and gateway hygiene/``/compress`` agents set no chat id.
+    """
+    platform = getattr(agent, "platform", "")
+    identity = _identity(platform, getattr(agent, "_user_id", None), getattr(agent, "_user_id_alt", None))
+    if identity is None and getattr(agent, "_chat_id", None):
+        return GatewayIdentity(platform=str(getattr(platform, "value", platform) or ""), user_id=None)
+    return identity
 
 
 def gateway_identity_from_source(source: Any) -> Optional[GatewayIdentity]:

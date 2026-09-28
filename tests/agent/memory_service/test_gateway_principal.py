@@ -72,6 +72,17 @@ def test_unmapped_user_gets_no_memory_no_provider_call_and_a_stateless_record(au
     assert "not available" in service.degraded_warning()
 
 
+def test_a_keyless_gateway_turn_gets_no_memory_and_a_stateless_record(authoritative_env):
+    """EDD-67-A3: a gateway source with no user id (anonymous admin, channel post) is not a local surface."""
+    from agent.memory_service.host_state import load_host_state
+    identity = gateway_identity_of(SimpleNamespace(platform="telegram", _user_id=None, _user_id_alt=None,
+                                                   _chat_id="-100"))
+    service = _init(authoritative_env, _raw(authoritative_env, {"telegram:111": "ethan"}), "gw-k", identity)
+    assert isinstance(service, UnmappedPrincipalMemoryService) and authoritative_env.backends == []
+    assert load_host_state("gw-k").disposition == "stateless"
+    assert identity == GatewayIdentity("telegram", None) and identity.keys() == ()
+
+
 def test_an_existing_stateless_record_is_kept_byte_for_byte(authoritative_env):
     """C67-6: an unmapped user whose session already has a record gets no memory; the record is untouched."""
     from agent.memory_service.host_state import HostStateRecord, host_state_dir, save_host_state
