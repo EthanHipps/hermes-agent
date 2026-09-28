@@ -231,8 +231,14 @@ def test_an_expired_stage_is_reported_and_dropped_on_review(env, native_dir):
 def test_reject_persists_nothing_and_calls_no_provider(env, native_dir):
     agent = _agent(env.memory)
     pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
-    views = len(env.backends)
-    assert handle_pending_subcommand(wa.MEMORY, ["reject", pid]) == f"Rejected pending memory write '{pid}'. Nothing was saved."
+    before, views = _sinks(), len(env.backends)
+    with native_memory_sentinel(native_dir) as sentinel:
+        out = handle_pending_subcommand(wa.MEMORY, ["reject", pid])
+    sentinel.assert_untouched()
+    after = _sinks()
+    assert out == f"Rejected pending memory write '{pid}'. Nothing was saved."
+    assert after["pending"] == before["pending"] and after["memories"] == before["memories"]
+    assert after["memory_service/approvals"] == {}
     assert len(env.backends) == views and list_pending_approvals() == [] and _calls(env, "commit_curated") == []
 
 
