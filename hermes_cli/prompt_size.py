@@ -185,9 +185,20 @@ def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
     tools = getattr(agent, "tools", None) or []
     authoritative = _requests_authoritative_memory()
     if authoritative:
-        # Ruling R41-11: the withheld memory tool still ships in a real session; count its schema offline.
+        # Ruling R41-11: count offline the memory tool the inspection agent withheld, but only as a real
+        # session on this platform ships it: platform toolsets minus the user's disabled ones (EDD-67-A4).
+        from agent.skill_utils import parse_config_string_list
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
         from model_tools import get_tool_definitions
-        tools = list(tools) + get_tool_definitions(enabled_toolsets=["memory"], quiet_mode=True)
+        from tools.registry import registry
+        cfg = load_config()
+        shipped = get_tool_definitions(
+            enabled_toolsets=sorted(_get_platform_tools(cfg, platform)),
+            disabled_toolsets=parse_config_string_list((cfg.get("agent") or {}).get("disabled_toolsets")) or None,
+            quiet_mode=True)
+        toolset_of = registry.get_tool_to_toolset_map()
+        tools = list(tools) + [tool for tool in shipped if toolset_of.get(_tool_name(tool)) == "memory"]
     sections: List[Tuple[str, int, int]] = [
         (label, len(text), _bytes(text))
         for label, text in (("stable (identity/guidance/skills)", stable), ("context (AGENTS.md/cwd files)", context),

@@ -137,3 +137,23 @@ def test_authoritative_inspection_binds_no_session_and_touches_nothing(isolated_
     assert "provider-managed" in data["curated_memory"]
     assert any(group["toolset"] == "memory" for group in data["toolsets_breakdown"])
     assert "provider-managed" in render_breakdown(data)
+
+
+def test_authoritative_prompt_size_counts_no_memory_tool_a_session_would_not_ship(isolated_home, tmp_path,
+                                                                                   monkeypatch):
+    """EDD-67-A4: the offline memory schema is counted only when a real session ships the memory tool."""
+    import yaml
+    from tests.agent.memory_service.native_sentinel import native_memory_sentinel
+    exe = tmp_path / "p.exe"
+    exe.write_bytes(b"MZ")
+    (isolated_home / "config.yaml").write_text(yaml.safe_dump({
+        "agent": {"disabled_toolsets": ["memory"]},
+        "memory": {"provider": "example", "provider_mode": "authoritative", "provider_executable": str(exe),
+                   "principal_id": "ethan"}}), encoding="utf-8")
+    backends = []
+    monkeypatch.setattr("plugins.memory.load_authoritative_backend_factory", lambda name: backends.append(name))
+    with native_memory_sentinel(isolated_home / "memories") as sentinel:
+        data = compute_prompt_breakdown("cli")
+    sentinel.assert_untouched()
+    assert backends == [] and "provider-managed" in data["curated_memory"]
+    assert not any(group["toolset"] == "memory" for group in data["toolsets_breakdown"])
