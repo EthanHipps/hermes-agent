@@ -68,6 +68,18 @@ def test_without_a_last_known_good_copy_the_home_stays_additive(home):
     assert home_memory_section(home) == {} and "memories" not in archive_prune_names(home)
 
 
+def test_an_additive_last_known_good_copy_is_not_read(home):
+    """EDD-67-A1: only the requested mode comes from the last-known-good copy (R41-9). An additive copy is
+    not read, so an unparseable config.yaml reads as it did before R41."""
+    from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.config_backups import backup_config
+    path = home / "config.yaml"
+    path.write_text(yaml.safe_dump({"memory": {"provider": "honcho", "memory_enabled": False}}), encoding="utf-8")
+    assert backup_config(path, "good") is not None
+    path.write_text(BROKEN, encoding="utf-8")
+    assert home_memory_section(home) == {}
+
+
 def test_home_skeleton_does_not_create_memories_from_a_broken_authoritative_config(home):
     from hermes_cli.config_home import initialize_home
     _break_after_good(home)

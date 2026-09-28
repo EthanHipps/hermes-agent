@@ -51,15 +51,18 @@ def home_memory_section(home: Path) -> dict:
     R41; ruling R41-10); an archive spans homes that are not the active one (root + profiles/*;
     ruling R44-2). An unparseable or unreadable config.yaml falls back to the newest last-known-good
     copy that ``load_config()`` left in ``backups/config/`` (ruling R41-9), so a broken edit cannot
-    revive an authoritative home's dormant native memory (§9.1 L950). With no such copy there is no
-    evidence of authoritative intent and the home reads as additive, as before. A failing managed
-    overlay keeps the home's own section, as doctor always did. Name and signature are pinned (C6b-10).
+    revive an authoritative home's dormant native memory (§9.1 L950). Only the requested mode comes
+    from that copy: unless the result requests authoritative mode, an unparseable config.yaml reads as
+    ``{}`` (additive), as before (EDD-67-A1). A failing managed overlay keeps the home's own section, as
+    doctor always did. Name and signature are pinned (C6b-10).
     """
     path = Path(home) / "config.yaml"
+    parsed = True
     try:
         from hermes_cli.config import read_user_config_raw
         raw = read_user_config_raw(path)
     except Exception:
+        parsed = False
         raw = _last_known_good(path)
     try:
         from hermes_cli.config import _expand_env_vars
@@ -72,7 +75,15 @@ def home_memory_section(home: Path) -> dict:
     except Exception:
         logger.debug("managed overlay unavailable for a memory-mode read; using the home's own config")
     section = config.get("memory") if isinstance(config, dict) else None
-    return section if isinstance(section, dict) else {}
+    section = section if isinstance(section, dict) else {}
+    if not parsed:
+        try:
+            from agent.memory_service.bootstrap import requests_authoritative_mode
+        except Exception:
+            return {}
+        if not requests_authoritative_mode({"memory": section}):
+            return {}
+    return section
 
 
 def _last_known_good(path: Path) -> dict:
