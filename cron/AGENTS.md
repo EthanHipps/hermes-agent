@@ -23,7 +23,11 @@ Hardening invariants — each guards a real failure; don't weaken without answer
   executions ledger's `scheduled_instant` blocks a second fire, `cron.catch_up_missed: false`
   skips past-grace misses with a logged reason. Never drop a slot silently (#107485).
 - File lock `~/.hermes/cron/.tick.lock` prevents duplicate ticks across processes.
-- Cron sessions pass `skip_memory=True`; memory providers intentionally do not run during cron.
+- Cron agents are built with `skip_memory=False`, so in additive mode memory — and a configured
+  external memory provider — loads as in any other session. In authoritative mode
+  `cron/scheduler_memory.resolve_cron_memory_service` passes an explicit `MemoryService`: one
+  `new_session` per run bound from `memory.cron_scope` (explicit registry IDs, never a directory),
+  or, with no scope configured, a service that rejects every memory read and write.
 - Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
   reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
   or opted-in explicit targets. `all` expansions do not gain home mirror eligibility. Mirrored

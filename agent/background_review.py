@@ -32,6 +32,7 @@ class _BackgroundReviewRun:
         self._lock = threading.Lock()
         self._review_agent = None
         self._request_finished = self._cancel_dispatched = False
+        self.memory_parent = None  # ruling R43-4: the reviewed conversation's memory, frozen at spawn
 
     def begin_request(self, review_agent: Any) -> bool:
         """Atomically admit the first provider-capable review phase."""
@@ -863,7 +864,7 @@ def _inherit_parent_tool_surface(review_agent: Any, agent: Any) -> None:
 
 def build_cache_parity_fork(
     agent: Any, task_cfg: Optional[Dict[str, Any]] = None, *, max_iterations: int,
-    write_origin: str = "background_review",
+    write_origin: str = "background_review", memory_parent: Any = None,
 ) -> Tuple[Any, Dict[str, Any], bool]:
     """Construct a detached AIAgent fork with warm prompt-cache parity (shared with ``/btw``): same
     runtime/credentials as the parent, byte-identical system prompt / tools[] / reasoning config on
@@ -877,7 +878,20 @@ def build_cache_parity_fork(
     # OAuth-only providers, session-scoped creds and credential pools.
     _rt = _resolve_review_runtime(agent, task_cfg)
     _routed = bool(_rt.get("routed"))
-    review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations))
+    # Ruling R43-3 (C6b-7): the fork receives its memory as an explicit dependency — a capability-limited
+    # view over the parent's frozen identity on its own transport — and never binds, resolves or discovers one.
+    from agent.memory_service.view import capture_parent_memory, open_fork_view
+    parent_memory = memory_parent if memory_parent is not None else capture_parent_memory(agent)
+    view = open_fork_view(parent_memory, surface=write_origin) if parent_memory is not None else None
+    init_kwargs = _fork_init_kwargs(agent, _rt, _routed, max_iterations)
+    if view is not None:
+        init_kwargs["memory_service"] = view
+    try:
+        review_agent = AIAgent(**init_kwargs)
+    except BaseException:
+        if view is not None:
+            view.shutdown()
+        raise
     review_agent._memory_write_origin = review_agent._memory_write_context = write_origin
     review_agent._memory_store = agent._memory_store
     review_agent._memory_enabled = agent._memory_enabled
@@ -963,7 +977,9 @@ def _review_tool_whitelist(
     # Gate the built-in memory tool on BOTH the profile's memory flags and the trigger that fired
     # (#105921): a skill-nudge review never gets the memory tool, so an unattended fork cannot
     # act on the memory tool's "consolidate now" hint and delete entries no one reviewed.
-    memory_on = review_agent._memory_enabled or review_agent._user_profile_enabled
+    from agent.memory_service.lifecycle import memory_guidance_flags
+    flags = memory_guidance_flags(review_agent)   # ruling R43-5 / X-2: the fork's own service; None = additive
+    memory_on = any(flags) if flags is not None else (review_agent._memory_enabled or review_agent._user_profile_enabled)
     review_toolsets = ["memory", "skills"] if memory_on and review_memory else ["skills"]
     whitelist = {t["function"]["name"] for t in get_tool_definitions(enabled_toolsets=review_toolsets, quiet_mode=True)}
     # Read-only file tools: denying read_file/search_files caused a per-review denial storm that
@@ -1011,6 +1027,8 @@ def _release_fork_clients(review_agent: Any) -> None:
     session-bound (close() kills that session's terminal processes), so release only clients."""
     with suppress(Exception):
         review_agent.release_clients()
+    from agent.memory_service.view import release_injected_service
+    release_injected_service(review_agent)   # ruling R43-3: the fork's own transport; idempotent
 
 
 def _run_review_fork(
@@ -1023,8 +1041,10 @@ def _run_review_fork(
     so the caller's error path still sees usage and the fork to clean up. ``explicit`` (/refine)
     keeps the ``background_review`` origin (curator/skill guards still apply) but marks the fork
     attended, so the unattended-only memory delete gate leaves the full operation set available."""
+    memory_parent = getattr(review_run, "memory_parent", None)   # ruling R43-4: frozen at spawn
     st.review_agent, _rt, _routed = build_cache_parity_fork(
-        agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
+        agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS,
+        **({"memory_parent": memory_parent} if memory_parent is not None else {}))
     st.review_agent._review_attended = explicit
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist

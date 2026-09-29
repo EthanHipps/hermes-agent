@@ -270,8 +270,12 @@ class AIAgent(
         checkpoint_max_total_size_mb: int = 500, checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False, requested_provider: str = None,
         capabilities: Dict[str, bool] | None = None,
+        memory_service: Any = None,
     ):
-        """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
+        """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``).
+
+        ``memory_service``: an explicit provider-managed MemoryService (R43, C6b-7); ``None`` keeps the normal resolution.
+        """
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
         if tool_delay is not None:
             warnings.warn("tool_delay is deprecated and ignored; sequential tool calls "
@@ -763,6 +767,12 @@ class AIAgent(
         kwargs = dict(messages_snapshot=_clone_background_review_messages(messages_snapshot),
                       review_memory=review_memory, review_skills=review_skills, focus=focus, task_cfg=task_cfg,
                       explicit=explicit)
+        # Ruling R43-4: freeze the reviewed conversation's memory identity now — a deferred review
+        # may run after /new or /resume (§4.1 L262). Additive parents add nothing, so kwargs are unchanged.
+        from agent.memory_service.view import capture_parent_memory
+        memory_parent = capture_parent_memory(self)
+        if memory_parent is not None:
+            kwargs["memory_parent"] = memory_parent
         if focus is None and not explicit and _review_should_defer(self, task_cfg):
             from agent.review_idle_queue import QUEUE
             QUEUE.enqueue(self, _review_queue_key(self), kwargs)
@@ -772,7 +782,7 @@ class AIAgent(
     def _spawn_background_review_now(self, messages_snapshot: List[Dict], review_memory: bool = False,
                                      review_skills: bool = False, focus: Optional[str] = None,
                                      task_cfg: Optional[Dict[str, Any]] = None, _requeue_attempts: int = 0,
-                                     explicit: bool = False) -> None:
+                                     explicit: bool = False, memory_parent: Any = None) -> None:
         """Spawn the background memory/skill review thread.
 
         ``threading.Thread`` is constructed here so tests patching ``run_agent.threading.Thread`` keep working.
@@ -789,6 +799,7 @@ class AIAgent(
         review_run = prepare_background_review_run(self)
         if review_run is None:
             return
+        review_run.memory_parent = memory_parent   # ruling R43-4 (C6b-7): read by _run_review_fork
         try:
             target, _prompt = spawn_background_review_thread(
                 self, messages_snapshot, review_memory=review_memory, review_skills=review_skills,
@@ -800,7 +811,7 @@ class AIAgent(
                 self._maybe_requeue_preempted_review(review_run, dict(
                     messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
                     focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
-                    explicit=explicit))
+                    explicit=explicit, **({"memory_parent": memory_parent} if memory_parent is not None else {})))
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
