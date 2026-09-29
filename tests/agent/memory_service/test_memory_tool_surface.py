@@ -172,13 +172,16 @@ def test_cron_and_background_review_are_refused_before_any_load(authoritative_en
     assert backend.count("load_curated") == loads and _repo_texts(authoritative_env) == []
 
 
-def test_approval_required_leaves_no_pending_record(authoritative_env, native_dir):
+def test_approval_required_write_leaves_no_native_pending_record(authoritative_env, native_dir):
+    """R38 refused here until R39. R39 stages it as a handle-only approval under the session (ruling R39-5)."""
+    from agent.memory_service.approval_store import list_pending_approvals
     from tools import write_approval as wa
     agent = _agent(authoritative_env.memory)
     with native_memory_sentinel(native_dir) as sentinel:
         out = json.loads(agent._invoke_tool("memory", {"action": "add", "target": "user", "content": "terse"}, "task-1"))
     sentinel.assert_untouched()
-    assert out["approval_required"] == ["target_user"] and wa.list_pending(wa.MEMORY) == []
+    assert out["staged"] is True and out["approval_required"] == ["target_user"] and wa.list_pending(wa.MEMORY) == []
+    assert [pid for pid, _ in list_pending_approvals()] == [out["pending_id"]]
 
 
 def test_registry_path_for_memory_touches_nothing(authoritative_env, native_dir):

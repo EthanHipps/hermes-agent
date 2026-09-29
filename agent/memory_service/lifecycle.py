@@ -73,6 +73,10 @@ def follow_session_binding(agent: Any) -> None:
     session_id = getattr(agent, "session_id", None)
     if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
         return
+    from agent.memory_service.view import is_injected
+    if is_injected(agent):          # ruling R43-10: an explicit dependency is never re-resolved (§9.7 L1625)
+        agent._memory_session_key = session_id
+        return
     from agent.memory_service.bootstrap import init_memory_service, resolve_session_binding
     from agent.memory_service.principal import gateway_identity_of
 
@@ -119,8 +123,13 @@ def curated_prompt_parts(agent: Any) -> Optional[List[str]]:
 
 
 def record_curated_prompt(agent: Any, prompt: str) -> None:
-    """Remember which prompt this disposition built (ruling R40-4d)."""
-    if not _managed(agent) or not getattr(agent, "session_id", None):
+    """Remember which prompt this disposition built (ruling R40-4d).
+
+    Ruling R43-10: an injected service owns no host-state record, so it never writes one (a
+    review fork shares its parent's session id, and must not overwrite the parent's digest).
+    """
+    from agent.memory_service.view import is_injected
+    if not _managed(agent) or not getattr(agent, "session_id", None) or is_injected(agent):
         return
     disposition = _disposition(agent)
     from dataclasses import replace

@@ -102,8 +102,8 @@ plugins; `agent/context_engine.py` drives context-engine plugins; `agent/image_g
 image-gen plugins (all in `plugins/AGENTS.md`). `agent/curator.py` + `curator_backup.py` implement
 the skill curator (`skills/AGENTS.md`). Cron agents are built with `skip_memory=False` and
 `platform="cron"` (`cron/scheduler.py::_construct_cron_agent`), so memory — and a configured external
-memory provider — loads as in any other session; in a provider-managed session the memory tool
-refuses cron calls before any load until cron receives an explicit frozen-identity service.
+memory provider — loads as in any other session; in authoritative mode cron instead receives an
+explicit `MemoryService` (`cron/scheduler_memory.py`) and never binds from a directory.
 
 `agent/memory_service/` is the host-owned generic memory service: `agent_init._init_memory`
 selects the router via `bootstrap.init_memory_service` **before** any native `MemoryStore` is
@@ -122,6 +122,21 @@ authority mode, even when provider validation fails. Cold-process tests arm the 
 before imports/config loading. Bootstrap binds to `runtime_cwd.resolve_agent_cwd()` (unless
 an explicit working directory is supplied), and the default agent platform binds as `cli`.
 
+Background and scheduled surfaces receive `MemoryService` as an explicit dependency
+(`AIAgent(memory_service=...)`, `agent/memory_service/view.py`). `_init_memory` then resolves, binds
+and builds nothing, and such a service is never re-resolved and never gets a host-state record. A
+background-review fork and a `/btw` fork get `open_fork_view`: their own transport over the parent's
+persisted frozen identity, captured when the review is spawned (`capture_parent_memory`). The view
+has no bind, recall or continuity and never commits an approval; it is read-only for `/btw` and
+add-only while a review is unattended. Cron (`cron/scheduler_memory.py`) binds one `new_session` per
+run from the operator's `memory.cron_scope` IDs (`resolution_source: explicit_ids`; `{}` =
+principal-global only). With no scope configured it gets `UnboundMemoryService`, which rejects every
+read and write, and `init_memory_service` gives a `cron` or `subagent` agent built without an
+explicit service the same rejection before any provider contact. Delegated children stay memory-less
+(`DELEGATE_BLOCKED_TOOLS`, `skip_memory=True`); a child that ever needs memory must receive
+`open_fork_view` of its parent, never discover one. Gateway hygiene and manual-compression agents are
+compression surfaces and resume the live session's record.
+
 Archives follow the same dormancy: `hermes_cli/backup_memory.py` decides each Hermes home's mode
 from its own config, so an authoritative home's `memories/` is never walked, copied, created or
 restored by backup, export, clone or import; every such archive carries
@@ -130,15 +145,52 @@ restored by backup, export, clone or import; every such archive carries
 `memory_service/` never enter an archive in any mode and are never restored; and an active
 migration manifest refuses backup/export/clone with `MIGRATION_IN_PROGRESS`.
 
+Import surfaces keep the same dormancy. When a home's config requests authoritative mode
+(`hermes_cli/backup_memory.home_disposition`: the requested mode, even when invalid), `hermes
+import-agent` (`hermes_cli/agent_import.py`) and the OpenClaw migration script
+(`optional-skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py`, whose standalone
+runs fall back to the stdlib twin `_inline_requests_authoritative`) record their memory items as
+skipped with a content-free reason before reading a source or touching `memories/`, contact no
+provider and write no `migrations/` state; every non-memory item still imports. They stage no
+import: Provider API v1's `ImportSourceIdentity` has no source kind for Claude Code, Codex or
+OpenClaw files, so the supported path is importing while the home is additive and then the
+explicit native-memory migration. Honcho's native-file upload (`SessionMigrationMixin.
+migrate_memory_files`) never runs at session init in such a home: only the additive branch sets
+the provider config, and naming an additive provider as the authoritative one is a configuration
+error. `hermes honcho migrate` still registers whenever `memory.provider` is `honcho`, in any
+mode, and uploads the `USER.md`/`MEMORY.md` it finds in the working directory or `~/.openclaw`; a
+guard there is R48's.
+
 In a provider-managed session (`memory_service.service.is_provider_managed`) the memory tool
 dispatches only through `MemoryService`: `inline_tool_executors._memory` passes `service=` (never
 `store=`) and never calls `notify_memory_tool_write`; `tools/memory_tool_curated.py` runs the native
 `MemoryStore` semantics over one complete snapshot in memory (`SnapshotMemoryStore`) and turns the
 result into an explicit intent and an ID-based delta; `memory_service/mutation.py::run_curated_mutation`
 loads fresh, stages, commits, replays `version_conflict` with a new request ID and reloads every
-enabled target after a commit. Mutations that need approval fail closed until the approval flow
-lands, and cron and background-review calls are refused before any load until they receive an
-explicit frozen-identity service.
+enabled target after a commit. Mutations that need approval are staged and approved as described
+below.
+
+Approvals in a provider-managed session go through the `approval=` channel of
+`memory_service/mutation.py::run_curated_mutation` (`memory_service/approval.py::ApprovalChannel`).
+Hermes predicts which mutations need approval: `target:user`, a non-default scope, `bulk_edit`,
+reset, import, threat, or `memory.write_approval`, whose unreadable or unrecognized value
+counts as on. Such a mutation is staged, inspected with `inspect_staged`, and approved or
+denied through the terminal approval callback (never inline in a background-review fork, as
+with native `evaluate_gate`). When nobody can answer, it waits for `/memory pending`, but only
+when the session's persisted host-state record equals the staging identity, so replay can
+resume it. Without such an identity it fails closed: before staging when nobody can be asked,
+and after staging (the stage then expires) when an inline prompt goes unanswered.
+Only the stage handle, binding hash, IDs, revision, scopes, decision and expiry are persisted,
+never candidate text or an entry body: one owner-only record per approval under
+`<home>/memory_service/approvals/` (`approval_store.py`), which no archive carries. In a home
+that requests authoritative mode, `/memory pending|approve|reject`
+(`hermes_cli/write_approval_commands_curated.py`) renders the live inspection. It replays
+the byte-free `commit_curated` from the staging session's persisted identity on its own
+transport (`approval_replay.py`), and it retries an unknown outcome only with the identical
+request. It drops a record on denial, expiry, conflict or a void binding. Native
+`pending/memory/` records stay dormant. The memory tool still refuses threat-pattern content,
+as native memory does. A caller that sets `PlannedMutation.threat_decision_id` gets
+mandatory approval instead.
 
 In authoritative or stateless mode the system prompt's curated region comes only from
 `agent/memory_service/render.py`, through `lifecycle.curated_prompt_parts` — one structured
@@ -164,6 +216,20 @@ retires the variant too, and the frozen historical recognizers are never edited.
 revision ledger's "Wave 6 fork decisions: R38, R40, R44 (2026-09-22)" section, which names R48
 as the owner of host recall wiring and of §9.6's host-visible recall warning (L1574) and
 recall-ambiguity blocking (L1576) cells.
+
+Desktop/web, journey and REST memory surfaces route through `MemoryService` too, and none of them
+infers identity from the process directory. `agent/memory_service/admin.py::admin_service` binds an
+explicit administrative identity (`AdminContext`: an explicit org/project/repository chain, or none
+for principal-global) with `platform: admin`. It keeps that binding's host state under
+`<home>/memory_service/admin/` and resumes it on later calls. In authoritative mode the journey
+(`agent/learning_graph.py`, `agent/learning_mutations.py` via `agent/learning_curated.py`) builds
+memory cards from a snapshot's addressable entries. Node ids are `memory:<memory|profile>:<entry-id>`
+plus the origin scope, and edit or delete addresses that id through `run_curated_mutation`.
+`GET /api/memory` reports the provider-managed disposition and never stats native files.
+`POST /api/memory/reset` takes one target and explicit scopes, and fails closed with a typed
+`approval_unavailable` until its approval adoption (the R42 follow-up to R39's flow) lands. A REST
+chat continuation that carries history but has no persisted identity fails `binding_invalid` (or
+starts stateless) before an agent is built (`bootstrap.claim_history_continuation`).
 
 Every non-agent memory surface routes through `MemoryService` too. `/memory` in the CLI, the TUI
 (live-session answers in `tui_gateway/methods_slash.py`, the slash worker otherwise) and the gateway

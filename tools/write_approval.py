@@ -40,15 +40,24 @@ _TRUTHY_STRINGS = frozenset({"on", "true", "yes", "1", "approve", "enabled"})
 
 # --- Config resolution ---
 
-def write_approval_enabled(subsystem: str) -> bool:
-    """Read ``<subsystem>.write_approval``; any unset/invalid value means gate off."""
+_FALSY_STRINGS = frozenset({"off", "false", "no", "0", "disable", "disabled"})
+
+
+def write_approval_enabled(subsystem: str, *, fail_closed: bool = False) -> bool:
+    """Read ``<subsystem>.write_approval``; any unset/invalid value means gate off.
+
+    ``fail_closed=True`` is the provider-managed memory reading (ruling R39-12, Checkpoint B):
+    a failed config read, or any value that is neither absent nor an explicit off, counts as
+    ON, because there ``memory.write_approval`` may add an approval but never silently drop one.
+    """
     if subsystem not in _SUBSYSTEMS:
         return False
     try:
         from hermes_cli.config import load_config, cfg_get
-        return _normalize_enabled(cfg_get(load_config(), subsystem, CONFIG_KEY, default=False))
+        value = cfg_get(load_config(), subsystem, CONFIG_KEY, default=False)
     except Exception:
-        return False
+        return fail_closed
+    return _normalize_strict(value) if fail_closed else _normalize_enabled(value)
 
 
 def _normalize_enabled(value: Any) -> bool:
@@ -57,6 +66,13 @@ def _normalize_enabled(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return isinstance(value, str) and value.strip().lower() in _TRUTHY_STRINGS
+
+
+def _normalize_strict(value: Any) -> bool:
+    """Ruling R39-12: only an absent value (``None``/``False``) or an explicit off string is off."""
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    return not (isinstance(value, str) and value.strip().lower() in _FALSY_STRINGS)
 
 
 # --- Pending store (file-backed) ---

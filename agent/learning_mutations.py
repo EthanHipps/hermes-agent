@@ -6,18 +6,36 @@ for USER.md; ``index`` = position in the combined card list, MEMORY.md first).
 Shared by CLI ``hermes journey``, the TUI ``/journey`` overlay and the desktop.
 Deleting a skill *archives* it (``hermes curator restore`` recovers it);
 deleting a memory rewrites its file.
+
+When the home requests provider-managed (authoritative) memory, memory ids are
+``memory:<source>:<entry-id>`` -- the provider's stable entry ID -- and detail,
+edit and delete go through ``agent.learning_curated`` over ``MemoryService``
+(§9.7 L1609); ``MEMORY.md``/``USER.md`` are never read, stat'd or rewritten, and a
+positional id resolves "stale". ``memory_context`` is the explicit administrative
+scope (an ``agent.memory_service.admin.AdminContext``; ``None`` = principal-global).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 _MEMORY_FILES = {"memory": "MEMORY.md", "profile": "USER.md"}
 
 
 def parse_node_kind(node_id: str) -> str:
     return "memory" if node_id.startswith("memory:") else "skill"
+
+
+def _curated_config(node_id: str) -> Optional[dict]:
+    """The loaded config when *node_id* is a memory node in a home that requests authoritative mode."""
+    if parse_node_kind(node_id) != "memory":
+        return None
+    from agent.memory_service.bootstrap import requests_authoritative_mode
+    from hermes_cli.config import load_config_readonly
+
+    cfg = load_config_readonly()
+    return cfg if requests_authoritative_mode(cfg) else None
 
 
 def _parse_memory_id(node_id: str) -> tuple[str, int]:
@@ -80,9 +98,12 @@ def _dispatch(node_id: str, memory_fn: Callable, skill_fn: Callable, *args) -> d
 
 # ── Inspect (edit prefill) ──────────────────────────────────────────────────
 
-def node_detail(node_id: str) -> dict[str, Any]:
+def node_detail(node_id: str, *, memory_context: Any = None) -> dict[str, Any]:
     """Current content for an edit prefill. ``content`` is the full SKILL.md
     (skills) or the raw memory chunk (memories)."""
+    if (cfg := _curated_config(node_id)) is not None:
+        from agent.learning_curated import curated_detail
+        return curated_detail(cfg, node_id, memory_context)
     return _dispatch(node_id, _memory_detail, _skill_detail)
 
 
@@ -105,7 +126,10 @@ def _skill_detail(node_id: str) -> dict[str, Any]:
 
 # ── Delete ──────────────────────────────────────────────────────────────────
 
-def delete_node(node_id: str) -> dict[str, Any]:
+def delete_node(node_id: str, *, memory_context: Any = None) -> dict[str, Any]:
+    if (cfg := _curated_config(node_id)) is not None:
+        from agent.learning_curated import curated_delete
+        return curated_delete(cfg, node_id, memory_context)
     return _dispatch(node_id, _delete_memory, _delete_skill)
 
 
@@ -133,7 +157,10 @@ def _delete_memory(node_id: str) -> dict[str, Any]:
 
 # ── Edit ────────────────────────────────────────────────────────────────────
 
-def edit_node(node_id: str, content: str) -> dict[str, Any]:
+def edit_node(node_id: str, content: str, *, memory_context: Any = None) -> dict[str, Any]:
+    if (cfg := _curated_config(node_id)) is not None:
+        from agent.learning_curated import curated_edit
+        return curated_edit(cfg, node_id, content, memory_context)
     return _dispatch(node_id, _edit_memory, _edit_skill, content)
 
 

@@ -199,6 +199,11 @@ def init_memory_service(
     from agent.memory_service.errors import MemoryBlockedError
     from agent.memory_service.host_state import HostStateRecord, save_host_state
     from agent.memory_service.service import FailurePolicy, StatelessMemoryService
+    from agent.memory_service.view import UNBOUND_PLATFORMS, UnboundMemoryService
+    if platform in UNBOUND_PLATFORMS:
+        # Ruling R43-8 (§9.6 L1585, §9.3 L1229): a scheduled or delegated agent with no explicit
+        # service never binds for itself — rejected before any provider contact, with no record.
+        return UnboundMemoryService(config, surface=platform), None
 
     binding = (
         resolve_session_binding(logical_session_id, session_db=session_db)
@@ -281,3 +286,31 @@ def _persist_binding(logical_session_id: str, service, *, prior) -> None:
     if prior is not None and prior == record:
         return
     save_host_state(record)
+
+
+def claim_history_continuation(raw_config: Any, session_id: str, *, has_history: bool, session_db: Any = None,
+                               hermes_home: Optional[Path] = None) -> None:
+    """A REST caller that sends its own history is a continuation (contract C6b-6; ruling R42-11; ledger L552).
+
+    ``init_memory_service`` decides "continuation" from SessionDB ``message_count`` alone, so a
+    history-bearing request with no row would bind a NEW logical session into an old conversation,
+    which D-R40-1 forbids. Called before the agent exists: under fail_closed it raises the same
+    ``binding_invalid`` init raises for an ``invalid`` binding; under stateless it persists the same
+    stateless record, which init then resumes. Never binds; additive and new conversations are untouched.
+    """
+    if not has_history or not session_id or not requests_authoritative_mode(raw_config):
+        return
+    from agent.memory_service.config import FailurePolicy, MemoryMode, resolve_memory_service_config
+    from agent.memory_service.errors import MemoryBlockedError
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+
+    config = resolve_memory_service_config(raw_config)  # a configuration error propagates (§9.1 L946)
+    if config.provider_mode is not MemoryMode.AUTHORITATIVE:
+        return
+    if resolve_session_binding(session_id, session_db=session_db, hermes_home=hermes_home).kind != "new":
+        return  # resume / inherit / stateless / invalid: init_memory_service decides
+    if config.failure_policy is FailurePolicy.STATELESS:
+        save_host_state(HostStateRecord(session_id, "stateless", None), hermes_home=hermes_home)
+        return
+    raise MemoryBlockedError("binding_invalid: this session has no persisted memory identity; start a new session",
+                             code="binding_invalid")

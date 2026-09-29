@@ -24,7 +24,10 @@ from hermes_cli.config import redact_key
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import _path_is_under
 from hermes_cli.web_server_gateway import _restart_gateway_after
-from hermes_cli.web_server_memory import _normalize_memory_provider_name, _require_memory_provider_ready
+from hermes_cli.web_server_memory import (
+    _normalize_memory_provider_name, _require_memory_provider_ready, curated_memory_status, curated_reset,
+    rest_archive_dispositions,
+)
 from hermes_cli.web_models import (
     BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
     MemoryReset, PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle,
@@ -449,6 +452,12 @@ async def get_memory_status():
         cfg = load_config()
         mem = cfg.get("memory")
         active = _normalize_memory_provider_name(mem.get("provider")) if isinstance(mem, dict) else ""
+        curated = curated_memory_status(cfg)
+        if curated is not None:
+            # Ruling R42-8: provider-managed authority from config alone -- no native stat (§9.1 L950) and
+            # no provider probe; builtin_files keeps its keys so the desktop panel still renders.
+            return {"active": active, "providers": _discover_memory_provider_statuses(),
+                    "builtin_files": {"memory": 0, "user": 0}, "curated_memory": curated}
         mem_dir = get_hermes_home() / "memories"
         files = {}  # sizes so the UI can show what a reset would erase
         for fname, key in _MEMORY_FILES:
@@ -484,6 +493,12 @@ async def reset_memory(body: MemoryReset):
     target = (body.target or "all").strip().lower()
     if target not in {"all", "memory", "user"}:
         raise HTTPException(status_code=400, detail="target must be all, memory, or user")
+
+    cfg = await asyncio.to_thread(load_config)
+    from agent.memory_service.bootstrap import requests_authoritative_mode
+    if requests_authoritative_mode(cfg):
+        # §9.7 L1607: a scoped reset mutation through MemoryService; never a native file deletion.
+        return await asyncio.to_thread(curated_reset, cfg, body)
 
     mem_dir = get_hermes_home() / "memories"
     deleted = []
@@ -535,6 +550,10 @@ async def run_backup(body: BackupRequest):
     response = _spawn_action(["backup", "-o", output], "backup", log_msg="Failed to spawn backup", prefix="Failed to run backup")
     if archive is not None:
         response["archive"] = str(archive)
+    # Ruling R42-10 (ledger R44-11): per-home typed dispositions; completion is the spawned child's to report.
+    curated = await asyncio.to_thread(rest_archive_dispositions)
+    if curated is not None:
+        response["curated_memory"] = curated
     return response
 
 
@@ -558,6 +577,8 @@ async def download_dashboard_backup(archive: str):
 
 
 def _spawn_import(archive: str, force: bool) -> dict:
+    # No typed curated_memory here (ruling R42-10): each archived home's disposition is known only once the
+    # spawned child reads the archive; R44 prints it in the action log.
     args = ["import", archive]
     if force:
         args.append("--force")

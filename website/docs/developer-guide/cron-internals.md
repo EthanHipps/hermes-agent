@@ -233,7 +233,10 @@ Each cron job runs in a completely fresh agent session:
 - No conversation history from previous runs
 - No memory of previous cron executions (persistent memory — MEMORY.md /
   USER.md — does load, like any other agent run, so durable preferences and
-  facts carry over; per-run conversation context does not)
+  facts carry over; per-run conversation context does not). In
+  `provider_mode: authoritative`, curated memory comes from the provider through
+  the explicit `memory.cron_scope` identity, and is off when no scope is
+  configured.
 - The prompt must be self-contained — cron jobs cannot ask clarifying questions
 - The `cronjob` toolset is disabled (recursion guard)
 

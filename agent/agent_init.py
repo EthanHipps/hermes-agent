@@ -1228,7 +1228,7 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
     return kwargs
 
 
-def _init_memory(agent, _agent_cfg, skip_memory, platform):
+def _init_memory(agent, _agent_cfg, skip_memory, platform, *, memory_service=None):
     # Curated memory (§9.1): the router is selected BEFORE Hermes constructs,
     # initializes, stats, or reads its native MemoryStore. select_memory_service
     # invokes store_factory only on the additive branch, so an authoritative or
@@ -1245,6 +1245,12 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
+    if memory_service is not None:
+        # Ruling R43-1 (§9.7 L1625): an explicit dependency — nothing is resolved, bound, built or mirrored.
+        from agent.memory_service.view import install_injected_service
+        install_injected_service(agent, memory_service, _agent_cfg)
+        agent._memory_manager = None
+        return
     mem_config = None
     # skip_memory skips the external *provider*; enabled_toolsets=["memory"] still gets the
     # built-in store so the memory tool never sees store=None. A toolset on disabled_toolsets
@@ -1330,6 +1336,9 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
             agent._memory_session_key = (getattr(agent, "session_id", None)
                                          if is_provider_managed(agent._memory_service) else None)
             agent._memory_boot_config = _agent_cfg
+            if is_provider_managed(agent._memory_service):   # ruling R43-5: the native review cadence
+                with suppress(Exception):
+                    agent._memory_nudge_interval = int(get_builtin_memory_config(_agent_cfg).get("nudge_interval", 10))
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None
@@ -2276,6 +2285,7 @@ def init_agent(
     checkpoint_max_snapshots: int = 20, checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10, pass_session_id: bool = False,
     requested_provider: str = None, capabilities: Optional[Dict[str, bool]] = None,
+    memory_service: Any = None,
 ):
     """Initialize the AI Agent (body of :meth:`AIAgent.__init__`).
 
@@ -2363,7 +2373,7 @@ def init_agent(
         _agent_cfg = {}
 
     _apply_display_config(agent, _agent_cfg, platform)
-    _init_memory(agent, _agent_cfg, skip_memory, platform)
+    _init_memory(agent, _agent_cfg, skip_memory, platform, memory_service=memory_service)
     _apply_agent_section(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(

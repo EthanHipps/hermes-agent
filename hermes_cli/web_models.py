@@ -203,11 +203,19 @@ class CuratorPause(BaseModel):
 class LearningNodeRef(BaseModel):
     id: str
     profile: Optional[str] = None
+    # Explicit administrative scope for provider-managed memory nodes (ruling R42-12); unused in additive mode.
+    org_id: Optional[str] = None
+    project_id: Optional[str] = None
+    repo_id: Optional[str] = None
 
 class LearningNodeEdit(BaseModel):
     id: str
     content: str
     profile: Optional[str] = None
+    # Explicit administrative scope for provider-managed memory nodes (ruling R42-12); unused in additive mode.
+    org_id: Optional[str] = None
+    project_id: Optional[str] = None
+    repo_id: Optional[str] = None
 
 class DebugShareRequest(BaseModel):
     # Redaction scrubs credential-shaped tokens before logs leave the machine; opt-out only.
@@ -369,6 +377,12 @@ class MemoryProviderSelect(BaseModel):
 
 class MemoryReset(BaseModel):
     target: str = "all"  # "all" | "memory" | "user"
+    # Provider-managed memory only (ruling R42-9): explicit §11.2 scopes (global:<principal>,
+    # organization:<id>, project:<id>, repository:<id>) and the explicit administrative context.
+    scopes: Optional[List[str]] = None
+    org_id: Optional[str] = None
+    project_id: Optional[str] = None
+    repo_id: Optional[str] = None
 
 class BackupRequest(BaseModel):
     output: Optional[str] = None  # defaults to a timestamped zip in the home dir
