@@ -101,7 +101,7 @@ class SessionMaintenanceMixin:
                 self._delete_unreferenced_system_prompts(conn)
             return ids
         removed_ids = self._execute_write(_do) or []
-        for sid in removed_ids if sessions_dir else ():
+        for sid in removed_ids:   # host-state records go with their sessions (R41-13); files only with sessions_dir
             self._remove_session_files(sessions_dir, sid)
         return len(removed_ids)
 

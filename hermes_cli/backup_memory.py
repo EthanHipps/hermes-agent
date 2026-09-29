@@ -47,16 +47,50 @@ MIGRATION_IN_PROGRESS = "MIGRATION_IN_PROGRESS"
 def home_memory_section(home: Path) -> dict:
     """``memory:`` of *home*'s own config.yaml: raw read + env expansion + managed overlay. Never raises.
 
-    Same pipeline as ``doctor_state._doctor_memory_config`` but for any home: an archive
-    spans homes that are not the active one (root + profiles/*; ruling R44-2), while
-    doctor's helper is private and bound to ``hermes_cli.doctor.HERMES_HOME`` (D-R44-e).
+    Doctor, the home skeleton and every archive surface share this one pipeline (D-R44-e, unified by
+    R41; ruling R41-10); an archive spans homes that are not the active one (root + profiles/*;
+    ruling R44-2). An unparseable or unreadable config.yaml falls back to the newest last-known-good
+    copy that ``load_config()`` left in ``backups/config/`` (ruling R41-9), so a broken edit cannot
+    revive an authoritative home's dormant native memory (§9.1 L950). Only the requested mode comes
+    from that copy: unless the result requests authoritative mode, an unparseable config.yaml reads as
+    ``{}`` (additive), as before (EDD-67-A1). A failing managed overlay keeps the home's own section, as
+    doctor always did. Name and signature are pinned (C6b-10).
     """
+    path = Path(home) / "config.yaml"
+    parsed = True
     try:
-        from hermes_cli.config import _expand_env_vars, read_user_config_raw
+        from hermes_cli.config import read_user_config_raw
+        raw = read_user_config_raw(path)
+    except Exception:
+        parsed = False
+        raw = _last_known_good(path)
+    try:
+        from hermes_cli.config import _expand_env_vars
+        config = _expand_env_vars(raw)
+    except Exception:
+        return {}
+    try:
         from hermes_cli.managed_scope import apply_managed_overlay
-        config = apply_managed_overlay(_expand_env_vars(read_user_config_raw(Path(home) / "config.yaml")))
-        section = config.get("memory") if isinstance(config, dict) else None
-        return section if isinstance(section, dict) else {}
+        config = apply_managed_overlay(config)
+    except Exception:
+        logger.debug("managed overlay unavailable for a memory-mode read; using the home's own config")
+    section = config.get("memory") if isinstance(config, dict) else None
+    section = section if isinstance(section, dict) else {}
+    if not parsed:
+        try:
+            from agent.memory_service.bootstrap import requests_authoritative_mode
+        except Exception:
+            return {}
+        if not requests_authoritative_mode({"memory": section}):
+            return {}
+    return section
+
+
+def _last_known_good(path: Path) -> dict:
+    """The newest ``good`` backup of *path* (ruling R41-9), or ``{}``. Never raises."""
+    try:
+        from hermes_cli.config_backups import load_newest_good_backup
+        return load_newest_good_backup(path) or {}
     except Exception:
         return {}
 

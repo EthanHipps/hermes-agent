@@ -44,10 +44,24 @@ from tools.memory_tool_store import (  # noqa: E402,F401  (re-exports)
     ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore, _scan_memory_content)
 
 
+def _refuse_dormant_native_store() -> None:
+    """Ruling R41-15 (§9.7 L1602, §9.1 L950): in a home that requests authoritative mode the native store is dormant.
+    Decided through the never-raising archive/doctor pipeline (R41-10) before any config or native read."""
+    from agent.memory_service.bootstrap import requests_authoritative_mode
+    from hermes_cli.backup_memory import home_memory_section
+    if requests_authoritative_mode({"memory": home_memory_section(get_hermes_home())}):
+        from agent.memory_service.errors import MemoryBlockedError
+        raise MemoryBlockedError("native memory is dormant: memory.provider_mode is authoritative",
+                                 code="native_dormant")
+
+
 def load_on_disk_store() -> "MemoryStore":
     """Fresh on-disk MemoryStore with configured limits/flags for contexts with no live
     agent (gateway, Desktop, ``/memory``) so approvals enforce the SAME caps as
-    ``agent_init``. Falls back to defaults if config can't load; never raises."""
+    ``agent_init``. Falls back to defaults if config can't load; never raises.
+    In a home that requests authoritative mode it raises ``MemoryBlockedError(code="native_dormant")``
+    instead (ruling R41-15); every known caller routes provider-managed memory first."""
+    _refuse_dormant_native_store()
     try:
         from hermes_cli.config import load_config
         config = load_config() or {}

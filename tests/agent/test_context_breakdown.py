@@ -126,3 +126,17 @@ def test_details_lines_caps_listing():
     assert any("… and 5 more" in line for line in lines)
 
 
+def test_provider_managed_memory_counts_the_validated_curated_region():
+    """Ruling R41-12: the memory category is the last validated render, stripped from the system-prompt tier."""
+    from types import SimpleNamespace
+
+    from agent.context_breakdown import _chars_to_tokens
+    agent = SimpleNamespace(
+        model="m", tools=[], context_compressor=None,
+        _memory_service=SimpleNamespace(disposition="provider_authoritative", identity="i"),
+        _curated_prompt_render=("i", SimpleNamespace(text="CURATED")))
+    with patch("agent.system_prompt.build_system_prompt_parts",
+               return_value={"stable": "", "context": "", "volatile": "CURATED"}):
+        data = compute_session_context_breakdown(agent, [])
+    ids = {item["id"]: item["tokens"] for item in data["categories"]}
+    assert ids["memory"] == _chars_to_tokens("CURATED") and "system_prompt" not in ids

@@ -231,6 +231,24 @@ plus the origin scope, and edit or delete addresses that id through `run_curated
 chat continuation that carries history but has no persisted identity fails `binding_invalid` (or
 starts stateless) before an agent is built (`bootstrap.claim_history_continuation`).
 
+Every non-agent memory surface routes through `MemoryService` too. `/memory` in the CLI, the TUI
+(live-session answers in `tui_gateway/methods_slash.py`, the slash worker otherwise) and the gateway
+(off the event loop) share `hermes_cli/memory_command.py`, which answers from the live session's
+service — mode, identity, scopes, `binding_revision` and degraded state from
+`agent/memory_service/status.py`, never an epoch, handle or revision token — or says there is no
+live session; `tools/memory_tool.py::load_on_disk_store` refuses in authoritative mode.
+`hermes memory status|setup` and doctor validate the configuration and probe the provider with
+`negotiate` only; `hermes memory off` and the dashboard's provider switch refuse; `hermes memory
+reset` (explicit `--target` and `--scope`) and onboarding personalization fail closed before any
+provider contact until they adopt the administrative identity and the approval flow. Gateway users
+map explicitly through `memory.gateway_principals` (`"<platform>:<user_id>": <principal>`); an
+unknown or ambiguous user gets `principal.UnmappedPrincipalMemoryService` — no memory and no
+provider call — and a gateway that maps users to more than one principal does not review pending
+memory writes. Doctor, the home skeleton and archives read the requested mode through
+`hermes_cli/backup_memory.py::home_memory_section`, which falls back to the last-known-good
+`backups/config/` copy when config.yaml does not parse, and deleting a session deletes its
+host-state record.
+
 ## Tests
 
 Loop/phase tests go in `tests/agent/`; patch the binding the phase actually reads (siblings often

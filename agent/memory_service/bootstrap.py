@@ -163,6 +163,7 @@ def init_memory_service(
     working_directory: Optional[str] = None,
     backend_factory=None,
     session_db: Any = None,
+    gateway_identity: Any = None,
 ):
     """Select the memory service before any native store is constructed.
 
@@ -208,6 +209,25 @@ def init_memory_service(
         resolve_session_binding(logical_session_id, session_db=session_db)
         if logical_session_id else SessionBinding("new", None)
     )
+
+    if gateway_identity is not None:
+        # Ruling R41-5 (I3; §4.1 L252, §13.1 L2191; contract C6b-12): a gateway user's principal comes only
+        # from an explicit mapping. Unknown, ambiguous, or different from the principal a resumed record froze:
+        # no memory and no provider contact. A malformed table is a configuration error (§9.1 L946).
+        # Runs after R43's cron/subagent guard, which precedes the binding statement.
+        from dataclasses import replace as _replace
+
+        from agent.memory_service.principal import UnmappedPrincipalMemoryService, map_gateway_principal
+
+        principal = map_gateway_principal(raw_config, gateway_identity)
+        frozen = binding.record.state.identity.principal_id if binding.kind in ("resume", "inherit") else None
+        if principal is None or (frozen is not None and frozen != principal):
+            if logical_session_id and binding.record is None:
+                # Agents built without the user id (gateway hygiene, manual /compress) then resume a
+                # stateless record instead of binding or failing binding_invalid (D-R40-1).
+                save_host_state(HostStateRecord(logical_session_id, "stateless", None))
+            return UnmappedPrincipalMemoryService(config), None     # an existing record is kept
+        config = _replace(config, principal_id=principal)
 
     if binding.kind == "stateless":
         # §9.6 L1582 and I1: a session that started stateless stays stateless,

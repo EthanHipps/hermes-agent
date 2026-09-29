@@ -97,7 +97,8 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         if epoch != session_state.provider_epoch:
             self._epoch_changed = True
             logger.warning("memory provider epoch changed (operation=resume)")
-            raise MemoryBlockedError(f"provider epoch changed from {session_state.provider_epoch} to {epoch}; explicit rebind or a new logical session is required")
+            # D-R41-1 (§9.3 L987): the epochs are transport state and never reach a message.
+            raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required")
         request = w.ValidateSessionRequest(expected_provider_epoch=session_state.provider_epoch, frozen_identity=session_state.identity.to_wire())
         result = self._call("validate_session", request, expected_epoch=session_state.provider_epoch)
         if result.result.frozen_identity != session_state.identity.to_wire():
@@ -154,6 +155,16 @@ class ProviderAuthoritativeMemoryService(MemoryService):
     @property
     def epoch_changed(self) -> bool:
         return self._epoch_changed
+
+    def negotiate_only(self) -> w.Negotiation:
+        """Negotiate API v1 and nothing else: no bind, no load, no latch change (contract C6b-13).
+
+        Doctor's and ``hermes memory status``'s health probe (§9.7 L1619; ruling R41-6).
+        Negotiate publishes no state (§9.10 L1683); the envelope's epoch is transport
+        state and is discarded here, never shown (§9.3 L987).
+        """
+        self._negotiate()
+        return self._negotiation
 
     def load_curated(self, target: str) -> w.CuratedSnapshot:
         self._require_target(target)
@@ -309,7 +320,7 @@ class ProviderAuthoritativeMemoryService(MemoryService):
                 self._blocked = True
                 self._block_reason = "provider epoch changed"
                 logger.warning("memory provider epoch changed (operation=%s)", operation)
-                raise MemoryBlockedError(f"provider epoch changed from {expected} to {result.provider_epoch}; explicit rebind or a new logical session is required")
+                raise MemoryBlockedError("provider epoch changed; explicit rebind or a new logical session is required")  # D-R41-1
             _validate_response_correlation(operation, request, result.result)
         except ProviderTransportError as exc:
             self._fail_transport(exc, operation=operation, fresh_load=fresh_load, mutation=mutation, non_blocking=non_blocking)

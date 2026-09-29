@@ -53,16 +53,24 @@ def _build_inspection_agent(platform: str) -> Any:
     from run_agent import AIAgent
     from hermes_cli.config import load_config
     from hermes_cli.tools_config import _get_platform_tools
+    from agent.memory_service.bootstrap import requests_authoritative_mode
     from agent.skill_utils import parse_config_string_list
 
     cfg = load_config()
     model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
     agent_cfg = cfg.get("agent") or {}
+    disabled = parse_config_string_list(agent_cfg.get("disabled_toolsets")) or None
+    authoritative = requests_authoritative_mode(cfg)
+    if authoritative:
+        # Ruling R41-11 (X-5): skip_memory alone still initializes the service when the memory toolset is
+        # enabled (agent_init._init_memory), so the toolset is withheld too; an inspection agent binds no
+        # provider session and leaves no host record.
+        disabled = sorted(set(disabled or ()) | {"memory"})
     return AIAgent(
         model=model_cfg.get("default") or model_cfg.get("model") or "",
         api_key="inspect-only", base_url="https://openrouter.ai/api/v1", quiet_mode=True, save_trajectories=False,
         platform=platform, enabled_toolsets=sorted(_get_platform_tools(cfg, platform)),
-        disabled_toolsets=parse_config_string_list(agent_cfg.get("disabled_toolsets")) or None,
+        disabled_toolsets=disabled, skip_memory=authoritative,
     )
 
 
@@ -175,12 +183,28 @@ def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
             pass
 
     tools = getattr(agent, "tools", None) or []
+    authoritative = _requests_authoritative_memory()
+    if authoritative:
+        # Ruling R41-11: count offline the memory tool the inspection agent withheld, but only as a real
+        # session on this platform ships it: platform toolsets minus the user's disabled ones (EDD-67-A4).
+        from agent.skill_utils import parse_config_string_list
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+        from model_tools import get_tool_definitions
+        from tools.registry import registry
+        cfg = load_config()
+        shipped = get_tool_definitions(
+            enabled_toolsets=sorted(_get_platform_tools(cfg, platform)),
+            disabled_toolsets=parse_config_string_list((cfg.get("agent") or {}).get("disabled_toolsets")) or None,
+            quiet_mode=True)
+        toolset_of = registry.get_tool_to_toolset_map()
+        tools = list(tools) + [tool for tool in shipped if toolset_of.get(_tool_name(tool)) == "memory"]
     sections: List[Tuple[str, int, int]] = [
         (label, len(text), _bytes(text))
         for label, text in (("stable (identity/guidance/skills)", stable), ("context (AGENTS.md/cwd files)", context),
                             ("volatile (memory/profile/timestamp)", volatile))
     ]
-    return {
+    result = {
         "platform": platform,
         "model": getattr(agent, "model", "") or "",
         "system_prompt": _size(full),
@@ -192,6 +216,16 @@ def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
         "skills_breakdown": _compute_skills_breakdown(skills_index),
         "toolsets_breakdown": _compute_toolsets_breakdown(tools),
     }
+    if authoritative:
+        result["curated_memory"] = "provider-managed (not measured offline: no provider session is bound)"
+    return result
+
+
+def _requests_authoritative_memory() -> bool:
+    """The requested mode (R44-3) the inspection agent was built for (ruling R41-11)."""
+    from agent.memory_service.bootstrap import requests_authoritative_mode
+    from hermes_cli.config import load_config
+    return requests_authoritative_mode(load_config())
 
 
 def render_breakdown(data: Dict[str, Any]) -> str:
@@ -206,6 +240,8 @@ def render_breakdown(data: Dict[str, Any]) -> str:
     for label, key in (("skills index", "skills_index"), ("memory", "memory"), ("user profile", "user_profile")):
         byts = data[key]["bytes"]
         lines.append(f"    {label:<19}: {byts:>8,} B  ({_fmt_kb(byts)})")
+    if data.get("curated_memory"):   # ruling R41-11
+        lines.append(f"    {'curated memory':<19}: {data['curated_memory']}")
     lines += ["", "  Prompt tiers:"] + [f"    {label:<36}: {byts:>8,} B  ({_fmt_kb(byts)})" for label, _chars, byts in data["sections"]]
     lines += ["", f"  Tool schemas         : {tools['json_bytes']:>8,} B  ({_fmt_kb(tools['json_bytes'])}, {tools['count']} tools)"]
 

@@ -473,6 +473,9 @@ async def set_memory_provider(body: MemoryProviderSelect):
     provider = _normalize_memory_provider_name(body.provider)
 
     def _run():
+        from hermes_cli.memory_authoritative import PROVIDER_SWITCH_REFUSED, requested_authoritative_config
+        if requested_authoritative_config() is not None:   # ruling R41-21 (R42-13): never switch authority here
+            raise HTTPException(status_code=409, detail=PROVIDER_SWITCH_REFUSED)
         _require_memory_provider_ready(provider)
         with _CONFIG_MUTATION_LOCK:
             cfg = load_config()
