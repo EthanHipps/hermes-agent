@@ -195,3 +195,19 @@ def test_compaction_stamps_updated_at_from_the_clock(env, monkeypatch):
     assert _rollback(env, clock=lambda: later).status is MigrationStatus.ROLLED_BACK
     doc = _doc(path)
     assert (doc.created_at, doc.updated_at) == (created, "2026-09-30T13:30:00Z")
+
+
+def test_a_foreign_providers_approved_batch_is_never_probed_as_ours(env):     # ruling R45-23
+    import json
+    path = _unknown_commit(env)
+    doc = json.loads(path.read_bytes())
+    doc.update(schema="other.hermes-migration/v1", import_run_id="e" * 32)
+    foreign = mm.manifest_path(env.home, "other", "ep-1", "e" * 32)
+    mm.write_document(foreign, doc)
+    path.unlink()
+    backends = len(env.backends)
+    report = _reconcile(env, "e" * 32)
+    assert (report.status, report.code) == (MigrationStatus.REFUSED, "unprovable") and len(env.backends) == backends
+    report = _reconcile(env, "e" * 32, discard=True)
+    assert report.status is MigrationStatus.RECONCILED and len(env.backends) == backends
+    assert [b.outcome for b in _doc(foreign).batches] == ["unknown", "not_committed"]
