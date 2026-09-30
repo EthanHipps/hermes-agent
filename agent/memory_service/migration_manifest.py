@@ -18,10 +18,15 @@ every replacement including compaction), and each batch holds exactly one item (
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import time
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional, Tuple, Union, get_args
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union, get_args
 
 from agent.memory_service import wire as w
 from agent.memory_service.errors import MemoryServiceError
@@ -527,3 +532,139 @@ def from_document(data: Any, *, provider: str, provider_epoch: str,
         raise
     except (KeyError, TypeError, ValueError, AttributeError) as exc:     # w.WireError is a ValueError
         raise MigrationStateError(f"migration state is invalid: {type(exc).__name__}") from exc
+
+
+# -- the store: paths, canonical files, the run listing and the one lock (R45-4, R45-5) ---------------------
+
+
+def migration_root(home: Path) -> Path:
+    from hermes_cli.backup_memory import MIGRATION_STATE_DIRNAME   # C9's name; never a second literal
+    return Path(home) / MIGRATION_STATE_DIRNAME
+
+
+def manifest_path(home: Path, provider: str, provider_epoch: str, import_run_id: str) -> Path:
+    if not (valid_provider(provider) and valid_epoch(provider_epoch)
+            and isinstance(import_run_id, str) and _HEX32_RE.match(import_run_id)):
+        raise MigrationStateError("unsafe migration path segment")
+    return migration_root(home) / provider / provider_epoch / f"{import_run_id}.json"
+
+
+def write_document(path: Path, document: Mapping[str, Any]) -> None:
+    """Canonical bytes via temp file + fsync + atomic replace, owner-only (§9.9 L1655). OSError propagates.
+
+    Approval metadata uses ``utils.atomic_json_write(..., mode=0o600)``; this is the same temp+fsync+replace
+    family, through ``atomic_write_text`` because canonical bytes cannot pass through ``json.dump``. Canonical
+    JSON holds no raw newline, so the text-mode handle writes the bytes unchanged on every platform.
+    """
+    from utils import atomic_write_text
+    atomic_write_text(Path(path), encode(document).decode("utf-8"), create_mode=0o600)
+
+
+def _no_duplicates(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def read_document(path: Path, *, provider: str, provider_epoch: str,
+                  import_run_id: str) -> Union[ActiveManifest, Receipt]:
+    try:
+        raw = Path(path).read_bytes()
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
+        canonical = w.canonical_json(data) == raw
+    except (OSError, ValueError, TypeError, RecursionError) as exc:
+        raise MigrationStateError("migration file is unreadable") from exc
+    if not canonical:
+        raise MigrationStateError("migration file is not canonical JSON")
+    return from_document(data, provider=provider, provider_epoch=provider_epoch, import_run_id=import_run_id)
+
+
+@dataclass(frozen=True)
+class RunFile:
+    path: Path
+    provider: str
+    provider_epoch: str
+    import_run_id: str
+    document: Optional[Union[ActiveManifest, Receipt]]
+    error: Optional[str]                   # content-free reason when document is None
+
+
+def list_runs(home: Path, provider: Optional[str] = None) -> List[RunFile]:
+    """Every ``<provider>/<epoch>/<run>.json``; unreadable ones are reported, never skipped (C9's fail-closed walk).
+
+    The walk mirrors ``backup_memory._walk_migration_state``: two directory levels, ``*.json`` files only, so the
+    lock file and interrupted ``.tmp_*.tmp`` writes are ignored by both readers.
+    """
+    root = migration_root(home)
+    if not root.is_dir():
+        return []
+    runs: List[RunFile] = []
+    for prov in _entries(root, dirs=True):
+        if provider is not None and prov.name != provider:
+            continue
+        for epoch in _entries(prov, dirs=True):
+            for f in _entries(epoch, dirs=False):
+                if not os.path.normcase(f.name).endswith(".json"):
+                    continue
+                run_id = f.name[:-5]
+                try:
+                    doc = read_document(f, provider=prov.name, provider_epoch=epoch.name, import_run_id=run_id)
+                    runs.append(RunFile(f, prov.name, epoch.name, run_id, doc, None))
+                except MigrationStateError as exc:
+                    runs.append(RunFile(f, prov.name, epoch.name, run_id, None, str(exc)))
+    return sorted(runs, key=lambda r: str(r.path))
+
+
+def _entries(directory: Path, *, dirs: bool) -> List[Path]:
+    try:
+        with os.scandir(directory) as it:
+            return sorted((Path(e.path) for e in it if e.is_dir() == dirs), key=lambda p: p.name)
+    except OSError:
+        return []            # C9 still blocks on an unlistable level; ``migrate status`` reports C9's count
+
+
+@contextmanager
+def migration_lock(home: Path, *, timeout_seconds: float = 2.0) -> Iterator[None]:
+    """The one Hermes migration lock (§9.9 L1655; ruling R45-4), shaped like backup.py's _backup_operation_lock.
+
+    ``<home>/migrations/.lock`` sits outside every provider directory, where neither C9 nor ``list_runs`` looks.
+    The OS drops the lock with a crashed process; the file itself may stay.
+    """
+    root = migration_root(home)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / LOCK_NAME
+    handle = path.open("a+b")
+    acquired = False
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if path.stat().st_size == 0:
+                handle.write(b" ")
+                handle.flush()
+
+            def _op(flag: int) -> None:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), flag, 1)
+            lock_flag, unlock_flag = msvcrt.LK_NBLCK, msvcrt.LK_UNLCK
+        else:
+            import fcntl
+
+            def _op(flag: int) -> None:
+                fcntl.flock(handle.fileno(), flag)
+            lock_flag, unlock_flag = fcntl.LOCK_EX | fcntl.LOCK_NB, fcntl.LOCK_UN
+        while not acquired:
+            try:
+                _op(lock_flag)
+                acquired = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise MigrationBusyError("another memory migration command is running") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            with suppress(OSError):
+                _op(unlock_flag)
+        handle.close()

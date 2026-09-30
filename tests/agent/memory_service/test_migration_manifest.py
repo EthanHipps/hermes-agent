@@ -128,3 +128,90 @@ def test_the_timestamps_are_the_manifests_own_members():
     doc = mm.to_document(_manifest())
     assert (doc["created_at"], doc["updated_at"]) == (CREATED, UPDATED)
     assert {"created_at", "updated_at"} <= mm.ACTIVE_KEYS and {"created_at", "updated_at"} <= mm.RECEIPT_KEYS
+
+
+# -- Task 2: the store, the lock and agreement with C9 (R45-4, R45-5, K-9) ----------------------------------
+
+from hermes_cli.backup_memory import (  # noqa: E402
+    MIGRATION_STATE_DIRNAME, MigrationInProgressError, active_migration_manifests, refuse_if_migration_in_progress)
+
+
+def test_the_root_is_c9s_directory(tmp_path):
+    assert mm.migration_root(tmp_path) == tmp_path / MIGRATION_STATE_DIRNAME
+
+
+@pytest.mark.parametrize("provider,epoch", [("../x", EPOCH), ("Ex", EPOCH), ("example", "a/b"), ("example", ""),
+                                            ("example", "x" * 129)])
+def test_unsafe_segments_never_become_paths(tmp_path, provider, epoch):
+    with pytest.raises(mm.MigrationStateError):
+        mm.manifest_path(tmp_path, provider, epoch, RUN)
+
+
+def test_written_files_are_canonical_and_read_back(tmp_path):
+    path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
+    mm.write_document(path, mm.to_document(_manifest()))
+    assert path.read_bytes() == mm.encode(mm.to_document(_manifest()))
+    assert mm.read_document(path, provider="example", provider_epoch=EPOCH, import_run_id=RUN) == _manifest()
+
+
+def test_a_non_canonical_file_is_invalid(tmp_path):
+    path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(mm.to_document(_manifest()), indent=2), encoding="utf-8")
+    with pytest.raises(mm.MigrationStateError):
+        mm.read_document(path, provider="example", provider_epoch=EPOCH, import_run_id=RUN)
+
+
+def _c9_agrees(home):
+    """K-9: what R45 calls active (or unreadable) is exactly what C9 blocks on."""
+    ours = {r.path for r in mm.list_runs(home) if r.document is None or r.document.state == "active"}
+    assert ours == set(active_migration_manifests(home))
+
+
+def test_writer_and_c9_reader_agree_through_every_state(tmp_path):
+    path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
+    mm.write_document(path, mm.to_document(_manifest()))
+    _c9_agrees(tmp_path)
+    with pytest.raises(MigrationInProgressError):
+        refuse_if_migration_in_progress([tmp_path])
+    done = _manifest(_committed(_approved_batch(), "tx-1"), _committed_user_batch())
+    for manifest, state, outcome in ((_manifest(), "rolled_back", "operator_denied"), (done, "completed", "completed")):
+        settled = {b.batch_id: ("committed", b.result.tx_id) if b.result else ("not_committed", None)
+                   for b in manifest.batches}
+        mm.write_document(path, mm.to_document(mm.compact(manifest, state=state, outcome=outcome, settled=settled,
+                                                           updated_at=COMPACTED)))
+        _c9_agrees(tmp_path)
+        assert active_migration_manifests(tmp_path) == [] and mm.list_runs(tmp_path)[0].document.state == state
+
+
+@pytest.mark.parametrize("raw", [b"{\"state\": \"comp", b"", b"[]", b"\xff\xfe"])
+def test_a_torn_or_corrupt_file_blocks_both_readers(tmp_path, raw):
+    path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw)
+    [run] = mm.list_runs(tmp_path)
+    assert run.document is None and run.error
+    _c9_agrees(tmp_path)
+
+
+def test_an_interrupted_write_leaves_a_temp_file_both_readers_ignore(tmp_path):
+    path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
+    mm.write_document(path, mm.to_document(_manifest()))
+    (path.parent / ".tmp_leftover.tmp").write_bytes(b"{\"state\": \"act")
+    _c9_agrees(tmp_path)
+    assert [r.path for r in mm.list_runs(tmp_path)] == [path]
+
+
+def test_the_lock_file_is_outside_every_provider_directory_and_invisible_to_c9(tmp_path):
+    with mm.migration_lock(tmp_path):
+        assert (mm.migration_root(tmp_path) / mm.LOCK_NAME).exists()
+        assert active_migration_manifests(tmp_path) == [] and mm.list_runs(tmp_path) == []
+
+
+def test_a_second_holder_is_busy(tmp_path):
+    with mm.migration_lock(tmp_path):
+        with pytest.raises(mm.MigrationBusyError):
+            with mm.migration_lock(tmp_path, timeout_seconds=0.1):
+                pass
+    with mm.migration_lock(tmp_path, timeout_seconds=0.1):     # released on exit
+        pass
