@@ -134,3 +134,123 @@ def test_an_empty_source_refuses(env):
     report = start(env, Answers())
     assert (report.status, report.code) == (MigrationStatus.REFUSED, "nothing_to_migrate")
     assert json.dumps(report.message) and _stages(env) == []
+
+
+# -- Task 6: inspection, approval, denial and commit (§9.9 steps 3-4; §9.5 L1546, L1562, L1564) --------------
+
+from hermes_cli.backup_memory import refuse_if_migration_in_progress  # noqa: E402
+
+
+def _only_run(env):
+    [path] = run_files(env.home)
+    return path
+
+
+def _read(env):
+    path = _only_run(env)
+    return mm.read_document(path, provider="example", provider_epoch="ep-1", import_run_id=path.stem)
+
+
+def test_a_lost_stage_reply_is_replayed_exactly_and_proceeds(env):
+    env.store.fail_transport("stage_curated", phase="during", times=1)
+    report = start(env, Answers(True, True))
+    assert report.status is MigrationStatus.COMPLETED
+    assert len(env.store.receipts) == 2                     # one commit per batch, no duplicate stage committed
+    assert len({call.request_id for call in env.calls("stage_curated")}) == 2      # the replay reused its request ID
+
+
+def test_the_first_clean_stage_writes_the_active_manifest_before_the_inspection(env):
+    seen = []
+
+    def prompt(approval):
+        [path] = run_files(env.home)                        # already fsynced when the mapping is shown (§9.9 L1663)
+        seen.append((json.loads(path.read_bytes())["state"], len(env.calls("inspect_staged"))))
+        return False
+    start(env, prompt)
+    assert seen == [("active", 1)]
+
+
+def test_denial_compacts_to_operator_denied_and_unblocks_archives(env):
+    report = start(env, Answers(False))
+    assert report.status is MigrationStatus.DENIED
+    doc = _read(env)
+    assert (doc.state, doc.outcome) == ("rolled_back", "operator_denied")
+    assert active_migration_manifests(env.home) == []
+    refuse_if_migration_in_progress([env.home])
+    assert env.store.receipts == {}                           # no commit was sent
+    assert MARKER.encode() not in _only_run(env).read_bytes()
+
+
+@pytest.mark.parametrize("answer", [None, "raise"])
+def test_cancellation_or_a_failing_prompt_is_a_denial(env, answer):
+    def prompt(approval):
+        if answer == "raise":
+            raise RuntimeError("terminal went away")
+        return None
+    report = start(env, prompt)
+    assert report.status is MigrationStatus.DENIED
+
+
+def test_a_failed_denial_compaction_stays_active_and_blocks_archives(env, monkeypatch):
+    real = mm.write_document
+
+    def write(path, doc):
+        if doc["state"] == "rolled_back":
+            raise OSError("disk full")
+        real(path, doc)
+    monkeypatch.setattr(mm, "write_document", write)
+    report = start(env, Answers(False))
+    assert (report.status, report.code) == (MigrationStatus.STOPPED, "denial_not_complete")
+    assert active_migration_manifests(env.home) == [_only_run(env)]
+    with pytest.raises(Exception):
+        refuse_if_migration_in_progress([env.home])
+    assert env.store.receipts == {}
+
+
+def test_approval_writes_the_authorization_ahead_of_the_commit(env, monkeypatch):
+    order = []
+    real_write = mm.write_document
+
+    def write(path, doc):
+        order.append(("write", tuple(b.get("status") for b in doc["batches"]), len(env.store.receipts)))
+        real_write(path, doc)
+    monkeypatch.setattr(mm, "write_document", write)
+    start(env, Answers(True, True))
+    first_approved = next(i for i, (_, statuses, _) in enumerate(order) if statuses[0] == "approved")
+    assert order[first_approved][2] == 0                     # written before any commit reached the store (R39-7)
+
+
+def test_two_batches_commit_sequentially_with_two_prompts(env):
+    answers = Answers(True, True)
+    report = start(env, answers)
+    assert report.status is MigrationStatus.COMPLETED
+    assert [p.target for p in answers.prompts] == ["memory", "user"]
+    assert [p.requirements for p in answers.prompts] == [("import",), ("target_user", "import")]
+    assert len(env.store.receipts) == 2
+
+
+def test_a_second_batch_denied_after_the_first_committed_records_both(env):
+    start(env, Answers(True, False))
+    doc = _read(env)
+    assert (doc.state, doc.outcome) == ("rolled_back", "operator_denied")
+    assert [b.outcome for b in doc.batches] == ["committed", "not_committed"]
+    assert doc.batches[0].tx_id and doc.batches[0].assigned and not doc.batches[1].assigned
+
+
+def test_a_second_batch_rejected_by_the_provider_rolls_back_as_provider_rejected(env):
+    env.store.secret_detector = lambda text: "fixture_secret" if "Ethan" in text else None
+    report = start(env, Answers(True))
+    assert (report.status, report.code) == (MigrationStatus.REJECTED, "secret_rejected")
+    doc = _read(env)
+    assert (doc.state, doc.outcome) == ("rolled_back", "provider_rejected")
+    assert [b.outcome for b in doc.batches] == ["committed", "not_committed"]
+    assert doc.batches[1].request_ids == ()                   # its stage was never clean: nothing correlating it
+
+
+def test_the_prompt_shows_the_create_reuse_mapping_and_no_provider_token(env):
+    answers = Answers(False)
+    start(env, answers)
+    [approval] = answers.prompts
+    assert "create_record" in approval.text and MARKER in approval.text
+    for token in (approval.stage.stage_handle_b64url, approval.stage.approval_binding_sha256, "ep-1"):
+        assert token not in approval.text

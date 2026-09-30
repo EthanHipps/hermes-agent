@@ -34,11 +34,12 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from agent.memory_service import migration_manifest as mm
 from agent.memory_service import wire as w
 from agent.memory_service.admin import ADMIN_FAILURES, AdminContext, admin_service, format_scope
-from agent.memory_service.approval import PromptFn, rfc3339, utcnow
+from agent.memory_service.approval import (ApprovalPrompt, PromptFn, build_authorization, render_stage_inspection,
+                                           rfc3339, utcnow)
 from agent.memory_service.errors import MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError
 from agent.memory_service.migration_source import SourceError, SourceItem, read_live_items, scan_items, target_for
 from agent.memory_service.mutation import PlannedMutation, predict_approval_requirements
-from agent.memory_service.service import MutationRequest
+from agent.memory_service.service import CommitIntent, InspectRequest, MutationRequest
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +438,138 @@ class _Run:
         self._items.update({i.item_key: i for i in items})
         return items
 
+    # -- inspection, approval and commit (§9.9 steps 3-4) --------------------------------------------------
+
+    def header(self, index: int) -> str:
+        batch = self.batches[index]
+        text = (f"Memory migration {self.run_id} — batch {index + 1} of {len(self.batches)}: "
+                f"{', '.join(i.item_key for i in batch.items)} -> {batch.target} at {format_scope(batch.destination_scope)}\n"
+                f"  source: {self.source.source_kind} / {self.source.parser_version} / {self.source.source_id}\n")
+        if index == 0 and self.source.source_kind == "native_memory":               # ruling R45-14 (a)
+            text += SWITCH_NOTICE + "\n"
+        return text
+
+    def approve(self, service: Any, index: int, prompt: PromptFn) -> None:
+        batch = self.batches[index]
+        try:
+            inspection = service.inspect_staged(InspectRequest(target=batch.target, request_id=batch.request_id,
+                                                               stage_handle_b64url=batch.stage.stage_handle_b64url))
+        except ProviderError as exc:
+            return self.probe_failure(service, index, exc)
+        except MemoryBlockedError as exc:
+            raise _Stop(exc.code or "unavailable", "The memory provider is unavailable; run 'hermes memory migrate "
+                                                   "resume'.") from exc
+        summary = inspection.summary
+        if (summary.request_id != batch.request_id or mm.StageRef.of(summary) != batch.stage
+                or tuple(summary.candidate_hashes) != batch.candidate_hashes
+                or tuple(mm.Admission.of(a) for a in summary.admissions) != batch.admissions):
+            raise _Stop("inspection_mismatch", "The provider's inspection does not match the recorded stage; "
+                                               "nothing was approved.")
+        text = self.header(index) + render_stage_inspection(inspection, intent_kind="import",
+                                                            requirements=summary.approval_requirements)
+        answer = _ask(prompt, ApprovalPrompt(target=batch.target, intent_kind="import",
+                                             requirements=tuple(summary.approval_requirements), stage=summary,
+                                             inspection=inspection, text=text))
+        if answer is not True:                              # a denial, a cancellation or no answer (§9.9 L1663)
+            raise _Denied()
+        authorization = build_authorization(summary, principal_id=self.identity.principal_id, now=self.clock())
+        self.persist(index, replace(batch, status="approved", authorization=authorization))   # written ahead (R39-7)
+
+    def commit(self, service: Any, index: int, prompt: PromptFn) -> None:
+        batch = self.batches[index]
+        intent = CommitIntent(target=batch.target, request_id=batch.request_id,
+                              stage_handle_b64url=batch.stage.stage_handle_b64url,
+                              approval_binding_sha256=batch.stage.approval_binding_sha256,
+                              authorized_write_scopes=batch.requested_write_scopes, authorization=batch.authorization)
+        try:
+            result = _exact(service, batch.target, lambda: service.commit_curated(intent))
+        except _Unknown:
+            raise _Stop("outcome_unknown", "The provider did not confirm the commit. Run 'hermes memory migrate "
+                                           "resume': it retries the identical request.") from None
+        except MemoryBlockedError as exc:
+            raise _Stop(exc.code or "unavailable", "The memory provider is unavailable; run 'hermes memory migrate "
+                                                   "resume'.") from exc
+        except ProviderError as exc:
+            if exc.code in ("stage_expired", "version_conflict") and exc.outcome != "unknown":
+                return self.restage(service, index, exc.code)             # proven not committed (§9.3 L1361; X-4)
+            details = exc.details if isinstance(exc.details, dict) else {}
+            if exc.code == "stage_not_found" and details.get("state") == "committed":
+                return self.record_committed(index, str(details["tx_id"]))
+            if exc.outcome == "unknown" or exc.code in ("idempotency_mismatch", "stage_not_found"):
+                raise _Stop("reconcile_required", "The commit state could not be proven; run "
+                                                  "'hermes memory migrate reconcile'.") from exc
+            raise _Rejected(exc.code, _detail(exc), proven=batch.batch_id) from exc
+        if tuple(mm.Admission.of(a) for a in result.admissions) != batch.admissions:     # R38-10
+            raise _Stop("commit_mismatch", "The provider's commit reply does not match the approved stage; "
+                                           "run 'hermes memory migrate reconcile'.")
+        if result.outcome == "committed_audit_pending":
+            self.warnings.append("Saved and published; the memory provider's audit trail is pending.")
+        self.persist(index, replace(batch, status="committed",
+                                    result=mm.CommitRef(result.tx_id, result.outcome, result.snapshot.revision)))
+
+    def record_committed(self, index: int, tx_id: str) -> None:
+        """D-R45-4: stage_not_found {state: committed} proves the acknowledgement; record its tx_id."""
+        batch = self.batches[index]
+        if batch.authorization is None:          # a committed batch always carries the authorization that sent it
+            raise _Stop("reconcile_required", "The provider reports a commit this run never approved; run "
+                                              "'hermes memory migrate reconcile'.")
+        self.persist(index, replace(batch, status="committed", result=mm.CommitRef(tx_id, None, None)))
+
+    def probe_failure(self, service: Any, index: int, exc: ProviderError) -> None:
+        if exc.code == "stage_expired":
+            return self.restage(service, index, "stage_expired")
+        details = exc.details if isinstance(exc.details, dict) else {}
+        if exc.code == "stage_not_found" and details.get("state") == "committed":
+            return self.record_committed(index, str(details["tx_id"]))
+        raise _Stop("reconcile_required", "The recorded stage is gone without proof of its outcome; run "
+                                          "'hermes memory migrate reconcile'.")
+
+    # -- closing ---------------------------------------------------------------------------------------------
+
+    def close(self, outcome: str, status: MigrationStatus, proven: Optional[str], message: str, *,
+              code: Optional[str] = None) -> MigrationReport:
+        """§9.5 L1546: under the held lock, confirm on disk that nothing unproven is committed, then compact."""
+        failed = MigrationReport(MigrationStatus.STOPPED, "denial_not_complete",
+                                 "The migration could not be closed and remains in progress; archives stay blocked. "
+                                 f"Run 'hermes memory migrate reconcile {self.run_id}'.", run_id=self.run_id)
+        try:
+            on_disk = mm.read_document(self.path, provider=self.provider, provider_epoch=self.epoch,
+                                       import_run_id=self.run_id)
+        except mm.MigrationStateError:
+            return failed
+        if on_disk != self.manifest():
+            return failed
+        settled = {}
+        for b in on_disk.batches:
+            if b.status == "committed":
+                settled[b.batch_id] = ("committed", b.result.tx_id)
+            elif b.authorization is None or b.batch_id == proven:
+                settled[b.batch_id] = ("not_committed", None)
+            else:
+                return failed
+        try:
+            mm.write_document(self.path, mm.to_document(mm.compact(on_disk, state=mm.ROLLED_BACK, outcome=outcome,
+                                                                     settled=settled, updated_at=rfc3339(self.clock()))))
+        except OSError:
+            return failed
+        return MigrationReport(status, code, message, run_id=self.run_id, batches=self.summaries())
+
+    def summaries(self) -> Tuple[BatchSummary, ...]:
+        return tuple(BatchSummary(
+            target=b.target, item_keys=tuple(i.item_key for i in b.items),
+            created=sum(a.publication_effect == "create_record" and a.disposition != "withheld_raw" for a in b.admissions),
+            reused=sum(a.publication_effect == "reuse_existing_import" for a in b.admissions),
+            withheld=sum(a.disposition == "withheld_raw" for a in b.admissions), status=b.status) for b in self.batches)
+
+    def finish(self, service: Any, switch: Callable[[], None]) -> MigrationReport:
+        """Temporary (Task 6): compact to completed; Task 7 adds conformance and the mode switch."""
+        receipt = mm.compact(self.manifest(), state=mm.COMPLETED, outcome="completed",
+                             settled={b.batch_id: ("committed", b.result.tx_id) for b in self.batches},
+                             updated_at=rfc3339(self.clock()))
+        mm.write_document(self.path, mm.to_document(receipt))
+        return MigrationReport(MigrationStatus.COMPLETED, None, f"Migration {self.run_id} complete.",
+                               run_id=self.run_id, batches=self.summaries(), warnings=tuple(self.warnings))
+
 
 def start_migration(raw_config: Mapping[str, Any], plan: MigrationPlan, *, home: Path, prompt: PromptFn,
                     switch_to_authoritative: Callable[[], None], backend_factory: Any = None,
@@ -484,4 +617,5 @@ def _drive(run: _Run, service: Any, prompt: PromptFn, switch: Callable[[], None]
                                run_id=run.run_id if run.exists else None)
 
 
-_STEPS: Dict[str, Callable[..., None]] = {"pending": _Run.stage_pending}
+_STEPS: Dict[str, Callable[..., None]] = {"pending": _Run.stage_pending, "staged": _Run.approve,
+                                          "approved": _Run.commit}
