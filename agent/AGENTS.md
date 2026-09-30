@@ -161,6 +161,27 @@ error. `hermes honcho migrate` still registers whenever `memory.provider` is `ho
 mode, and uploads the `USER.md`/`MEMORY.md` it finds in the working directory or `~/.openclaw`; a
 guard there is R48's.
 
+Native memory reaches an authoritative provider only through the explicit §9.9 migration, `hermes
+memory migrate` (`hermes_cli/memory_migrate.py`; engine `agent/memory_service/migration.py`, recovery
+`migration_recovery.py`, state `migration_manifest.py`). It is administration: it binds through
+`admin.admin_service` with an explicit org/project/repository chain over an in-memory authoritative
+overlay, so the home's config.yaml stays additive until the end. Nothing is persisted before the
+provider returns a secret-clean `StageResult`; then one canonical, body-free manifest per run is
+written at `<home>/migrations/<provider>/<epoch>/<run-id>.json` under the lock
+`<home>/migrations/.lock`, before the `inspect_staged` mapping is shown. Each target is staged,
+approved at the terminal (never deferred, never an approval record) and committed in turn, with the
+approved authorization written ahead of the commit so a resume replays the identical request. After
+conformance it switches `memory.provider_mode` to `authoritative` and compacts the manifest to a
+`completed` receipt; sessions and gateways already running keep using `MEMORY.md`/`USER.md` until
+they restart (the mode is fixed per session), and the completion message says so. Denial, rollback
+and reconciliation compact to `rolled_back`. `backup_memory.active_migration_manifests` blocks
+archives on anything not provably compacted. Receipts are hints only: the provider's source tuple
+deduplicates re-imports. A live-native migration needs an additive home and never writes
+`memories/`; a legacy-archive migration (`--archive`) reads the zip and never switches the mode.
+`hermes memory migrate rollback` returns the home to additive mode and warns that the dormant native
+files are stale. The file set and schema are a cross-repository contract pinned by
+`tests/fixtures/hermes-migration/`, which the ygg repository holds too.
+
 In a provider-managed session (`memory_service.service.is_provider_managed`) the memory tool
 dispatches only through `MemoryService`: `inline_tool_executors._memory` passes `service=` (never
 `store=`) and never calls `notify_memory_tool_write`; `tools/memory_tool_curated.py` runs the native
