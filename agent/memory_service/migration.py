@@ -86,7 +86,7 @@ class BatchSummary:
     item_keys: Tuple[str, ...]
     created: int
     reused: int
-    withheld: int
+    withheld: Optional[int]              # None: a compacted receipt keeps no disposition (migrate status)
     status: str
 
 
