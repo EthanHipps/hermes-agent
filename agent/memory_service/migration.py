@@ -21,6 +21,7 @@ step 6.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import uuid
@@ -561,14 +562,60 @@ class _Run:
             reused=sum(a.publication_effect == "reuse_existing_import" for a in b.admissions),
             withheld=sum(a.disposition == "withheld_raw" for a in b.admissions), status=b.status) for b in self.batches)
 
+    # -- conformance, the switch and completion (§9.9 steps 5-6) -------------------------------------------
+
+    def conformance(self, service: Any) -> int:
+        """Ruling R45-13 (§9.9 L1665): the approved manifest against a fresh load of each target."""
+        bad = 0
+        for b in self.batches:
+            snapshot = self._load(service, b.target)
+            stored = {e.id: e for e in snapshot.mutation_entries}
+            delivered = {e.id for e in snapshot.delivery_entries}
+            hashes = {h.client_ref: h.canonical_sha256 for h in b.candidate_hashes}
+            for a in b.admissions:
+                if a.disposition == "withheld_raw":
+                    bad += a.assigned_id in stored or a.assigned_id in delivered
+                elif a.publication_effect == "create_record":
+                    e = stored.get(a.assigned_id)
+                    bad += not (e is not None and e.origin_scope == a.origin_scope
+                                and hashlib.sha256(e.text.encode("utf-8")).hexdigest() == hashes.get(a.client_ref))
+        return bad
+
     def finish(self, service: Any, switch: Callable[[], None]) -> MigrationReport:
-        """Temporary (Task 6): compact to completed; Task 7 adds conformance and the mode switch."""
+        bad = self.conformance(service)
+        if bad:
+            raise _Stop("conformance_failed", f"{bad} imported record(s) do not match the approved migration. "
+                                              "Memory stays additive. Run 'hermes memory migrate resume' to re-check, "
+                                              "or 'hermes memory migrate rollback'.")
+        switched = False
+        # A live-native run switches (D-R45-9: only after conformance); a crash after the switch resumes here
+        # with the home already authoritative, and then neither re-reads the dormant files nor switches again.
+        if self.source.source_kind == "native_memory" and not _requests_authoritative(self.home):
+            for batch in self.batches:
+                self.items_for(batch, fresh=True)                     # ruling R45-12
+            try:
+                switch()
+            except Exception as exc:
+                raise _Stop("mode_switch_failed", "memory.provider_mode could not be switched; the migration stays "
+                                                  "in progress. Run 'hermes memory migrate resume'.") from exc
+            if not _requests_authoritative(self.home):
+                raise _Stop("mode_switch_failed", "config.yaml does not read back as authoritative; the migration "
+                                                  "stays in progress.")
+            switched = True
         receipt = mm.compact(self.manifest(), state=mm.COMPLETED, outcome="completed",
                              settled={b.batch_id: ("committed", b.result.tx_id) for b in self.batches},
                              updated_at=rfc3339(self.clock()))
-        mm.write_document(self.path, mm.to_document(receipt))
-        return MigrationReport(MigrationStatus.COMPLETED, None, f"Migration {self.run_id} complete.",
-                               run_id=self.run_id, batches=self.summaries(), warnings=tuple(self.warnings))
+        try:
+            mm.write_document(self.path, mm.to_document(receipt))
+        except OSError as exc:
+            raise _Stop("completion_not_recorded", "The completion could not be recorded; run "
+                                                   "'hermes memory migrate resume'.") from exc
+        message = f"Migration {self.run_id} complete."
+        if switched:
+            message += (" Memory is now authoritative. MEMORY.md/USER.md were not changed and are now dormant. "
+                        + RESTART_NOTICE)
+        return MigrationReport(MigrationStatus.COMPLETED, None, message, run_id=self.run_id, batches=self.summaries(),
+                               switched=switched, warnings=tuple(self.warnings))
 
 
 def start_migration(raw_config: Mapping[str, Any], plan: MigrationPlan, *, home: Path, prompt: PromptFn,

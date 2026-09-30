@@ -254,3 +254,59 @@ def test_the_prompt_shows_the_create_reuse_mapping_and_no_provider_token(env):
     assert "create_record" in approval.text and MARKER in approval.text
     for token in (approval.stage.stage_handle_b64url, approval.stage.approval_binding_sha256, "ep-1"):
         assert token not in approval.text
+
+
+# -- Task 7: conformance, the mode switch and completion (§9.9 steps 5-6; R45-12, R45-13, R45-14) ------------
+
+def test_completion_switches_an_additive_home_and_compacts(env):
+    from agent.memory_service.migration import RESTART_NOTICE
+    report = start(env, Answers(True, True))
+    assert report.status is MigrationStatus.COMPLETED and report.switched and env.switches == ["authoritative"]
+    assert report.message.count(RESTART_NOTICE) == 1
+    doc = _read(env)
+    assert (doc.state, doc.outcome) == ("completed", "completed")
+    assert active_migration_manifests(env.home) == []
+
+
+def test_switch_happens_after_conformance_and_before_compaction(env, monkeypatch):
+    order = []
+    real = mm.write_document
+    monkeypatch.setattr(mm, "write_document", lambda p, d: (order.append(d["state"]), real(p, d)))
+    real_switch = env.switch
+    env.switch = lambda: (order.append("switch"), real_switch())
+    start(env, Answers(True, True))
+    assert order[-2:] == ["switch", "completed"]
+
+
+def test_withheld_raw_is_verified_absent_and_counted(env):
+    env.store.admission_classifier = lambda cand: "withheld_raw" if "tabs" in cand.text else (
+        "scoped_evidence" if cand.target == "memory" else "trusted_instruction")
+    report = start(env, Answers(True, True))
+    assert report.status is MigrationStatus.COMPLETED
+    assert [(b.target, b.created, b.withheld) for b in report.batches] == [("memory", 1, 1), ("user", 1, 0)]
+
+
+def test_a_conformance_failure_keeps_the_run_active_and_the_home_additive(env, monkeypatch):
+    """A record retired by another writer between commit and reload (§9.9 L1665)."""
+    from agent.memory_service import migration
+    real_conformance = migration._Run.conformance
+
+    def conformance(self, service):
+        for record in env.store.records.values():
+            if record.target == "memory":
+                record.lifecycle = "retired"
+        return real_conformance(self, service)
+    monkeypatch.setattr(migration._Run, "conformance", conformance)
+    report = start(env, Answers(True, True))
+    assert (report.status, report.code) == (MigrationStatus.STOPPED, "conformance_failed")
+    assert env.switches == [] and active_migration_manifests(env.home) == [_only_run(env)]
+
+
+def test_a_native_edit_during_the_run_stops_before_the_switch(env):
+    def prompt(approval):
+        if approval.target == "user":
+            write_native(env.home, memory=["edited while migrating"])
+        return True
+    report = start(env, prompt)
+    assert (report.status, report.code) == (MigrationStatus.STOPPED, "source_changed")
+    assert env.switches == []
