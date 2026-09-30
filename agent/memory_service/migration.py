@@ -38,7 +38,8 @@ from agent.memory_service.admin import ADMIN_FAILURES, AdminContext, admin_servi
 from agent.memory_service.approval import (ApprovalPrompt, PromptFn, build_authorization, render_stage_inspection,
                                            rfc3339, utcnow)
 from agent.memory_service.errors import MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError
-from agent.memory_service.migration_source import SourceError, SourceItem, read_live_items, scan_items, target_for
+from agent.memory_service.migration_source import (SourceError, SourceItem, read_archive_items, read_live_items,
+                                                   scan_items, target_for, valid_item_key)
 from agent.memory_service.mutation import PlannedMutation, predict_approval_requirements
 from agent.memory_service.service import CommitIntent, InspectRequest, MutationRequest
 
@@ -202,8 +203,9 @@ def _start_refusal(raw_config: Mapping[str, Any], plan: MigrationPlan, home: Pat
         return refuse("source_invalid", "--source-id must be 1-64 lowercase letters, digits or hyphens.")
     if (selection.kind == "legacy_archive") != (selection.archive is not None):
         return refuse("source_invalid", "--archive is required for, and only for, a legacy archive source.")
-    if not selection.item_keys:
-        return refuse("source_invalid", "Select at least one item.")
+    if not selection.item_keys or not all(valid_item_key(selection.kind, k) for k in selection.item_keys):
+        return refuse("source_invalid", "Select MEMORY.md and/or USER.md (with --archive: memories/MEMORY.md, "
+                                        "memories/USER.md or profiles/<name>/memories/<file>).")
     per_target = [target_for(k) for k in selection.item_keys]
     if len(per_target) != len(set(per_target)):                       # one item per target per run (R45-6)
         return refuse("source_invalid", "Select at most one MEMORY file and one USER file per run; "
@@ -333,6 +335,10 @@ class _Run:
 
     @staticmethod
     def _read(kind: str, home: Path, archive: Optional[Path], keys: Tuple[str, ...]) -> List[SourceItem]:
+        if kind == "legacy_archive":                                       # ruling R45-8: never switches the mode
+            if archive is None:
+                raise _Stop("archive_required", "Pass --archive with the same archive to restage this run.")
+            return read_archive_items(archive, keys)
         return read_live_items(home, keys)
 
     # -- staging (§9.9 step 3) -----------------------------------------------------------------------------

@@ -270,3 +270,71 @@ def test_the_migrate_parser_carries_the_explicit_chain():
         parser.parse_args(["memory", "migrate", "start", "--item", "MEMORY.md"])
     ns = parser.parse_args(["memory", "migrate", "reconcile", "a" * 32, "--discard", "--yes"])
     assert (ns.run_id, ns.discard, ns.yes) == ("a" * 32, True, True)
+
+
+# -- Task 11: legacy Hermes archives (R45-8; §9.8 L1649, §9.9 L1657) ---------------------------------------
+
+def _legacy_zip(path, memory_text):
+    import zipfile
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(".hermes/config.yaml", "memory: {}\n")
+        zf.writestr(".hermes/memories/MEMORY.md", memory_text.encode("utf-8"))
+    return path
+
+
+def _archive_args(archive, **over):
+    return _args(archive=str(archive), item=["memories/MEMORY.md"], **over)
+
+
+def _archive_tuples(env):
+    return [key for key in env.store.import_index
+            if key[2:6] == ("legacy_archive", "hermes-legacy-archive-v1", "home-default", "memories/MEMORY.md")]
+
+
+def test_a_legacy_archive_migrates_in_an_authoritative_home_without_switching(s6, tmp_path):
+    archive = _legacy_zip(tmp_path / "old.zip", "archived fact one\n§\narchived fact two")
+    write_memory_section(s6.home, {**s6.section, "provider_mode": "authoritative"})
+    config = _config_bytes(s6)
+    s6.answers.append(True)
+    with native_memory_sentinel(s6.home / "memories", deny=True) as sentinel:
+        code = _run(_archive_args(archive))
+    assert code == 0 and sentinel.accesses == []
+    assert _config_bytes(s6) == config                          # an archive run never switches the mode
+    assert len(_archive_tuples(s6)) == 2
+    [run] = mm.list_runs(s6.home)
+    assert (run.document.state, run.document.source.source_kind) == ("completed", "legacy_archive")
+
+
+def test_rerunning_an_archive_with_a_new_run_id_dedupes(s6, tmp_path):
+    archive = _legacy_zip(tmp_path / "old.zip", "archived fact one\n§\narchived fact two")
+    write_memory_section(s6.home, {**s6.section, "provider_mode": "authoritative"})
+    s6.answers.extend([True, True])
+    assert _run(_archive_args(archive)) == 0
+    [first] = mm.list_runs(s6.home)
+    records = len(s6.store.records)
+    assert _run(_archive_args(archive)) == 0
+    [second] = [r for r in mm.list_runs(s6.home) if r.import_run_id != first.import_run_id]
+    assert len(s6.store.records) == records
+    effects = [a.publication_effect for b in second.document.batches for a in b.assigned]
+    assert effects == ["reuse_existing_import", "reuse_existing_import"]
+
+
+def test_an_archive_restage_needs_the_same_archive(s6, tmp_path, capsys):
+    from tests.agent.memory_service.fake_backend import DEFAULT_LIMITS
+    archive = _legacy_zip(tmp_path / "old.zip", "archived fact one\n§\narchived fact two")
+    other = _legacy_zip(tmp_path / "other.zip", "a different fact")
+    s6.answers.append(True)
+    with _patched_write(_crash_after_first_write), pytest.raises(Crash):
+        from hermes_cli.main_agent_cmds import cmd_memory
+        cmd_memory(_archive_args(archive))
+    s6.store.clock.advance(DEFAULT_LIMITS.stage_ttl_seconds + 1)
+    [run] = mm.list_runs(s6.home)
+    before = run.path.read_bytes()
+    capsys.readouterr()
+    assert _run(_args(migrate_command="resume")) == 1
+    assert "(archive_required)" in capsys.readouterr().out and run.path.read_bytes() == before
+    assert _run(_args(migrate_command="resume", archive=str(other))) == 1
+    assert "(source_changed)" in capsys.readouterr().out and run.path.read_bytes() == before
+    s6.answers.extend([True])
+    assert _run(_args(migrate_command="resume", archive=str(archive))) == 0
+    assert mm.list_runs(s6.home)[0].document.state == "completed"

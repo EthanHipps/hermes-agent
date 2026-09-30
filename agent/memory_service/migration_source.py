@@ -80,6 +80,39 @@ def read_live_items(home: Path, item_keys: Sequence[str]) -> List[SourceItem]:
     return items
 
 
+def valid_item_key(kind: str, key: str) -> bool:
+    return key in LIVE_ITEMS if kind == "native_memory" else bool(_ARCHIVE_ITEM_RE.match(key or ""))
+
+
+def read_archive_items(archive: Path, item_keys: Sequence[str]) -> List[SourceItem]:
+    """``hermes-legacy-archive-v1``: native-memory members of a Hermes backup zip, read in memory, never extracted.
+
+    Item keys are archive-relative under the backup's own wrapper, found with the native restore's rule
+    (``hermes_cli.backup._detect_prefix``; ruling R45-25).
+    """
+    import zipfile
+
+    from hermes_cli.backup import _detect_prefix
+    if not item_keys or len(set(item_keys)) != len(item_keys) or not all(_ARCHIVE_ITEM_RE.match(k) for k in item_keys):
+        raise SourceError("source_invalid", "Archive items are memories/MEMORY.md, memories/USER.md or "
+                                            "profiles/<name>/memories/<file>, each once.")
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            prefix = _detect_prefix(zf)
+            items = []
+            for key in item_keys:
+                try:
+                    info = zf.getinfo(prefix + key)
+                except KeyError:
+                    raise SourceError("source_invalid", f"The archive has no {key}; nothing was sent.") from None
+                if info.file_size > MAX_ITEM_BYTES:
+                    raise SourceError("source_invalid", f"{key} is larger than {MAX_ITEM_BYTES} bytes; nothing was sent.")
+                items.append(_item(key, zf.read(info)))
+            return items
+    except (OSError, zipfile.BadZipFile):
+        raise SourceError("source_unreadable", "The archive could not be read as a zip; nothing was sent.") from None
+
+
 def scan_items(items: Iterable[SourceItem]) -> None:
     """Ruling R45-10: the memory tool's strict scan (R38-12) on every entry, already stripped and normalized."""
     from tools.threat_patterns import scan_for_threats
