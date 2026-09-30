@@ -323,6 +323,14 @@ class _Run:
                    identity=mm.Identity.of(service.identity), source=source, batches=batches,
                    archive=plan.source.archive, clock=clock, locks=locks, items=items)
 
+    @classmethod
+    def resume(cls, manifest: mm.ActiveManifest, *, home: Path, archive: Optional[Path], clock,
+               locks: ExitStack) -> "_Run":
+        return cls(home=home, provider=manifest.provider, provider_epoch=manifest.provider_epoch,
+                   run_id=manifest.import_run_id, identity=manifest.identity, source=manifest.source,
+                   batches=manifest.batches, archive=archive, clock=clock, locks=locks, exists=True,
+                   created_at=manifest.created_at, updated_at=manifest.updated_at)
+
     @staticmethod
     def _read(kind: str, home: Path, archive: Optional[Path], keys: Tuple[str, ...]) -> List[SourceItem]:
         return read_live_items(home, keys)
@@ -508,6 +516,29 @@ class _Run:
         self.persist(index, replace(batch, status="committed",
                                     result=mm.CommitRef(result.tx_id, result.outcome, result.snapshot.revision)))
 
+    def restage(self, service: Any, index: int, reason: str) -> None:
+        """§9.5 L1562 / D-R45-3: a new request ID only after proof that the old one never published."""
+        batch = self.batches[index]
+        count = self._restages.get(batch.batch_id, 0) + 1
+        if count > MAX_STAGE_ATTEMPTS:
+            raise _Stop("conflict_exhausted", "Memory kept changing while this batch was restaged; run "
+                                              "'hermes memory migrate resume' later.")
+        self._restages[batch.batch_id] = count
+        items = self.items_for(batch, fresh=True)                          # ruling R45-12: the digest must hold
+        try:
+            stage, request = self.stage(service, batch, self.candidates(
+                batch, items, tuple(h.client_ref for h in batch.candidate_hashes)))
+        except _Rejected as rejected:
+            raise _Rejected(rejected.code, rejected.detail, proven=batch.batch_id) from rejected
+        if tuple(stage.candidate_hashes) != batch.candidate_hashes:     # "changed source/hash" (§9.5 L1562)
+            raise _Stop("source_changed", "The restaged content differs from the recorded clean hashes; run "
+                                          "'hermes memory migrate rollback' and start again.")
+        self.persist(index, replace(
+            batch, status="staged", request_id=request.request_id,
+            prior_requests=batch.prior_requests + (mm.Prior(batch.request_id, reason),),
+            stage=mm.StageRef.of(stage), admissions=tuple(mm.Admission.of(a) for a in stage.admissions),
+            authorization=None))
+
     def record_committed(self, index: int, tx_id: str) -> None:
         """D-R45-4: stage_not_found {state: committed} proves the acknowledgement; record its tx_id."""
         batch = self.batches[index]
@@ -638,6 +669,61 @@ def start_migration(raw_config: Mapping[str, Any], plan: MigrationPlan, *, home:
         return MigrationReport(MigrationStatus.REFUSED, getattr(exc, "code", None) or "unavailable",
                                f"The memory provider could not be reached for the migration ({type(exc).__name__}); "
                                "nothing was sent.")
+
+
+def _same_identity(frozen: Any, assertion: mm.Identity) -> bool:
+    return (frozen.principal_id, frozen.logical_session_id, frozen.org_id, frozen.project_id, frozen.repo_id) == (
+        assertion.principal_id, assertion.logical_session_id, assertion.org_id, assertion.project_id, assertion.repo_id)
+
+
+def _active_runs(home: Path, provider: str, run_id: Optional[str]) -> List[mm.RunFile]:
+    return [r for r in mm.list_runs(home, provider)
+            if (r.document is None or r.document.state == mm.ACTIVE) and (run_id is None or r.import_run_id == run_id)]
+
+
+def resume_migration(raw_config: Mapping[str, Any], *, home: Path, prompt: PromptFn,
+                     switch_to_authoritative: Callable[[], None], run_id: Optional[str] = None,
+                     archive: Optional[Path] = None, backend_factory: Any = None,
+                     clock: Callable[[], datetime] = utcnow) -> MigrationReport:
+    """C7F-3: continue the one active run with its exact recorded requests (D-R45-2)."""
+    home, provider = Path(home), _provider(raw_config)
+    if provider is None:
+        return MigrationReport(MigrationStatus.REFUSED, "configuration_error", "memory.provider is not usable.")
+    if not _active_runs(home, provider, run_id):                      # no state: no lock file either
+        return MigrationReport(MigrationStatus.REFUSED, "no_active_migration", "No memory migration is in progress.")
+    try:
+        with ExitStack() as locks:
+            locks.enter_context(mm.migration_lock(home))
+            runs = _active_runs(home, provider, run_id)               # re-read under the lock
+            if len(runs) != 1:
+                if not runs:
+                    return MigrationReport(MigrationStatus.REFUSED, "no_active_migration",
+                                           "No memory migration is in progress.")
+                return MigrationReport(MigrationStatus.REFUSED, "ambiguous_migration",
+                                       "Name the run: " + ", ".join(r.import_run_id for r in runs))
+            found = runs[0]
+            if found.document is None:
+                return MigrationReport(MigrationStatus.STOPPED, "reconcile_required",
+                                       f"The state of run {found.import_run_id} is unreadable; run "
+                                       f"'hermes memory migrate reconcile {found.import_run_id} --discard'.",
+                                       run_id=found.import_run_id)
+            manifest = found.document
+            context = AdminContext(manifest.identity.org_id, manifest.identity.project_id, manifest.identity.repo_id)
+            with admin_service(_overlay(raw_config), context=context, backend_factory=backend_factory,
+                               hermes_home=home) as service:
+                if (service.session_state.provider_epoch != manifest.provider_epoch
+                        or not _same_identity(service.identity, manifest.identity)):
+                    return MigrationReport(MigrationStatus.STOPPED, "reconcile_required",
+                                           "The provider epoch or the administrative identity changed since this run "
+                                           f"started; run 'hermes memory migrate reconcile {manifest.import_run_id}'.",
+                                           run_id=manifest.import_run_id)
+                run = _Run.resume(manifest, home=home, archive=archive, clock=clock, locks=locks)
+                return _drive(run, service, prompt, switch_to_authoritative)
+    except mm.MigrationBusyError as exc:
+        return MigrationReport(MigrationStatus.STOPPED, exc.code, "Another memory migration command is running.")
+    except ADMIN_FAILURES as exc:
+        return MigrationReport(MigrationStatus.STOPPED, getattr(exc, "code", None) or "unavailable",
+                               "The memory provider could not be reached; nothing changed.")
 
 
 def _drive(run: _Run, service: Any, prompt: PromptFn, switch: Callable[[], None]) -> MigrationReport:
