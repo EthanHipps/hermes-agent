@@ -215,3 +215,44 @@ def test_a_second_holder_is_busy(tmp_path):
                 pass
     with mm.migration_lock(tmp_path, timeout_seconds=0.1):     # released on exit
         pass
+
+
+# -- Task 3: the cross-repository fixture (R45-6, R45-7; contract C7F-2) ------------------------------------
+
+import hashlib  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "hermes-migration"
+EXAMPLE_EPOCH = "019244f0-6b2a-7c3d-8e4f-000000000001"
+
+
+def test_the_fork_copy_matches_its_pinned_digests():
+    lines = (FIXTURE / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert sorted(line.split()[1] for line in lines) == ["active.json", "completed.json", "rolled_back.json",
+                                                         "schema.json"]
+    for line in lines:
+        digest, name = line.split()
+        assert hashlib.sha256((FIXTURE / name).read_bytes()).hexdigest() == digest, name
+
+
+@pytest.mark.parametrize("name,state", [("active", "active"), ("completed", "completed"), ("rolled_back", "rolled_back")])
+def test_every_example_round_trips_byte_for_byte_through_the_writer(name, state):
+    raw = (FIXTURE / f"{name}.json").read_bytes()
+    doc = mm.from_document(json.loads(raw), provider="ygg", provider_epoch=EXAMPLE_EPOCH,
+                           import_run_id="0123456789abcdef0123456789abcdef")
+    assert doc.state == state and mm.encode(mm.to_document(doc)) == raw
+
+
+def test_the_schema_file_names_exactly_the_code_member_sets():
+    schema = json.loads((FIXTURE / "schema.json").read_text(encoding="utf-8"))
+    defs = schema["$defs"]
+    assert set(defs["active"]["properties"]) == mm.ACTIVE_KEYS
+    assert set(defs["activeBatch"]["properties"]) == mm.ACTIVE_BATCH_KEYS
+    assert set(defs["receipt"]["properties"]) == mm.RECEIPT_KEYS
+    assert set(defs["receiptBatch"]["properties"]) == mm.RECEIPT_BATCH_KEYS
+    assert defs["receipt"]["properties"]["outcome"]["enum"] == list(mm.RUN_OUTCOMES)
+    assert defs["activeBatch"]["properties"]["status"]["enum"] == list(mm.BATCH_STATUSES)
+    assert defs["receiptBatch"]["properties"]["outcome"]["enum"] == list(mm.BATCH_OUTCOMES)
+    # one item per batch in both shapes, as from_document enforces (Checkpoint A, R45-6)
+    for shape, key in (("activeBatch", "items"), ("receiptBatch", "item_keys")):
+        assert (defs[shape]["properties"][key]["minItems"], defs[shape]["properties"][key]["maxItems"]) == (1, 1)

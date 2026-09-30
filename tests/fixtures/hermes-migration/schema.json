@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ygg.hermes-migration/v1",
+  "title": "Hermes host migration state (active manifest or compacted receipt)",
+  "description": "The section 9.9 host migration state at <HERMES_HOME>/migrations/<provider>/<provider-epoch>/<import-run-id>.json (spec 9.9 L1655, L1659; contract C7F-1). Files are RFC 8785 canonical JSON with no trailing newline. The top-level state is the member ledger K-9 pins: active, completed or rolled_back; anything else, and an unreadable or corrupt file, reads as active (blocks archives and resume). Written by the Hermes fork (agent/memory_service/migration_manifest.py); read by Hermes C9 and ygg R55's purge. Changes only as a coordinated fork and ygg PR pair (spec 14.1 L2267).",
+  "oneOf": [
+    {"$ref": "#/$defs/active"},
+    {"$ref": "#/$defs/receipt"}
+  ],
+  "$defs": {
+    "hex16": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+    "hex32": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "hex64": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "token": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,256}$"},
+    "nonEmpty": {"type": "string", "minLength": 1},
+    "nullableNonEmpty": {"oneOf": [{"$ref": "#/$defs/nonEmpty"}, {"type": "null"}]},
+    "timestamp": {
+      "description": "RFC 3339, second precision, UTC Z (Checkpoint A ruling R45-6). created_at is set at the first write and never changes; updated_at changes on every replacement, including compaction.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "expiry": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"},
+    "rfc3339": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {"enum": ["principal_global", "organization", "project", "repository"]},
+        "id": {"$ref": "#/$defs/nonEmpty"}
+      }
+    },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_epoch", "visibility_revision", "scope_revisions"],
+      "properties": {
+        "provider_epoch": {"type": "string"},
+        "visibility_revision": {"type": "string"},
+        "scope_revisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope", "revision"],
+            "properties": {"scope": {"$ref": "#/$defs/scope"}, "revision": {"type": "string"}}
+          }
+        }
+      }
+    },
+    "source": {
+      "description": "The logical source identity (spec 9.9 L1657); never an absolute path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "parser_version", "source_id"],
+      "properties": {
+        "source_kind": {"enum": ["native_memory", "legacy_archive"]},
+        "parser_version": {"enum": ["hermes-native-v0.20.6", "hermes-legacy-archive-v1"]},
+        "source_id": {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"}
+      }
+    },
+    "itemKey": {
+      "description": "MEMORY.md or USER.md (native_memory), or an archive-relative key such as memories/MEMORY.md or profiles/<name>/memories/USER.md (legacy_archive); no empty, dot or dot-dot segment.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._/-]{1,256}$"
+    },
+    "candidateHash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client_ref", "canonical_sha256"],
+      "properties": {"client_ref": {"$ref": "#/$defs/nonEmpty"}, "canonical_sha256": {"$ref": "#/$defs/hex64"}}
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client_ref", "assigned_id", "origin_scope", "disposition", "publication_effect", "policy_key"],
+      "properties": {
+        "client_ref": {"$ref": "#/$defs/nonEmpty"},
+        "assigned_id": {"$ref": "#/$defs/nonEmpty"},
+        "origin_scope": {"$ref": "#/$defs/scope"},
+        "disposition": {"enum": ["trusted_instruction", "scoped_evidence", "withheld_raw"]},
+        "publication_effect": {"enum": ["create_record", "reuse_existing_import"]},
+        "policy_key": {"$ref": "#/$defs/nullableNonEmpty"}
+      }
+    },
+    "authorization": {
+      "description": "The approved authorization, written ahead of the first commit send so a resume replays the identical request (spec 9.5 L1564).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "approval_id", "approved_by_principal_id", "approved_at", "expires_at", "approval_binding_sha256"],
+      "properties": {
+        "kind": {"const": "approved"},
+        "approval_id": {"$ref": "#/$defs/nonEmpty"},
+        "approved_by_principal_id": {"$ref": "#/$defs/nonEmpty"},
+        "approved_at": {"$ref": "#/$defs/rfc3339"},
+        "expires_at": {"$ref": "#/$defs/rfc3339"},
+        "approval_binding_sha256": {"$ref": "#/$defs/hex64"}
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage_handle_b64url", "approval_binding_sha256", "expected_revision", "expires_at", "approval_requirements"],
+      "properties": {
+        "stage_handle_b64url": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"},
+        "approval_binding_sha256": {"$ref": "#/$defs/hex64"},
+        "expected_revision": {"$ref": "#/$defs/revision"},
+        "expires_at": {"$ref": "#/$defs/expiry"},
+        "approval_requirements": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["target_user", "non_default_scope", "bulk_edit", "reset", "import", "threat"]}
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_key", "source_sha256"],
+      "properties": {
+        "item_key": {"$ref": "#/$defs/itemKey"},
+        "source_sha256": {
+          "description": "Raw-byte SHA-256 of the source item, recorded when the batch stages clean (ruling R45-12); null while pending.",
+          "oneOf": [{"$ref": "#/$defs/hex64"}, {"type": "null"}]
+        }
+      }
+    },
+    "prior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "outcome"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/hex32"},
+        "outcome": {"enum": ["stage_expired", "version_conflict"]}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tx_id", "commit_outcome", "revision"],
+      "properties": {
+        "tx_id": {"$ref": "#/$defs/token"},
+        "commit_outcome": {"oneOf": [{"enum": ["committed_audit_clean", "committed_audit_pending", "idempotent_replay"]}, {"type": "null"}]},
+        "revision": {"oneOf": [{"$ref": "#/$defs/revision"}, {"type": "null"}]}
+      }
+    },
+    "identity": {
+      "description": "Identity assertions only; never the opaque binding handle (spec 9.3 L991, 9.9 L1655).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principal_id", "profile_id", "logical_session_id", "platform", "org_id", "project_id", "repo_id", "workspace_id", "binding_revision"],
+      "properties": {
+        "principal_id": {"$ref": "#/$defs/nonEmpty"},
+        "profile_id": {"$ref": "#/$defs/nonEmpty"},
+        "logical_session_id": {"$ref": "#/$defs/nonEmpty"},
+        "platform": {"$ref": "#/$defs/nonEmpty"},
+        "org_id": {"$ref": "#/$defs/nullableNonEmpty"},
+        "project_id": {"$ref": "#/$defs/nullableNonEmpty"},
+        "repo_id": {"$ref": "#/$defs/nullableNonEmpty"},
+        "workspace_id": {"$ref": "#/$defs/nullableNonEmpty"},
+        "binding_revision": {"$ref": "#/$defs/nonEmpty"}
+      }
+    },
+    "activeBatch": {
+      "description": "One batch per target (memory, then user), each a state machine pending -> staged -> approved -> committed (rulings R45-9, R45-11).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batch_id", "target", "destination_scope", "requested_write_scopes", "items", "status", "request_id", "prior_requests", "stage", "candidate_hashes", "admissions", "authorization", "result"],
+      "properties": {
+        "batch_id": {"$ref": "#/$defs/hex16"},
+        "target": {"enum": ["memory", "user"]},
+        "destination_scope": {"$ref": "#/$defs/scope"},
+        "requested_write_scopes": {"type": "array", "items": {"$ref": "#/$defs/scope"}},
+        "items": {"description": "Exactly one item per batch: one item per target per run (Checkpoint A, R45-6).", "type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/item"}},
+        "status": {"enum": ["pending", "staged", "approved", "committed"]},
+        "request_id": {"oneOf": [{"$ref": "#/$defs/hex32"}, {"type": "null"}]},
+        "prior_requests": {"type": "array", "items": {"$ref": "#/$defs/prior"}},
+        "stage": {"oneOf": [{"$ref": "#/$defs/stage"}, {"type": "null"}]},
+        "candidate_hashes": {"type": "array", "items": {"$ref": "#/$defs/candidateHash"}},
+        "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
+        "authorization": {"oneOf": [{"$ref": "#/$defs/authorization"}, {"type": "null"}]},
+        "result": {"oneOf": [{"$ref": "#/$defs/result"}, {"type": "null"}]}
+      }
+    },
+    "active": {
+      "description": "The active manifest: first written only after a secret-clean StageResult (spec 9.5 L1560), candidate-body-free.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "state", "provider_epoch", "import_run_id", "created_at", "updated_at", "identity", "source", "batches"],
+      "properties": {
+        "schema": {"description": "<memory.provider>.hermes-migration/v1; ygg.hermes-migration/v1 when the configured provider is ygg (R44-4).", "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}\\.hermes-migration/v1$"},
+        "state": {"description": "Top-level state (ledger K-9).", "const": "active"},
+        "provider_epoch": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+        "import_run_id": {"$ref": "#/$defs/hex32"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "updated_at": {"$ref": "#/$defs/timestamp"},
+        "identity": {"$ref": "#/$defs/identity"},
+        "source": {"$ref": "#/$defs/source"},
+        "batches": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"$ref": "#/$defs/activeBatch"}}
+      }
+    },
+    "receiptBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "destination_scope", "item_keys", "request_ids", "candidate_hashes", "assigned", "tx_id", "outcome"],
+      "properties": {
+        "target": {"enum": ["memory", "user"]},
+        "destination_scope": {"$ref": "#/$defs/scope"},
+        "item_keys": {"description": "Exactly one item per batch (Checkpoint A, R45-6).", "type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/itemKey"}},
+        "request_ids": {"type": "array", "items": {"$ref": "#/$defs/hex32"}},
+        "candidate_hashes": {"type": "array", "items": {"$ref": "#/$defs/candidateHash"}},
+        "assigned": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["client_ref", "assigned_id", "publication_effect"],
+            "properties": {
+              "client_ref": {"$ref": "#/$defs/nonEmpty"},
+              "assigned_id": {"$ref": "#/$defs/nonEmpty"},
+              "publication_effect": {"enum": ["create_record", "reuse_existing_import"]}
+            }
+          }
+        },
+        "tx_id": {"oneOf": [{"$ref": "#/$defs/token"}, {"type": "null"}]},
+        "outcome": {"enum": ["committed", "not_committed", "unknown"]}
+      }
+    },
+    "receipt": {
+      "description": "The body-free receipt that replaces the active manifest at the same path (spec 9.9 L1659). Receipts are hints only; the provider's source tuple deduplicates re-imports.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "state", "outcome", "provider_epoch", "import_run_id", "created_at", "updated_at", "principal_id", "source", "batches"],
+      "properties": {
+        "schema": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}\\.hermes-migration/v1$"},
+        "state": {"description": "Top-level state (ledger K-9).", "enum": ["completed", "rolled_back"]},
+        "outcome": {"enum": ["completed", "operator_denied", "provider_rejected", "operator_rollback", "reconciled", "discarded"]},
+        "provider_epoch": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"},
+        "import_run_id": {"$ref": "#/$defs/hex32"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "updated_at": {"$ref": "#/$defs/timestamp"},
+        "principal_id": {"$ref": "#/$defs/nonEmpty"},
+        "source": {"$ref": "#/$defs/source"},
+        "batches": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"$ref": "#/$defs/receiptBatch"}}
+      }
+    }
+  }
+}
