@@ -284,6 +284,20 @@ def test_the_migrate_parser_carries_the_explicit_chain():
     assert (ns.run_id, ns.discard, ns.yes) == ("a" * 32, True, True)
 
 
+def test_the_migrate_help_says_exit_2_changes_no_state(capsys):
+    """C7F-5: resume, rollback and reconcile also refuse (exit 2) while a run and its provider stage remain."""
+    from hermes_cli.subcommands.memory import build_memory_parser
+
+    def handler(args):
+        return None
+    parser = argparse.ArgumentParser(prog="hermes")
+    build_memory_parser(parser.add_subparsers(dest="command"), cmd_memory=handler)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["memory", "migrate", "--help"])
+    text = " ".join(capsys.readouterr().out.split())           # argparse re-wraps the description
+    assert "changed no migration state" in text and "nothing was staged." not in text
+
+
 # -- Task 11: legacy Hermes archives (R45-8; §9.8 L1649, §9.9 L1657) ---------------------------------------
 
 def _legacy_zip(path, memory_text):

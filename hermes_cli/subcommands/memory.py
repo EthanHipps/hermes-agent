@@ -40,7 +40,8 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     _migrate_parser = memory_sub.add_parser(
         "migrate", help="Move native MEMORY.md/USER.md into the authoritative memory provider (§9.9)",
         description="Exit codes: 0 = your decision was carried out; 1 = stopped or rejected (state may remain); "
-                    "2 = refused, nothing was staged.")
+                    "2 = refused: the command changed no migration state, configuration or memory "
+                    "(for start: nothing was staged).")
     migrate_sub = _migrate_parser.add_subparsers(dest="migrate_command")
     start = migrate_sub.add_parser("start", help="Stage, review and commit a migration, then switch to authoritative")
     start.add_argument("--source-id", required=True, help="Stable id for this source, e.g. home-default (a-z, 0-9, -)")

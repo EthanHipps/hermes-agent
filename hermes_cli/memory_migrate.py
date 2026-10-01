@@ -6,8 +6,10 @@ which holds the candidate bodies, goes to this terminal only (§9.3 L1359). This
 config.yaml writer of ``memory.provider_mode`` (rulings R45-14, R45-15), guarded like ``hermes config set``
 and comment-preserving (``utils.atomic_roundtrip_yaml_update``).
 Exit codes: 0 = the operator's decision was carried out; 1 = stopped or rejected, and state may remain;
-2 = refused; nothing was staged: arguments, non-interactive, configuration, ``MIGRATION_IN_PROGRESS``,
-native dormant, a host scan hit, an ineligible scope, nothing to migrate.
+2 = refused; the command changed no migration state, configuration or memory (for start, nothing was staged):
+arguments, non-interactive, configuration, ``MIGRATION_IN_PROGRESS``, native dormant, a host scan hit, an
+ineligible scope, nothing to migrate; for resume, rollback and reconcile also an ambiguous, unreadable or
+unprovable run, which stays as it was.
 """
 
 from __future__ import annotations
