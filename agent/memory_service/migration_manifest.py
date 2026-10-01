@@ -365,6 +365,15 @@ def _expiry(value: Any, what: str) -> str:
     return value
 
 
+def valid_expiry(value: Any) -> bool:
+    """Whether a stage ``expires_at`` reads back from a manifest (the wire also admits ``+00:00`` and any fraction)."""
+    try:
+        _expiry(value, "expires_at")
+    except (MigrationStateError, ValueError):
+        return False
+    return True
+
+
 def _literal(value: Any, options: Tuple[str, ...], what: str) -> str:
     _need(isinstance(value, str) and value in options, f"{what} is not a known value")
     return value

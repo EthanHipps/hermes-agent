@@ -401,7 +401,8 @@ class _Run:
             refs = tuple(c.client_ref for c in candidates)
             if (tuple(h.client_ref for h in stage.candidate_hashes) != refs
                     or tuple(a.client_ref for a in stage.admissions) != refs
-                    or any(a.origin_scope != batch.destination_scope for a in stage.admissions)):
+                    or any(a.origin_scope != batch.destination_scope for a in stage.admissions)
+                    or not mm.valid_expiry(stage.expires_at)):         # else the manifest could not read it back
                 raise _Stop("invalid_reply", "The provider's stage reply does not match the request; nothing was approved.")
             return stage, request
         raise _Rejected("conflict_exhausted")

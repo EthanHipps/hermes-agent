@@ -77,6 +77,25 @@ def test_a_crash_after_the_clean_stage_before_the_manifest_leaves_no_host_state(
     assert all(i.encode() not in file_bytes_under(env.home) for i in ids)
 
 
+def test_a_stage_expiry_the_manifest_cannot_read_back_is_refused_before_any_persist(env, monkeypatch):
+    """A '+00:00' expiry is valid on the wire (§9.3) but outside the manifest's C7F-2 grammar: refuse it up front."""
+    import dataclasses
+    from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService as Service
+    real_stage, real_inspect = Service.stage_curated, Service.inspect_staged
+
+    def offset(stage):
+        return dataclasses.replace(stage, expires_at=stage.expires_at[:-1] + "+00:00")
+
+    def inspect(self, request):                       # a consistent provider answers inspect the same way
+        inspection = real_inspect(self, request)
+        return dataclasses.replace(inspection, summary=offset(inspection.summary))
+    monkeypatch.setattr(Service, "stage_curated", lambda self, request: offset(real_stage(self, request)))
+    monkeypatch.setattr(Service, "inspect_staged", inspect)
+    report = start(env, Answers(False))
+    assert (report.status, report.code, report.run_id) == (MigrationStatus.STOPPED, "invalid_reply", None)
+    _no_host_state(env)
+
+
 def test_a_run_that_became_active_meanwhile_is_not_joined(env, monkeypatch):     # ruling R45-22
     from agent.memory_service import migration
     real_scan = migration.scan_items
