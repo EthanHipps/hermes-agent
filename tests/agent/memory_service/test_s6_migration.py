@@ -148,6 +148,18 @@ def test_status_is_content_free(s6, capsys):
         assert token not in out
 
 
+def test_status_of_a_compacted_run_does_not_count_withheld_raw_as_plain_new(s6, capsys):
+    """A receipt keeps no disposition (R45-impl-3), so its create count must not read as plain new memory."""
+    s6.store.admission_classifier = lambda cand: "withheld_raw" if "tabs" in cand.text else (
+        "scoped_evidence" if cand.target == "memory" else "trusted_instruction")
+    s6.answers.extend([True, True])
+    assert _run(_args()) == 0
+    capsys.readouterr()
+    assert _run(_args(migrate_command="status")) == 0
+    [memory] = [line for line in capsys.readouterr().out.splitlines() if "memory (MEMORY.md)" in line]
+    assert "2 new incl. any withheld raw, 0 already present (committed)" in memory
+
+
 def test_rollback_switches_back_and_warns_stale(s6, capsys):
     s6.answers.extend([True, True])
     assert _run(_args()) == 0

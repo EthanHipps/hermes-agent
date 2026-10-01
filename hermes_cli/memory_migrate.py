@@ -152,7 +152,9 @@ def _status(args: Any) -> int:
         print(f"    {s.run_id}: {state}{outcome}{blocks}" + (f" ({s.error})" if s.error else ""))
         for b in s.batches:
             withheld = "" if b.withheld is None else f", {b.withheld} withheld raw"
-            print(f"      {b.target} ({', '.join(b.item_keys)}): {b.created} new, {b.reused} already present"
+            # A receipt keeps no disposition (R45-impl-3), so its create count includes withheld-raw admissions.
+            new = "new" if b.withheld is not None else "new incl. any withheld raw"
+            print(f"      {b.target} ({', '.join(b.item_keys)}): {b.created} {new}, {b.reused} already present"
                   f"{withheld} ({b.status})")
     blocking = len(active_migration_manifests(home))
     if blocking != sum(s.blocks_archives for s in summaries):
