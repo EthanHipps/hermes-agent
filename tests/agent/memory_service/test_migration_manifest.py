@@ -256,3 +256,23 @@ def test_the_schema_file_names_exactly_the_code_member_sets():
     # one item per batch in both shapes, as from_document enforces (Checkpoint A, R45-6)
     for shape, key in (("activeBatch", "items"), ("receiptBatch", "item_keys")):
         assert (defs[shape]["properties"][key]["minItems"], defs[shape]["properties"][key]["maxItems"]) == (1, 1)
+
+
+def test_the_schema_item_key_refuses_what_the_reader_refuses():
+    """§9.9 L1655: no absolute path and no empty, dot or dot-dot segment, in the schema exactly as in the reader."""
+    import re
+    item_key = json.loads((FIXTURE / "schema.json").read_text(encoding="utf-8"))["$defs"]["itemKey"]
+    shape, refused = re.compile(item_key["pattern"]), re.compile(item_key["not"]["pattern"])
+
+    def read(key):
+        return w.ImportSourceIdentity.from_wire({"source_kind": "legacy_archive", "parser_version":
+                                                 "hermes-legacy-archive-v1", "source_id": "home-default",
+                                                 "item_key": key})
+    for key in ("MEMORY.md", "USER.md", "memories/MEMORY.md", "profiles/a.b/memories/USER.md"):
+        assert shape.search(key) and not refused.search(key), key
+        read(key)
+    for key in ("/home/u/.hermes/memories/MEMORY.md", "../MEMORY.md", "memories//USER.md", "memories/./USER.md",
+                "memories/"):
+        assert refused.search(key), key
+        with pytest.raises(w.WireError):
+            read(key)

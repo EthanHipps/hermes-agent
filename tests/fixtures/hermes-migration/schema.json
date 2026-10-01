@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ygg.hermes-migration/v1",
   "title": "Hermes host migration state (active manifest or compacted receipt)",
-  "description": "The section 9.9 host migration state at <HERMES_HOME>/migrations/<provider>/<provider-epoch>/<import-run-id>.json (spec 9.9 L1655, L1659; contract C7F-1). Files are RFC 8785 canonical JSON with no trailing newline. The top-level state is the member ledger K-9 pins: active, completed or rolled_back; anything else, and an unreadable or corrupt file, reads as active (blocks archives and resume). Written by the Hermes fork (agent/memory_service/migration_manifest.py); read by Hermes C9 and ygg R55's purge. Changes only as a coordinated fork and ygg PR pair (spec 14.1 L2267).",
+  "description": "The section 9.9 host migration state at <HERMES_HOME>/migrations/<provider>/<provider-epoch>/<import-run-id>.json (spec 9.9 L1655, L1659; contract C7F-1). Files are RFC 8785 canonical JSON with no trailing newline. The top-level state is the member ledger K-9 pins: active, completed or rolled_back; anything else, and an unreadable or corrupt file, reads as active (blocks archives and resume). Written by the Hermes fork (agent/memory_service/migration_manifest.py); read by Hermes C9 and ygg R55's purge. Changes only as a coordinated fork and ygg PR pair (spec 14.1 L2267). The schema checks shape only; the Hermes reader (migration_manifest.from_document) also enforces cross-member invariants (one batch per target, state/outcome agreement, per-status batch members, scopes, the item file matching its target, and epoch/run ID matching the path), and a document that fails them reads as corrupt.",
   "oneOf": [
     {"$ref": "#/$defs/active"},
     {"$ref": "#/$defs/receipt"}
@@ -62,7 +62,8 @@
     "itemKey": {
       "description": "MEMORY.md or USER.md (native_memory), or an archive-relative key such as memories/MEMORY.md or profiles/<name>/memories/USER.md (legacy_archive); no empty, dot or dot-dot segment.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9._/-]{1,256}$"
+      "pattern": "^[A-Za-z0-9._/-]{1,256}$",
+      "not": {"pattern": "(^|/)\\.{0,2}(/|$)"}
     },
     "candidateHash": {
       "type": "object",
