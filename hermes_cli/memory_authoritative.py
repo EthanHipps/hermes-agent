@@ -4,8 +4,8 @@ A sibling of ``main_agent_cmds.py`` and ``memory_setup.py``: each of their comma
 branch into here and keeps its additive body byte-for-byte (§9.10 L1674). Keyed on the REQUESTED mode
 (R44-3), read through the never-raising, last-known-good-aware archive/doctor pipeline (rulings R41-9,
 R41-10): an invalid authoritative config is reported, never treated as additive, and never reaches a
-native file. Nothing here writes config.yaml: switching authority is an explicit operator edit, and the
-rollback that compacts migration state is R45's (§9.9 L1664–L1668; ruling R41-7).
+native file. Nothing here writes config.yaml; switching authority is ``hermes memory migrate`` (R45) or an
+explicit operator edit (§9.9 L1664–L1668; ruling R41-7).
 """
 
 from __future__ import annotations
@@ -109,9 +109,9 @@ def setup_command(config: Mapping[str, Any], args: Any = None, *, backend_factor
 def off_command(config: Mapping[str, Any]) -> int:
     """Ruling R41-7: ``off`` never switches authority and writes nothing (exit 2)."""
     print("\n  memory.provider_mode is authoritative: 'hermes memory off' would leave an invalid authoritative\n"
-          "  configuration, and it never switches authority. Returning to additive memory is an explicit edit\n"
-          "  of memory.provider_mode; the dormant MEMORY.md/USER.md are stale and authoritative changes are not\n"
-          "  in them. Nothing was changed.\n")
+          "  configuration, and it never switches authority. Return to additive memory with\n"
+          "  'hermes memory migrate rollback', which also warns that the dormant MEMORY.md/USER.md are stale.\n"
+          "  Nothing was changed.\n")
     return 2
 
 

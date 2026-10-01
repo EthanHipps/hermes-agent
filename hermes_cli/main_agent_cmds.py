@@ -65,15 +65,23 @@ def _cmd_memory_reset(args):
     print(f"  Files were in: {display_hermes_home()}/memories/\n")
 
 
+def _cmd_memory_migrate(args):
+    from hermes_cli.memory_migrate import migrate_command
+    sys.exit(migrate_command(args))
+
+
+# Handlers resolve their module-level function at call time, so a patch of ``_cmd_memory_off`` still takes.
+_MEMORY_SUBCOMMANDS = {"off": lambda args: _cmd_memory_off(), "reset": lambda args: _cmd_memory_reset(args),
+                       "migrate": lambda args: _cmd_memory_migrate(args)}
+
+
 def cmd_memory(args):
-    sub = getattr(args, "memory_command", None)
-    if sub == "off":
-        _cmd_memory_off()
-    elif sub == "reset":
-        _cmd_memory_reset(args)
-    else:
-        from hermes_cli.memory_setup import memory_command
-        memory_command(args)
+    handler = _MEMORY_SUBCOMMANDS.get(getattr(args, "memory_command", None))
+    if handler is not None:
+        handler(args)
+        return
+    from hermes_cli.memory_setup import memory_command
+    memory_command(args)
 
 
 # (args attribute, acp flag) — forwarded in this order.
