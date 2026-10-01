@@ -11,7 +11,7 @@ import pytest
 
 from agent.memory_service import migration_manifest as mm
 from agent.memory_service import wire as w
-from agent.memory_service.migration import MigrationStatus
+from agent.memory_service.migration import RESTART_NOTICE, MigrationStatus
 from hermes_cli.backup_memory import active_migration_manifests
 from tests.agent.memory_service.fake_backend import DEFAULT_LIMITS
 from tests.agent.memory_service.migration_support import (
@@ -191,9 +191,30 @@ def test_crash_after_the_switch_before_completion_compacts_on_resume(env):
     assert _manifest(env).state == "active" and env.raw()["memory"]["provider_mode"] == "authoritative"
     report = resume(env, Answers())
     assert report.status is MigrationStatus.COMPLETED and not report.switched
+    assert RESTART_NOTICE in report.message                       # running gateways still use the dormant files
     assert env.switches == ["authoritative"]
     assert _manifest(env).state == "completed"
     _one_record_per_entry(env)
+
+
+def test_a_failed_completion_write_after_the_switch_still_names_the_restart(env, monkeypatch):
+    real = mm.write_document
+    fired = []
+
+    def write(path, doc):
+        if not fired and doc.get("state") == "completed":
+            fired.append(True)
+            raise OSError("disk full")
+        real(path, doc)
+    monkeypatch.setattr(mm, "write_document", write)
+    report = start(env, Answers(True, True))
+    assert (report.status, report.code) == (MigrationStatus.STOPPED, "completion_not_recorded")
+    assert RESTART_NOTICE in report.message and env.switches == ["authoritative"]
+    monkeypatch.undo()
+    report = resume(env, Answers())
+    assert report.status is MigrationStatus.COMPLETED and not report.switched
+    assert RESTART_NOTICE in report.message
+    assert _manifest(env).state == "completed"
 
 
 def test_crash_after_completion_is_terminal(env):

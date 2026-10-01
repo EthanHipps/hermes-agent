@@ -627,7 +627,9 @@ class _Run:
         switched = False
         # A live-native run switches (D-R45-9: only after conformance); a crash after the switch resumes here
         # with the home already authoritative, and then neither re-reads the dormant files nor switches again.
-        if self.source.source_kind == "native_memory" and not _requests_authoritative(self.home):
+        native = self.source.source_kind == "native_memory"
+        already = native and _requests_authoritative(self.home)
+        if native and not already:
             for batch in self.batches:
                 self.items_for(batch, fresh=True)                     # ruling R45-12
             try:
@@ -639,6 +641,9 @@ class _Run:
                 raise _Stop("mode_switch_failed", "config.yaml does not read back as authoritative; the migration "
                                                   "stays in progress.")
             switched = True
+        # Once config.yaml reads authoritative (switched now, or before a crash or failed receipt write), running
+        # sessions and gateways must be told to restart, on every path that reports this run (R45-14).
+        restart = (" " + RESTART_NOTICE) if (switched or already) else ""
         receipt = mm.compact(self.manifest(), state=mm.COMPLETED, outcome="completed",
                              settled={b.batch_id: ("committed", b.result.tx_id) for b in self.batches},
                              updated_at=rfc3339(self.clock()))
@@ -646,11 +651,12 @@ class _Run:
             mm.write_document(self.path, mm.to_document(receipt))
         except OSError as exc:
             raise _Stop("completion_not_recorded", "The completion could not be recorded; run "
-                                                   "'hermes memory migrate resume'.") from exc
+                                                   "'hermes memory migrate resume'." + restart) from exc
         message = f"Migration {self.run_id} complete."
         if switched:
-            message += (" Memory is now authoritative. MEMORY.md/USER.md were not changed and are now dormant. "
-                        + RESTART_NOTICE)
+            message += " Memory is now authoritative. MEMORY.md/USER.md were not changed and are now dormant." + restart
+        elif already:
+            message += restart
         return MigrationReport(MigrationStatus.COMPLETED, None, message, run_id=self.run_id, batches=self.summaries(),
                                switched=switched, warnings=tuple(self.warnings))
 
