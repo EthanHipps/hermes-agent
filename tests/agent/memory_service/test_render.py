@@ -185,3 +185,50 @@ def test_snapshots_must_arrive_in_the_documented_order(tmp_path):
     memory, user = _snapshots(tmp_path, store)
     with pytest.raises(ValueError):
         render_curated_prompt(user, memory)
+
+
+def test_generated_general_packet_preserves_sources_order_and_exclusions(tmp_path):
+    """OR-W12-1 generated delivery is data, never a mutation/profile/instruction record."""
+    import json
+    from pathlib import Path
+    vectors = json.loads((Path(__file__).parents[2] / "fixtures/provider-contract-v2/vectors.json").read_bytes())
+    by_id = {v["id"]: v["input"]["value"] for v in vectors}
+    registry, task = by_id["delivery-registry"], by_id["delivery-task"]
+    store = FakeProviderStore()
+    from tests.agent.memory_service.fake_backend import set_key
+    from agent.memory_service.service import RecallQuery
+    ordinary = store.seed_record(REPO, "memory", "ordinary memory")
+    profile = store.seed_record(PG, "user", "ordinary profile", lane="trusted_instruction")
+    service = _service(tmp_path, store)
+    user = service.load_curated("user")
+    memory = service.load_curated("memory")
+    ordinary_delivery = memory.delivery_entries[0].to_wire()
+    store.corrupt_result("load_curated", set_key("delivery_entries", [registry, task, registry, ordinary_delivery]))
+    decoded = service.load_curated("memory")
+    rendered = render_curated_prompt(decoded, user)
+    assert rendered.text.count('"verify_id"') == 1
+    assert rendered.text.index('"verify_id"') < rendered.text.index(task["text"])
+    assert all(line.startswith("> ") for line in rendered.text.splitlines() if task["text"] in line or '"argv"' in line)
+    assert not any(hasattr(e, "provenance") for e in decoded.delivery_entries[:3])
+    assert rendered.delivered_ids == tuple(dict.fromkeys([task["task_id"], *task["source_ids"], ordinary.id, profile.id]))
+    registry_only = w.CuratedSnapshot.from_wire({**decoded.to_wire(), "delivery_entries": [registry]})
+    assert render_curated_prompt(registry_only, None).text is not None
+    assert [entry.id for entry in decoded.mutation_entries] == [ordinary.id]
+    cached_prompt = rendered.text
+    task_b = {**task, "task_id": "validation-only-task", "source_ids": ["validation-source-1", "validation-source-2"]}
+    store.corrupt_result("load_curated", set_key("delivery_entries", [task_b]))
+    validation = service.load_curated("memory")
+    assert validation.delivery_entries[0].task_id == task_b["task_id"]
+    current = service.load_curated("memory")
+    assert all(isinstance(entry, w.DeliveredEntry) for entry in current.delivery_entries)
+    exclusions = ("caller", *rendered.delivered_ids)
+    service.recall_context(RecallQuery("memory", current.revision, "task", ("general", "hermes_memory"), exclusions, w.RecallBudget(0, 3000, 20)))
+    request = service._backend.calls[-1][1]
+    assert request.source_revision == current.revision
+    assert request.exclude_entry_ids == exclusions
+    assert not set((task_b["task_id"], *task_b["source_ids"])) & set(request.exclude_entry_ids)
+    assert rendered.text == cached_prompt
+    service.recall_context(RecallQuery("user", user.revision, "profile", ("hermes_user",), (profile.id, "user-caller"), w.RecallBudget(0, 3000, 20)))
+    assert service._backend.calls[-1][1].exclude_entry_ids == (profile.id, "user-caller")
+    with pytest.raises(w.WireError):
+        w.CuratedSnapshot.from_wire({**user.to_wire(), "delivery_entries": [task]})

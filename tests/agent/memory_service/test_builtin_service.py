@@ -51,7 +51,7 @@ def _add(service, target, text, request_id="r1"):
         intent=w.MutationIntent(kind="add"),
         mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),),
         candidate_entries=(
-            w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target=target, proposed_policy_key=None, import_source_identity=None),
+            w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target=target, proposed_policy_key=None, import_source_identity=None, memory_admission="declarative" if target == "memory" else None),
         ),
         provenance=PROVENANCE,
     )
@@ -108,7 +108,7 @@ def test_inspect_shows_before_and_after_without_mutating():
         requested_write_scopes=(scope,),
         intent=w.MutationIntent(kind="add"),
         mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),),
-        candidate_entries=(w.CandidateEntry(client_ref="c1", text="  Name: Ethan  ", destination_scope=scope, target="user", proposed_policy_key=None, import_source_identity=None),),
+        candidate_entries=(w.CandidateEntry(client_ref="c1", text="  Name: Ethan  ", destination_scope=scope, target="user", proposed_policy_key=None, import_source_identity=None, memory_admission=None),),
         provenance=PROVENANCE,
     )
     staged = service.stage_curated(req)
@@ -136,7 +136,7 @@ def test_replace_and_remove_use_exact_ids():
         requested_write_scopes=(scope,),
         intent=w.MutationIntent(kind="replace", matched_entry_id=alpha_id),
         mutation_delta=(w.MutationDeltaItem(action="supersede", old_record_id=alpha_id, replacement_client_ref="c1"),),
-        candidate_entries=(w.CandidateEntry(client_ref="c1", text="beta", destination_scope=scope, target="memory", proposed_policy_key=None, import_source_identity=None),),
+        candidate_entries=(w.CandidateEntry(client_ref="c1", text="beta", destination_scope=scope, target="memory", proposed_policy_key=None, import_source_identity=None, memory_admission="declarative"),),
         provenance=PROVENANCE,
     )
     staged = service.stage_curated(replace)
@@ -222,7 +222,7 @@ def test_import_is_refused_because_there_is_no_import_source_index():
         (scope,),
         w.MutationIntent(kind="import", import_run_id="run-1", source_kind="native_memory"),
         (w.MutationDeltaItem(action="add", client_ref="c1"),),
-        (w.CandidateEntry("c1", "already here", scope, "memory", None, identity),),
+        (w.CandidateEntry("c1", "already here", scope, "memory", None, identity, memory_admission="declarative" if "memory" == "memory" and identity is None else None),),
         PROVENANCE,
     )
     with pytest.raises(ProviderError) as exc:
@@ -237,7 +237,7 @@ def test_expired_stage_answers_stage_expired_on_every_door(monkeypatch):
     service = _service()
     snap = service.load_curated("memory")
     scope = snap.default_write_scope
-    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     staged = service.stage_curated(req)
     later = datetime.now(timezone.utc) + timedelta(hours=2)
     monkeypatch.setattr(builtin_module, "_now", lambda: later)
@@ -258,7 +258,7 @@ def test_stale_revision_is_a_version_conflict_with_current_snapshot():
     stale = service.load_curated("memory")
     _add(service, "memory", "first", "r1")
     scope = stale.default_write_scope
-    req = MutationRequest("memory", "r2", stale.revision, stale.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "second", scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r2", stale.revision, stale.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "second", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         service.stage_curated(req)
     assert exc.value.code == "version_conflict" and exc.value.outcome == "not_committed"
@@ -274,7 +274,7 @@ def test_unknown_record_id_and_mismatched_token_are_invalid_request():
         service.stage_curated(bad_id)
     assert exc.value.code == "invalid_request"
     other_token = w.HiddenPreservationState(target="memory", complete_for_scopes=snap.hidden_preservation_state.complete_for_scopes, opaque_state_b64url="AAAA")
-    req = MutationRequest("memory", "r2", snap.revision, other_token, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r2", snap.revision, other_token, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         service.stage_curated(req)
     assert exc.value.code == "invalid_request"
@@ -284,10 +284,10 @@ def test_stage_replay_and_commit_replay_are_idempotent():
     service = _service()
     snap = service.load_curated("memory")
     scope = snap.default_write_scope
-    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     first = service.stage_curated(req)
     assert service.stage_curated(req) == first
-    changed = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "y", scope, "memory", None, None),), PROVENANCE)
+    changed = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "y", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         service.stage_curated(changed)
     assert exc.value.code == "idempotency_mismatch"
@@ -305,7 +305,7 @@ def test_stage_replay_after_commit_reports_the_committed_state():
     service = _service()
     snap = service.load_curated("memory")
     scope = snap.default_write_scope
-    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     staged = service.stage_curated(req)
     committed = service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, staged.approval_binding_sha256, staged.requested_write_scopes, w.ApprovalAuthorization(kind="not_required")))
     with pytest.raises(ProviderError) as exc:
@@ -319,7 +319,7 @@ def test_commit_checks_binding_scopes_and_handle():
     service = _service()
     snap = service.load_curated("memory")
     scope = snap.default_write_scope
-    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     staged = service.stage_curated(req)
     with pytest.raises(ProviderError) as exc:
         service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, "0" * 64, staged.requested_write_scopes, w.ApprovalAuthorization(kind="not_required")))
@@ -340,7 +340,7 @@ def test_disabled_target_is_never_loaded_rendered_or_mutated():
     with pytest.raises(TargetDisabledError):
         service.prompt_block("user")
     snap = service.load_curated("memory")
-    req = MutationRequest("user", "r1", snap.revision, snap.hidden_preservation_state, (snap.default_write_scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", snap.default_write_scope, "user", None, None),), PROVENANCE)
+    req = MutationRequest("user", "r1", snap.revision, snap.hidden_preservation_state, (snap.default_write_scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x", snap.default_write_scope, "user", None, None, memory_admission=None),), PROVENANCE)
     with pytest.raises(TargetDisabledError):
         service.stage_curated(req)
 
@@ -349,7 +349,7 @@ def test_over_budget_commit_surfaces_the_store_error_without_writing():
     service = _service(memory_char_limit=40)
     snap = service.load_curated("memory")
     scope = snap.default_write_scope
-    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x" * 50, scope, "memory", None, None),), PROVENANCE)
+    req = MutationRequest("memory", "r1", snap.revision, snap.hidden_preservation_state, (scope,), w.MutationIntent(kind="add"), (w.MutationDeltaItem(action="add", client_ref="c1"),), (w.CandidateEntry("c1", "x" * 50, scope, "memory", None, None, memory_admission="declarative"),), PROVENANCE)
     staged = service.stage_curated(req)
     with pytest.raises(BuiltinStoreError) as exc:
         service.commit_curated(CommitIntent("memory", "r1", staged.stage_handle_b64url, staged.approval_binding_sha256, staged.requested_write_scopes, w.ApprovalAuthorization(kind="not_required")))
@@ -395,7 +395,7 @@ def _mutation_request(service, target, kind="add", texts=("new",), request_id="t
     snapshot = service.load_curated(target)
     scope = snapshot.default_write_scope
     candidates = tuple(
-        w.CandidateEntry(f"c{i}", text, scope, target, None, None)
+        w.CandidateEntry(f"c{i}", text, scope, target, None, None, memory_admission="declarative" if target == "memory" else None)
         for i, text in enumerate(texts)
     )
     if kind == "reset":

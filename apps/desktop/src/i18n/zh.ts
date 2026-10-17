@@ -3,6 +3,7 @@ import { defineFieldCopy } from '@/app/settings/field-copy'
 import { defineLocale } from './define-locale'
 
 export const zh = defineLocale({
+  memoryAdmission: { label: '此记忆的用途', declarative: '事实与观察', promptLike: '指令或提示词' },
   connectors: {
     title: '连接你的应用',
     connect: '连接',

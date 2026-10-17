@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 from agent.memory_service import wire as w
 from agent.memory_service.backend import ProviderResult
-from agent.memory_service.config import PROVIDER_API_VERSION, REQUIRED_OPERATIONS, MemoryConfigurationError, MemoryServiceConfig
+from agent.memory_service.config import PROVIDER_API_VERSION, PROVIDER_CONTRACT_REVISION, REQUIRED_OPERATIONS, MemoryConfigurationError, MemoryServiceConfig
 from agent.memory_service.errors import CapabilityUnavailableError, MemoryBlockedError, ProviderError, ProviderTransportError, TargetDisabledError
 from agent.memory_service.identity import FrozenMemoryIdentity, HostSessionState
 from agent.memory_service.service import CommitIntent, ContinuityCapture, InspectRequest, MemoryDisposition, MemoryService, MutationRequest, RecallQuery, ServiceCapabilities
@@ -106,9 +106,19 @@ class ProviderAuthoritativeMemoryService(MemoryService):
         self._state = session_state
 
     def _negotiate(self) -> str:
-        request = w.NegotiateRequest(host="hermes", supported_api_versions=(PROVIDER_API_VERSION,), required_operations=tuple(REQUIRED_OPERATIONS))
-        result = self._backend.negotiate(request)
+        request = w.NegotiateRequest(host="hermes", supported_api_versions=(PROVIDER_API_VERSION,), supported_contract_revisions=(PROVIDER_CONTRACT_REVISION,), required_operations=tuple(REQUIRED_OPERATIONS))
+        request.validate()
+        try:
+            result = self._backend.negotiate(request)
+        except w.ContractCompatibilityError as exc:
+            raise MemoryConfigurationError("memory provider uses an incompatible contract revision") from exc
+        except ProviderError as exc:
+            if exc.operation == "negotiate" and exc.code in ("invalid_request", "incompatible_api"):
+                raise MemoryConfigurationError("memory provider rejected required contract negotiation") from exc
+            raise
         neg = result.result
+        if neg.selected_contract_revision != PROVIDER_CONTRACT_REVISION:
+            raise MemoryConfigurationError(f"memory provider selected contract revision {neg.selected_contract_revision}; Hermes requires contract revision {PROVIDER_CONTRACT_REVISION}")
         if neg.selected_api_version != PROVIDER_API_VERSION:
             raise MemoryConfigurationError(f"memory provider {self._config.provider!r} selected API version {neg.selected_api_version}; Hermes requires API version {PROVIDER_API_VERSION}")
         if neg.provider != self._config.provider:

@@ -88,7 +88,7 @@ def _service(tmp_path, store, **memory):
 
 def _add_plan(snapshot, text="a fact"):
     cand = w.CandidateEntry(client_ref="c1", text=text, destination_scope=snapshot.default_write_scope,
-                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None)
+                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None, memory_admission="declarative" if snapshot.target == "memory" else None)
     return PlannedMutation(intent=w.MutationIntent(kind="add"),
                            mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),),
                            candidate_entries=(cand,), requested_write_scopes=(snapshot.default_write_scope,),
@@ -98,7 +98,7 @@ def _add_plan(snapshot, text="a fact"):
 
 def _replace_plan(snapshot, entry, text):
     cand = w.CandidateEntry(client_ref="c1", text=text, destination_scope=entry.origin_scope,
-                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None)
+                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None, memory_admission="declarative" if snapshot.target == "memory" else None)
     return PlannedMutation(intent=w.MutationIntent(kind="replace", matched_entry_id=entry.id),
                            mutation_delta=(w.MutationDeltaItem(action="supersede", old_record_id=entry.id,
                                                                replacement_client_ref="c1"),),
@@ -363,3 +363,20 @@ def test_short_circuit_makes_no_mutation_call(tmp_path, native_dir):
     service, backend = _service(tmp_path, _store())
     outcome = _run(service, lambda s: PlanShortCircuit({"success": True}), native_dir)
     assert outcome.status is MutationStatus.SHORT_CIRCUIT and backend.count("stage_curated") == 0
+
+
+def test_phase_a_source_less_writes_refuse_before_stage(tmp_path):
+    """The intermediate H2 consumer never guesses an ordinary memory declaration."""
+    from tools.memory_tool_curated import NativeCall, ConsolidationBudget, plan_native_call
+    from agent.learning_curated import curated_edit
+    store = _store()
+    service, backend = _service(tmp_path, store)
+    with native_memory_sentinel(deny=True) as sentinel:
+        plan = plan_native_call(service.load_curated("memory"), NativeCall("add", "fact", None, None), ConsolidationBudget())
+        assert isinstance(plan, PlanShortCircuit)
+        assert plan.response["code"] == "memory_admission_required"
+        result = curated_edit({}, "memory:memory:existing-id", "fact", None,
+                              backend_factory=lambda cfg: pytest.fail("source-less edit contacted provider"))
+        assert result["code"] == "memory_admission_required"
+        sentinel.assert_untouched()
+    assert not any(op == "stage_curated" for op, _ in backend.calls)

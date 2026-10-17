@@ -114,6 +114,7 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 _MEMORY_ARGS: Tuple[_ArgSpec, ...] = (
     ("action", "action"), ("target", "target", "memory"), ("content", "content"),
     ("old_text", "old_text"), ("new_text", "new_text"), ("operations", "operations"),
+    ("memory_admission", "memory_admission"),
 )
 # Rulings R43-2 / R43-3 (supersede R38-3): background and scheduled surfaces receive MemoryService as an
 # explicit dependency (agent/memory_service/view.py, contract C6b-7). These gates run before any load

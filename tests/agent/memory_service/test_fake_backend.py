@@ -66,7 +66,7 @@ def _load(backend, identity, target="memory", epoch="ep-1") -> w.CuratedSnapshot
 
 def _stage_request(identity, snapshot, request_id="r1", text="x", epoch="ep-1", **overrides) -> w.StageRequest:
     scope = snapshot.default_write_scope
-    base = dict(expected_provider_epoch=epoch, frozen_identity=identity, target="memory", expected_revision=snapshot.revision, hidden_preservation_state=snapshot.hidden_preservation_state, request_id=request_id, requested_write_scopes=(scope,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target="memory", proposed_policy_key=None, import_source_identity=None),), provenance=PROVENANCE)
+    base = dict(expected_provider_epoch=epoch, frozen_identity=identity, target="memory", expected_revision=snapshot.revision, hidden_preservation_state=snapshot.hidden_preservation_state, request_id=request_id, requested_write_scopes=(scope,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target="memory", proposed_policy_key=None, import_source_identity=None, memory_admission="declarative"),), provenance=PROVENANCE)
     base.update(overrides)
     request = w.StageRequest(**base)
     request.validate()
@@ -107,7 +107,7 @@ def test_typed_failures_round_trip_through_wire_failure():
 def test_negotiate_publishes_no_state_and_reports_capabilities():
     store = _store()
     backend = FakeAuthoritativeBackend(store, recall=True, continuity=False)
-    request = w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=("bind_session", "validate_session", "load_curated", "stage_curated", "inspect_staged", "commit_curated"))
+    request = w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=("bind_session", "validate_session", "load_curated", "stage_curated", "inspect_staged", "commit_curated"), supported_contract_revisions=(2,))
     first = backend.negotiate(request)
     second = backend.negotiate(request)
     assert first.result == second.result and first.provider_epoch == second.provider_epoch == "ep-1"
@@ -256,7 +256,7 @@ def test_registry_change_revokes_known_handles_on_older_revisions():
         _load(backend, old)
     assert exc.value.code == "binding_revoked" and exc.value.outcome == "not_applicable"
     revision, hidden = _dummy_snapshot_fields(old)
-    stage = w.StageRequest(expected_provider_epoch="ep-1", frozen_identity=old, target="memory", expected_revision=revision, hidden_preservation_state=hidden, request_id="r1", requested_write_scopes=(REPO,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text="x", destination_scope=REPO, target="memory", proposed_policy_key=None, import_source_identity=None),), provenance=PROVENANCE)
+    stage = w.StageRequest(expected_provider_epoch="ep-1", frozen_identity=old, target="memory", expected_revision=revision, hidden_preservation_state=hidden, request_id="r1", requested_write_scopes=(REPO,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text="x", destination_scope=REPO, target="memory", proposed_policy_key=None, import_source_identity=None, memory_admission="declarative"),), provenance=PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         backend.stage_curated(stage)
     assert exc.value.code == "binding_revoked" and exc.value.outcome == "not_committed"
@@ -292,7 +292,7 @@ def test_epoch_change_is_typed_with_details_and_voids_state():
         _load(backend, old, epoch="ep-1")
     assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == "not_applicable"
     revision, hidden = _dummy_snapshot_fields(old)
-    stage = w.StageRequest(expected_provider_epoch="ep-1", frozen_identity=old, target="memory", expected_revision=revision, hidden_preservation_state=hidden, request_id="r1", requested_write_scopes=(REPO,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text="x", destination_scope=REPO, target="memory", proposed_policy_key=None, import_source_identity=None),), provenance=PROVENANCE)
+    stage = w.StageRequest(expected_provider_epoch="ep-1", frozen_identity=old, target="memory", expected_revision=revision, hidden_preservation_state=hidden, request_id="r1", requested_write_scopes=(REPO,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text="x", destination_scope=REPO, target="memory", proposed_policy_key=None, import_source_identity=None, memory_admission="declarative"),), provenance=PROVENANCE)
     with pytest.raises(ProviderError) as exc:
         backend.stage_curated(stage)
     assert exc.value.code == "provider_epoch_changed" and exc.value.outcome == "not_committed" and exc.value.details == expected_details
@@ -324,7 +324,7 @@ def test_transport_faults_and_shutdown():
     with pytest.raises(ProviderTransportError):
         _validate(backend, bound.frozen_identity)
     with pytest.raises(ProviderTransportError):
-        backend.negotiate(w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=()))
+        backend.negotiate(w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=(), supported_contract_revisions=(2,)))
     second = FakeAuthoritativeBackend(store)
     assert _validate(second, bound.frozen_identity).valid is True
 
@@ -534,7 +534,7 @@ def test_load_never_returns_version_conflict_natively():
 
 
 def _candidate(ref, text, scope, *, target="memory", policy_key=None, import_identity=None) -> w.CandidateEntry:
-    return w.CandidateEntry(client_ref=ref, text=text, destination_scope=scope, target=target, proposed_policy_key=policy_key, import_source_identity=import_identity)
+    return w.CandidateEntry(client_ref=ref, text=text, destination_scope=scope, target=target, proposed_policy_key=policy_key, import_source_identity=import_identity, memory_admission="declarative" if target == "memory" and import_identity is None else None)
 
 
 def _request(identity, snapshot, *, request_id="r1", target="memory", intent=None, delta=None, candidates=None, scopes=None, provenance=PROVENANCE, epoch="ep-1") -> w.StageRequest:
@@ -1502,7 +1502,7 @@ def test_recall_ambiguous_policy_is_typed_and_body_free():
 def test_recall_not_negotiated_is_not_offered():
     store = _store()
     backend = FakeAuthoritativeBackend(store, recall=False)
-    neg = backend.negotiate(w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=())).result
+    neg = backend.negotiate(w.NegotiateRequest(host="hermes", supported_api_versions=(1,), required_operations=(), supported_contract_revisions=(2,))).result
     assert "recall_context" not in neg.operations and neg.capabilities.recall_context is False
     assert "capture_continuity" in neg.operations and neg.capabilities.capture_continuity is True
 

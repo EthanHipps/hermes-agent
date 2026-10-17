@@ -1,0 +1,2634 @@
+[
+  {
+    "id": "candidate-memory-declarative",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": "declarative"
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "candidate-memory-prompt-like",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": "prompt_like"
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "candidate-memory-null",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": null
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "candidate-memory-unknown",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": "automatic"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "candidate-memory-boolean",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": true
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "candidate-memory-object",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": {}
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "candidate-memory-missing",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "candidate-extra",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": "declarative",
+        "extra": 1
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "candidate-user-null",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "user",
+        "proposed_policy_key": null,
+        "import_source_identity": null,
+        "memory_admission": null
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "candidate-import-native_memory-null",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": {
+          "source_kind": "native_memory",
+          "parser_version": "hermes-native-v0.20.6",
+          "source_id": "fixture-source",
+          "item_key": "MEMORY.md"
+        },
+        "memory_admission": null
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "candidate-import-legacy_archive-null",
+    "kind": "codec",
+    "input": {
+      "schema": "CandidateEntry",
+      "value": {
+        "client_ref": "c",
+        "text": "fact",
+        "destination_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "target": "memory",
+        "proposed_policy_key": null,
+        "import_source_identity": {
+          "source_kind": "legacy_archive",
+          "parser_version": "hermes-legacy-archive-v1",
+          "source_id": "fixture-source",
+          "item_key": "MEMORY.md"
+        },
+        "memory_admission": null
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "delivery-registry",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "delivery-registry-missing-kind",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-missing-origin_scope",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-missing-verify_id",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-missing-argv",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-missing-cwd",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-forged-id",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": ".",
+        "id": "forged"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-forged-provenance",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": ".",
+        "provenance": {}
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-forged-target",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": ".",
+        "target": "memory"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-forged-lane",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": ".",
+        "lane": "trusted_instruction"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-forged-policy_key",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": ".",
+        "policy_key": "forged"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-forged-attestation",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": ".",
+        "attestation": {}
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "delivery-task-missing-kind",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-missing-task_id",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-missing-origin_scope",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-missing-delivery_tier",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-missing-text",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-missing-source_ids",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-forged-id",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ],
+        "id": "forged"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-forged-provenance",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ],
+        "provenance": {}
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-forged-target",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ],
+        "target": "memory"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-forged-lane",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ],
+        "lane": "trusted_instruction"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-forged-policy_key",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ],
+        "policy_key": "forged"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-forged-attestation",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "outcome-1"
+        ],
+        "attestation": {}
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-invalid-origin_scope",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "project",
+          "id": "p"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-invalid-verify_id",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "Bad_ID",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-invalid-cwd",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [
+          "cargo",
+          "check"
+        ],
+        "cwd": "../escape"
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-invalid-argv",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "registry_verify",
+        "origin_scope": {
+          "kind": "repository",
+          "id": "repo"
+        },
+        "verify_id": "check",
+        "argv": [],
+        "cwd": "."
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-duplicate-sources",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "kind": "task_context",
+        "task_id": "task-1",
+        "origin_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "delivery_tier": "project",
+        "text": "Task context",
+        "source_ids": [
+          "task-1",
+          "task-1"
+        ]
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-ordinary-record",
+    "kind": "codec",
+    "input": {
+      "schema": "GeneralDeliveryItem",
+      "value": {
+        "id": "e-gen-1",
+        "text": "Current handoff: finish EDD-28 Task 6.",
+        "origin_scope": {
+          "kind": "principal_global",
+          "id": "pr"
+        },
+        "target": null,
+        "record_channel": "general",
+        "lane": "trusted_instruction",
+        "delivery_tier": "principal_global",
+        "policy_key": null,
+        "provenance": {
+          "actor_kind": "hermes",
+          "principal_id": "pr",
+          "logical_session_id": null,
+          "surface": "cli",
+          "source_entry_ids": [],
+          "source_commit": null,
+          "transaction_id": null
+        }
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "delivery-registry-user-refused",
+    "kind": "codec",
+    "input": {
+      "schema": "CuratedSnapshot",
+      "value": {
+        "api_version": 1,
+        "status": "ok",
+        "frozen_identity": {
+          "provider": "ygg",
+          "provider_mode": "authoritative",
+          "principal_id": "pr",
+          "profile_id": "pf",
+          "logical_session_id": "ls",
+          "org_id": null,
+          "project_id": "proj-1",
+          "repo_id": null,
+          "workspace_id": null,
+          "platform": "win-x64",
+          "binding_revision": "rev-1",
+          "opaque_binding_b64url": "9tPqL0xZ4hV2nRbF7yKcW1sMjE6uAoTgQdXBv3lNiHU"
+        },
+        "target": "user",
+        "visible_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          },
+          {
+            "kind": "principal_global",
+            "id": "pr"
+          }
+        ],
+        "default_write_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "eligible_write_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "complete_for_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "revision": {
+          "provider_epoch": "ep-1",
+          "visibility_revision": "vis-1",
+          "scope_revisions": [
+            {
+              "scope": {
+                "kind": "project",
+                "id": "proj-1"
+              },
+              "revision": "rev-p1"
+            },
+            {
+              "scope": {
+                "kind": "principal_global",
+                "id": "pr"
+              },
+              "revision": "rev-g1"
+            }
+          ]
+        },
+        "limits": {
+          "memory_chars": 2200,
+          "user_chars": 1375,
+          "initial_general_chars": 4000,
+          "max_entry_chars": 2200,
+          "max_entries": 100
+        },
+        "mutation_entries": [],
+        "delivery_entries": [
+          {
+            "kind": "registry_verify",
+            "origin_scope": {
+              "kind": "repository",
+              "id": "repo"
+            },
+            "verify_id": "check",
+            "argv": [
+              "cargo",
+              "check"
+            ],
+            "cwd": "."
+          }
+        ],
+        "hidden_preservation_state": {
+          "target": "memory",
+          "complete_for_scopes": [
+            {
+              "kind": "project",
+              "id": "proj-1"
+            }
+          ],
+          "opaque_state_b64url": "c3RhdGUtdG9rZW4tZXhhbXBsZQ"
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-registry-mutation-refused",
+    "kind": "codec",
+    "input": {
+      "schema": "CuratedSnapshot",
+      "value": {
+        "api_version": 1,
+        "status": "ok",
+        "frozen_identity": {
+          "provider": "ygg",
+          "provider_mode": "authoritative",
+          "principal_id": "pr",
+          "profile_id": "pf",
+          "logical_session_id": "ls",
+          "org_id": null,
+          "project_id": "proj-1",
+          "repo_id": null,
+          "workspace_id": null,
+          "platform": "win-x64",
+          "binding_revision": "rev-1",
+          "opaque_binding_b64url": "9tPqL0xZ4hV2nRbF7yKcW1sMjE6uAoTgQdXBv3lNiHU"
+        },
+        "target": "memory",
+        "visible_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          },
+          {
+            "kind": "principal_global",
+            "id": "pr"
+          }
+        ],
+        "default_write_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "eligible_write_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "complete_for_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "revision": {
+          "provider_epoch": "ep-1",
+          "visibility_revision": "vis-1",
+          "scope_revisions": [
+            {
+              "scope": {
+                "kind": "project",
+                "id": "proj-1"
+              },
+              "revision": "rev-p1"
+            },
+            {
+              "scope": {
+                "kind": "principal_global",
+                "id": "pr"
+              },
+              "revision": "rev-g1"
+            }
+          ]
+        },
+        "limits": {
+          "memory_chars": 2200,
+          "user_chars": 1375,
+          "initial_general_chars": 4000,
+          "max_entry_chars": 2200,
+          "max_entries": 100
+        },
+        "mutation_entries": [
+          {
+            "kind": "registry_verify",
+            "origin_scope": {
+              "kind": "repository",
+              "id": "repo"
+            },
+            "verify_id": "check",
+            "argv": [
+              "cargo",
+              "check"
+            ],
+            "cwd": "."
+          }
+        ],
+        "delivery_entries": [],
+        "hidden_preservation_state": {
+          "target": "memory",
+          "complete_for_scopes": [
+            {
+              "kind": "project",
+              "id": "proj-1"
+            }
+          ],
+          "opaque_state_b64url": "c3RhdGUtdG9rZW4tZXhhbXBsZQ"
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-user-refused",
+    "kind": "codec",
+    "input": {
+      "schema": "CuratedSnapshot",
+      "value": {
+        "api_version": 1,
+        "status": "ok",
+        "frozen_identity": {
+          "provider": "ygg",
+          "provider_mode": "authoritative",
+          "principal_id": "pr",
+          "profile_id": "pf",
+          "logical_session_id": "ls",
+          "org_id": null,
+          "project_id": "proj-1",
+          "repo_id": null,
+          "workspace_id": null,
+          "platform": "win-x64",
+          "binding_revision": "rev-1",
+          "opaque_binding_b64url": "9tPqL0xZ4hV2nRbF7yKcW1sMjE6uAoTgQdXBv3lNiHU"
+        },
+        "target": "user",
+        "visible_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          },
+          {
+            "kind": "principal_global",
+            "id": "pr"
+          }
+        ],
+        "default_write_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "eligible_write_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "complete_for_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "revision": {
+          "provider_epoch": "ep-1",
+          "visibility_revision": "vis-1",
+          "scope_revisions": [
+            {
+              "scope": {
+                "kind": "project",
+                "id": "proj-1"
+              },
+              "revision": "rev-p1"
+            },
+            {
+              "scope": {
+                "kind": "principal_global",
+                "id": "pr"
+              },
+              "revision": "rev-g1"
+            }
+          ]
+        },
+        "limits": {
+          "memory_chars": 2200,
+          "user_chars": 1375,
+          "initial_general_chars": 4000,
+          "max_entry_chars": 2200,
+          "max_entries": 100
+        },
+        "mutation_entries": [],
+        "delivery_entries": [
+          {
+            "kind": "task_context",
+            "task_id": "task-1",
+            "origin_scope": {
+              "kind": "project",
+              "id": "proj-1"
+            },
+            "delivery_tier": "project",
+            "text": "Task context",
+            "source_ids": [
+              "task-1",
+              "outcome-1"
+            ]
+          }
+        ],
+        "hidden_preservation_state": {
+          "target": "memory",
+          "complete_for_scopes": [
+            {
+              "kind": "project",
+              "id": "proj-1"
+            }
+          ],
+          "opaque_state_b64url": "c3RhdGUtdG9rZW4tZXhhbXBsZQ"
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "delivery-task-mutation-refused",
+    "kind": "codec",
+    "input": {
+      "schema": "CuratedSnapshot",
+      "value": {
+        "api_version": 1,
+        "status": "ok",
+        "frozen_identity": {
+          "provider": "ygg",
+          "provider_mode": "authoritative",
+          "principal_id": "pr",
+          "profile_id": "pf",
+          "logical_session_id": "ls",
+          "org_id": null,
+          "project_id": "proj-1",
+          "repo_id": null,
+          "workspace_id": null,
+          "platform": "win-x64",
+          "binding_revision": "rev-1",
+          "opaque_binding_b64url": "9tPqL0xZ4hV2nRbF7yKcW1sMjE6uAoTgQdXBv3lNiHU"
+        },
+        "target": "memory",
+        "visible_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          },
+          {
+            "kind": "principal_global",
+            "id": "pr"
+          }
+        ],
+        "default_write_scope": {
+          "kind": "project",
+          "id": "proj-1"
+        },
+        "eligible_write_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "complete_for_scopes": [
+          {
+            "kind": "project",
+            "id": "proj-1"
+          }
+        ],
+        "revision": {
+          "provider_epoch": "ep-1",
+          "visibility_revision": "vis-1",
+          "scope_revisions": [
+            {
+              "scope": {
+                "kind": "project",
+                "id": "proj-1"
+              },
+              "revision": "rev-p1"
+            },
+            {
+              "scope": {
+                "kind": "principal_global",
+                "id": "pr"
+              },
+              "revision": "rev-g1"
+            }
+          ]
+        },
+        "limits": {
+          "memory_chars": 2200,
+          "user_chars": 1375,
+          "initial_general_chars": 4000,
+          "max_entry_chars": 2200,
+          "max_entries": 100
+        },
+        "mutation_entries": [
+          {
+            "kind": "task_context",
+            "task_id": "task-1",
+            "origin_scope": {
+              "kind": "project",
+              "id": "proj-1"
+            },
+            "delivery_tier": "project",
+            "text": "Task context",
+            "source_ids": [
+              "task-1",
+              "outcome-1"
+            ]
+          }
+        ],
+        "delivery_entries": [],
+        "hidden_preservation_state": {
+          "target": "memory",
+          "complete_for_scopes": [
+            {
+              "kind": "project",
+              "id": "proj-1"
+            }
+          ],
+          "opaque_state_b64url": "c3RhdGUtdG9rZW4tZXhhbXBsZQ"
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-revision-two",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true,
+      "selected_contract_revision": 2
+    }
+  },
+  {
+    "id": "negotiate-codec-revision-two",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiate-select-two",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          1,
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true,
+      "selected_contract_revision": 2
+    }
+  },
+  {
+    "id": "negotiate-codec-select-two",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          1,
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiate-unsupported",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          1
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "incompatible_api"
+    }
+  },
+  {
+    "id": "negotiate-codec-unsupported",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          1
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiate-empty",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-empty",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-duplicate",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2,
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-duplicate",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2,
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-zero",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          0
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-zero",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          0
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-negative",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          -1
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-negative",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          -1
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-codec-fraction",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2.5
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-boolean",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          true
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-boolean",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          true
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-null",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": null,
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-null",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": null,
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-codec-missing",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-missing",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiate-codec-extra",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2
+        ],
+        "required_operations": [],
+        "extra": true
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-extra",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          2
+        ],
+        "required_operations": [],
+        "extra": true
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "invalid_request"
+    }
+  },
+  {
+    "id": "negotiation-revision-two",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": 2,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiation-invalid-zero",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": 0,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiation-invalid-negative",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": -1,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiation-invalid-fraction",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": 2.5,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiation-invalid-null",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": null,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiation-invalid-boolean",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": true,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiation-missing-revision",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": false
+    }
+  },
+  {
+    "id": "negotiate-codec-large-unsupported",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          4294967296
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiate-large-unsupported",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          4294967296
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "incompatible_api"
+    }
+  },
+  {
+    "id": "negotiate-codec-large-and-two",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          4294967296,
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiate-large-and-two",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          4294967296,
+          2
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true,
+      "selected_contract_revision": 2
+    }
+  },
+  {
+    "id": "negotiate-codec-ijson-max-unsupported",
+    "kind": "codec",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          9007199254740991
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiate-ijson-max-unsupported",
+    "kind": "negotiation",
+    "input": {
+      "schema": "NegotiateRequest",
+      "value": {
+        "host": "hermes",
+        "supported_api_versions": [
+          1
+        ],
+        "supported_contract_revisions": [
+          9007199254740991
+        ],
+        "required_operations": []
+      }
+    },
+    "expected": {
+      "accepted": false,
+      "error_code": "incompatible_api"
+    }
+  },
+  {
+    "id": "negotiation-large-positive",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": 4294967296,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "negotiation-ijson-max-positive",
+    "kind": "codec",
+    "input": {
+      "schema": "Negotiation",
+      "value": {
+        "provider": "ygg",
+        "selected_api_version": 1,
+        "selected_contract_revision": 9007199254740991,
+        "operations": [
+          "negotiate"
+        ],
+        "capabilities": {
+          "recall_context": false,
+          "capture_continuity": false
+        },
+        "limits": {
+          "max_request_bytes": 1048576,
+          "max_response_bytes": 8388608,
+          "max_stage_bytes": 1048576,
+          "stage_ttl_seconds": 3600,
+          "max_opaque_binding_bytes": 32,
+          "max_continuity_bytes": 65536
+        }
+      }
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  {
+    "id": "lane-memory-non-import-null",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": null,
+      "memory_admission": null
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-memory-non-import-declarative",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": null,
+      "memory_admission": "declarative"
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "scoped_evidence",
+      "record_channel": "hermes_memory"
+    }
+  },
+  {
+    "id": "lane-memory-non-import-prompt_like",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": null,
+      "memory_admission": "prompt_like"
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "withheld_raw",
+      "record_channel": "hermes_memory"
+    }
+  },
+  {
+    "id": "lane-memory-native_memory-null",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": "native_memory",
+      "memory_admission": null
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "scoped_evidence",
+      "record_channel": "hermes_memory"
+    }
+  },
+  {
+    "id": "lane-memory-native_memory-declarative",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": "native_memory",
+      "memory_admission": "declarative"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-memory-native_memory-prompt_like",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": "native_memory",
+      "memory_admission": "prompt_like"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-memory-legacy_archive-null",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": "legacy_archive",
+      "memory_admission": null
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "withheld_raw",
+      "record_channel": "hermes_memory"
+    }
+  },
+  {
+    "id": "lane-memory-legacy_archive-declarative",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": "legacy_archive",
+      "memory_admission": "declarative"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-memory-legacy_archive-prompt_like",
+    "kind": "lane",
+    "input": {
+      "target": "memory",
+      "source_kind": "legacy_archive",
+      "memory_admission": "prompt_like"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-user-non-import-null",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": null,
+      "memory_admission": null
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "trusted_instruction",
+      "record_channel": "hermes_user"
+    }
+  },
+  {
+    "id": "lane-user-non-import-declarative",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": null,
+      "memory_admission": "declarative"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-user-non-import-prompt_like",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": null,
+      "memory_admission": "prompt_like"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-user-native_memory-null",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": "native_memory",
+      "memory_admission": null
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "trusted_instruction",
+      "record_channel": "hermes_user"
+    }
+  },
+  {
+    "id": "lane-user-native_memory-declarative",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": "native_memory",
+      "memory_admission": "declarative"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-user-native_memory-prompt_like",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": "native_memory",
+      "memory_admission": "prompt_like"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-user-legacy_archive-null",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": "legacy_archive",
+      "memory_admission": null
+    },
+    "expected": {
+      "accepted": true,
+      "disposition": "withheld_raw",
+      "record_channel": "hermes_user"
+    }
+  },
+  {
+    "id": "lane-user-legacy_archive-declarative",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": "legacy_archive",
+      "memory_admission": "declarative"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-user-legacy_archive-prompt_like",
+    "kind": "lane",
+    "input": {
+      "target": "user",
+      "source_kind": "legacy_archive",
+      "memory_admission": "prompt_like"
+    },
+    "expected": {
+      "accepted": false,
+      "code": "invalid_request"
+    }
+  },
+  {
+    "id": "lane-batch-correlated-declarations",
+    "kind": "lane_batch",
+    "input": {
+      "target": "memory",
+      "source_kind": null,
+      "candidates": [
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "declarative"
+        },
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        }
+      ]
+    },
+    "expected": {
+      "accepted": true,
+      "admissions": [
+        {
+          "client_ref": "declared-evidence",
+          "disposition": "scoped_evidence",
+          "record_channel": "hermes_memory"
+        },
+        {
+          "client_ref": "declared-raw",
+          "disposition": "withheld_raw",
+          "record_channel": "hermes_memory"
+        }
+      ]
+    }
+  },
+  {
+    "id": "binding-exact",
+    "kind": "binding",
+    "input": {
+      "contract_revision": 2,
+      "original": [
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "declarative"
+        },
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        }
+      ],
+      "retry": [
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "declarative"
+        },
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        }
+      ]
+    },
+    "expected": {
+      "same_projection": true,
+      "same_binding": true
+    }
+  },
+  {
+    "id": "binding-declaration-flip",
+    "kind": "binding",
+    "input": {
+      "contract_revision": 2,
+      "original": [
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "declarative"
+        },
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        }
+      ],
+      "retry": [
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "prompt_like"
+        },
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        }
+      ]
+    },
+    "expected": {
+      "same_projection": false,
+      "same_binding": false
+    }
+  },
+  {
+    "id": "binding-ordered-candidates",
+    "kind": "binding",
+    "input": {
+      "contract_revision": 2,
+      "original": [
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "declarative"
+        },
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        }
+      ],
+      "retry": [
+        {
+          "client_ref": "declared-raw",
+          "memory_admission": "prompt_like"
+        },
+        {
+          "client_ref": "declared-evidence",
+          "memory_admission": "declarative"
+        }
+      ]
+    },
+    "expected": {
+      "same_projection": false,
+      "same_binding": false
+    }
+  }
+]

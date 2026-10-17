@@ -75,16 +75,19 @@ export function deleteLearningNode(id: string, profile?: ProfileScope): Promise<
   })
 }
 
+export type MemoryAdmission = 'declarative' | 'prompt_like'
+
 export function editLearningNode(
   id: string,
   content: string,
-  profile?: ProfileScope
+  profile?: ProfileScope,
+  memoryAdmission: MemoryAdmission | null = null
 ): Promise<{ message: string; ok: boolean }> {
   return window.hermesDesktop.api<{ message: string; ok: boolean }>({
     ...capabilityScoped(profile),
     path: '/api/learning/node',
     method: 'PUT',
-    body: { content, id }
+    body: { content, id, memory_admission: memoryAdmission }
   })
 }
 

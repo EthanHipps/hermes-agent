@@ -79,7 +79,7 @@ def test_view_stamps_its_surface_on_every_stage(env):
     parent = env.parent()
     view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
                           surface="background_review", backend_factory=env.factory)
-    assert '"success": true' in curated_memory_tool(view, action="add", content="uses pnpm")
+    assert '"success": true' in curated_memory_tool(view, action="add", content="uses pnpm", memory_admission="declarative")
     stage = [req for op, req in env.backends[-1].calls if op == "stage_curated"][-1]
     assert stage.provenance.initiating_surface == "background_review"
     assert stage.provenance.logical_session_id == parent.identity.logical_session_id

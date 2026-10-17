@@ -19,7 +19,7 @@ from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, Fa
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 REPO = w.ScopeRef(kind="repository", id="repo-1")
-ADD = {"action": "add", "target": "memory", "content": "uses pnpm"}
+ADD = {"action": "add", "target": "memory", "content": "uses pnpm", "memory_admission": "declarative"}
 
 
 def _tool_defs(*names):
@@ -190,9 +190,9 @@ def test_an_unattended_review_cannot_replace_or_remove(tmp_path, monkeypatch):
     fork = _injected_fork_agent(env, parent)
     view_backend = env.backends[-1]
     loads = view_backend.count("load_curated")
-    for args in ({"action": "replace", "target": "memory", "old_text": "old rule", "content": "new"},
+    for args in ({"action": "replace", "target": "memory", "old_text": "old rule", "content": "new", "memory_admission": "declarative"},
                  {"action": "remove", "target": "memory", "old_text": "old rule"},
-                 {"operations": [{"action": "add", "content": "x"}, {"action": "remove", "old_text": "old rule"}]}):
+                 {"operations": [{"action": "add", "content": "x", "memory_admission": "declarative"}, {"action": "remove", "old_text": "old rule"}]}):
         with _origin(attended=False):
             out = json.loads(fork._invoke_tool("memory", args, "task-1"))
         assert out["success"] is False and "'add' is still available" in out["error"]
@@ -207,7 +207,7 @@ def test_an_attended_refine_keeps_the_full_operation_set(tmp_path, monkeypatch):
     fork = _injected_fork_agent(env, parent)
     with _origin(attended=True):
         out = json.loads(fork._invoke_tool("memory", {"action": "replace", "target": "memory",
-                                                       "old_text": "old rule", "content": "new rule"}, "task-1"))
+                                                       "old_text": "old rule", "content": "new rule", "memory_admission": "declarative"}, "task-1"))
     assert out["success"] is True
     assert [r.text for r in env.store.records_for(REPO, "memory")] == ["new rule"]
 

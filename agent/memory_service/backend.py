@@ -7,7 +7,10 @@ answered malformed output. Every result carries the ``provider_epoch`` from
 the success envelope so the service can enforce epoch continuity. The service
 also tolerates a :class:`~agent.memory_service.wire.WireError` escaping a
 backend, treating it the same as a :class:`ProviderTransportError` for
-malformed output.
+malformed output. Proven contract incompatibility is distinct: preserve
+``wire.ContractCompatibilityError`` from strict negotiation decoding so the
+service can report a configuration error under either failure policy. Never
+classify an arbitrary malformed response as compatibility evidence.
 
 Backends validate their own request and result envelopes with the wire codecs,
 and validate typed failure envelopes with ``WireFailure`` and

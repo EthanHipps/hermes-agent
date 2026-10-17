@@ -17,7 +17,7 @@ from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, Fa
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
 
 REPO = w.ScopeRef(kind="repository", id="repo-1")
-ADD = {"action": "add", "target": "memory", "content": "uses pnpm"}
+ADD = {"action": "add", "target": "memory", "content": "uses pnpm", "memory_admission": "declarative"}
 
 
 def _tool_defs(*names):

@@ -130,7 +130,7 @@ def curated_delete(raw_config: Any, node_id: str, context: Optional[AdminContext
 
 
 def curated_edit(raw_config: Any, node_id: str, content: str, context: Optional[AdminContext], *,
-                 backend_factory: Any = None) -> Dict[str, Any]:
+                 backend_factory: Any = None, memory_admission: Optional[str] = None) -> Dict[str, Any]:
     """Supersede exactly the addressed entry, with the memory tool's replace validation (ruling R42-7).
 
     Normalization, the non-empty check and the strict threat scan run before any provider call (§9.4
@@ -140,6 +140,10 @@ def curated_edit(raw_config: Any, node_id: str, content: str, context: Optional[
         target, entry_id = _parse(node_id)
     except ValueError as exc:  # id errors win over the empty-body message, as natively
         return {"ok": False, "message": str(exc)}
+    if ((target == "memory" and not (type(memory_admission) is str and memory_admission in ("declarative", "prompt_like")))
+            or (target == "user" and memory_admission is not None)):
+        return {"ok": False, "code": "memory_admission_required", "message":
+                "An explicit memory admission declaration is required. Nothing was saved."}
     body = MemoryStore.normalize_entry(content or "")
     if not body:
         return {"ok": False, "message": "empty memory — use delete to remove it"}
@@ -151,7 +155,7 @@ def curated_edit(raw_config: Any, node_id: str, content: str, context: Optional[
         entry = _find(snapshot, entry_id)
         if entry is None:
             return PlanShortCircuit(dict(_STALE))
-        if MemoryStore.normalize_entry(entry.text) == body:
+        if MemoryStore.normalize_entry(entry.text) == body and memory_admission != "prompt_like":
             return PlanShortCircuit({"ok": True, "message": "no changes"})
         projected = [body if e.id == entry.id else e.text for e in snapshot.mutation_entries]
         limit = snapshot.limits.user_chars if target == "user" else snapshot.limits.memory_chars
@@ -166,7 +170,7 @@ def curated_edit(raw_config: Any, node_id: str, content: str, context: Optional[
                                                 replacement_client_ref="c1"),),
             candidate_entries=(w.CandidateEntry(client_ref="c1", text=body, destination_scope=entry.origin_scope,
                                                 target=target, proposed_policy_key=None,
-                                                import_source_identity=None),),
+                                                import_source_identity=None, memory_admission=memory_admission),),
             requested_write_scopes=(entry.origin_scope,), projected_texts=tuple(projected),
             message="updated memory")
 

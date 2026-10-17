@@ -1,5 +1,8 @@
 import { useRef, useState } from 'react'
 
+import type { MemoryAdmission } from '@/api/skills'
+import { useI18n } from '@/i18n/context'
+
 import { ArchiveSkillConfirmDialog, fireOptimistic } from '@/app/learning/archive-skill-confirm-dialog'
 import { CodeEditor } from '@/components/chat/code-editor'
 import { Button } from '@/components/ui/button'
@@ -26,6 +29,7 @@ interface NodeContextMenuProps {
 }
 
 interface EditState {
+  memoryAdmission: MemoryAdmission | null
   content: string
   id: string
   label: string
@@ -33,7 +37,9 @@ interface EditState {
 
 /** Right-click actions for a star-map node: edit (modal) or delete (confirm). */
 export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextMenuProps) {
+  const { t } = useI18n()
   const [editing, setEditing] = useState<EditState | null>(null)
+  const needsMemoryChoice = editing?.id.startsWith('memory:memory:') ?? false
   const [deleting, setDeleting] = useState<Omit<NodeMenuTarget, 'x' | 'y'> | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -71,7 +77,7 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
         return
       }
 
-      setEditing({ content: detail.content, id: target.id, label: target.label })
+      setEditing({ content: detail.content, id: target.id, label: target.label, memoryAdmission: null })
       onClose()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -81,7 +87,7 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
   }
 
   const save = async () => {
-    if (!editing) {
+    if (!editing || (needsMemoryChoice && editing.memoryAdmission === null)) {
       return
     }
 
@@ -89,7 +95,7 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
     setError(null)
 
     try {
-      const res = await editLearningNode(editing.id, editing.content)
+      const res = await editLearningNode(editing.id, editing.content, undefined, editing.memoryAdmission)
 
       if (!res.ok) {
         throw new Error(res.message)
@@ -159,12 +165,37 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
               />
             )}
           </div>
+          {needsMemoryChoice && editing && (
+            <fieldset>
+              <legend className="text-xs text-muted-foreground">{t.memoryAdmission.label}</legend>
+              <div className="flex gap-2">
+                <Button
+                  aria-pressed={editing.memoryAdmission === 'declarative'}
+                  disabled={saving}
+                  onClick={() => setEditing(prev => prev ? { ...prev, memoryAdmission: 'declarative' } : prev)}
+                  size="sm"
+                  variant={editing.memoryAdmission === 'declarative' ? 'default' : 'outline'}
+                >
+                  {t.memoryAdmission.declarative}
+                </Button>
+                <Button
+                  aria-pressed={editing.memoryAdmission === 'prompt_like'}
+                  disabled={saving}
+                  onClick={() => setEditing(prev => prev ? { ...prev, memoryAdmission: 'prompt_like' } : prev)}
+                  size="sm"
+                  variant={editing.memoryAdmission === 'prompt_like' ? 'default' : 'outline'}
+                >
+                  {t.memoryAdmission.promptLike}
+                </Button>
+              </div>
+            </fieldset>
+          )}
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
           <DialogFooter>
             <Button disabled={saving} onClick={() => setEditing(null)} type="button" variant="ghost">
               Cancel
             </Button>
-            <Button disabled={saving} onClick={() => void save()}>
+            <Button disabled={saving || (needsMemoryChoice && editing?.memoryAdmission === null)} onClick={() => void save()}>
               {saving ? 'Saving…' : 'Save'}
             </Button>
           </DialogFooter>

@@ -103,7 +103,7 @@ class StubBackend:
     def negotiate(self, request: w.NegotiateRequest) -> ProviderResult[w.Negotiation]:
         request = self._receive("negotiate", request)
         self._maybe_fail("negotiate")
-        neg = w.Negotiation(provider=self.provider, selected_api_version=self.api_version, operations=tuple(self.operations), capabilities=w.Capabilities(recall_context=self.recall, capture_continuity=self.continuity), limits=w.Limits(max_request_bytes=1_000_000, max_response_bytes=4_000_000, max_stage_bytes=200_000, stage_ttl_seconds=3600, max_opaque_binding_bytes=32, max_continuity_bytes=65_536))
+        neg = w.Negotiation(provider=self.provider, selected_api_version=self.api_version, operations=tuple(self.operations), capabilities=w.Capabilities(recall_context=self.recall, capture_continuity=self.continuity), limits=w.Limits(max_request_bytes=1_000_000, max_response_bytes=4_000_000, max_stage_bytes=200_000, stage_ttl_seconds=3600, max_opaque_binding_bytes=32, max_continuity_bytes=65_536), selected_contract_revision=2)
         return self._send("negotiate", neg)
 
     def bind_session(self, request: w.BindRequest) -> ProviderResult[w.BindResult]:

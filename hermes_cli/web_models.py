@@ -211,6 +211,8 @@ class LearningNodeRef(BaseModel):
 class LearningNodeEdit(BaseModel):
     id: str
     content: str
+    # Preserve untrusted input for the fixed, body-free admission refusal at the host boundary.
+    memory_admission: Any = None
     profile: Optional[str] = None
     # Explicit administrative scope for provider-managed memory nodes (ruling R42-12); unused in additive mode.
     org_id: Optional[str] = None
