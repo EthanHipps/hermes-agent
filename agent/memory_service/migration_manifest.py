@@ -558,13 +558,36 @@ def manifest_path(home: Path, provider: str, provider_epoch: str, import_run_id:
     return migration_root(home) / provider / provider_epoch / f"{import_run_id}.json"
 
 
-def write_document(path: Path, document: Mapping[str, Any]) -> None:
+def _windows_call(scope, method: str, *args):
+    from agent.memory_service import migration_windows as native
+    if not isinstance(scope, native.WindowsMigrationScope):
+        raise OSError("Windows migration state needs its live migration lock")
+    try:
+        return getattr(scope, method)(*args)
+    except native.WindowsPublicationUncertain:
+        raise
+    except (OSError, native.pywintypes.error, ValueError, TypeError) as exc:
+        raise OSError("Windows migration state could not be verified") from exc
+
+
+def remove_document(path: Path, *, scope=None) -> None:
+    """Explicit unreadable-state discard, with the same verified Windows authority."""
+    if os.name == "nt":
+        _windows_call(scope, "remove", Path(path))
+    else:
+        Path(path).unlink()
+
+
+def write_document(path: Path, document: Mapping[str, Any], *, scope=None) -> None:
     """Canonical bytes via temp file + fsync + atomic replace, owner-only (§9.9 L1655). OSError propagates.
 
     Approval metadata uses ``utils.atomic_json_write(..., mode=0o600)``; this is the same temp+fsync+replace
     family, through ``atomic_write_text`` because canonical bytes cannot pass through ``json.dump``. Canonical
     JSON holds no raw newline, so the text-mode handle writes the bytes unchanged on every platform.
     """
+    if os.name == "nt":
+        _windows_call(scope, "write", Path(path), encode(document))
+        return
     from utils import atomic_write_text
     atomic_write_text(Path(path), encode(document).decode("utf-8"), create_mode=0o600)
 
@@ -577,9 +600,9 @@ def _no_duplicates(pairs):
 
 
 def read_document(path: Path, *, provider: str, provider_epoch: str,
-                  import_run_id: str) -> Union[ActiveManifest, Receipt]:
+                  import_run_id: str, scope=None) -> Union[ActiveManifest, Receipt]:
     try:
-        raw = Path(path).read_bytes()
+        raw = _windows_call(scope, "read", Path(path)) if scope is not None else Path(path).read_bytes()
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
         canonical = w.canonical_json(data) == raw
     except (OSError, ValueError, TypeError, RecursionError) as exc:
@@ -599,12 +622,22 @@ class RunFile:
     error: Optional[str]                   # content-free reason when document is None
 
 
-def list_runs(home: Path, provider: Optional[str] = None) -> List[RunFile]:
+def list_runs(home: Path, provider: Optional[str] = None, *, scope=None) -> List[RunFile]:
     """Every ``<provider>/<epoch>/<run>.json``; unreadable ones are reported, never skipped (C9's fail-closed walk).
 
     The walk mirrors ``backup_memory._walk_migration_state``: two directory levels, ``*.json`` files only, so the
     lock file and interrupted ``.tmp_*.tmp`` writes are ignored by both readers.
     """
+    if scope is not None:
+        runs = []
+        for path in _windows_call(scope, "paths", provider):
+            prov, epoch, name = path.relative_to(migration_root(home)).parts
+            try:
+                doc = read_document(path, provider=prov, provider_epoch=epoch, import_run_id=name[:-5], scope=scope)
+                runs.append(RunFile(path, prov, epoch, name[:-5], doc, None))
+            except MigrationStateError as exc:
+                runs.append(RunFile(path, prov, epoch, name[:-5], None, str(exc)))
+        return runs
     root = migration_root(home)
     if not root.is_dir():
         return []
@@ -634,12 +667,27 @@ def _entries(directory: Path, *, dirs: bool) -> List[Path]:
 
 
 @contextmanager
-def migration_lock(home: Path, *, timeout_seconds: float = 2.0) -> Iterator[None]:
+def migration_lock(home: Path, *, timeout_seconds: float = 2.0) -> Iterator[Any]:
     """The one Hermes migration lock (§9.9 L1655; ruling R45-4), shaped like backup.py's _backup_operation_lock.
 
     ``<home>/migrations/.lock`` sits outside every provider directory, where neither C9 nor ``list_runs`` looks.
     The OS drops the lock with a crashed process; the file itself may stay.
     """
+    if os.name == "nt":
+        try:
+            from agent.memory_service import migration_windows as native
+        except (ImportError, OSError, AttributeError) as exc:
+            raise OSError("Windows migration security is unavailable") from exc
+        try:
+            with native.WindowsMigrationScope(home, timeout_seconds) as scope:
+                yield scope
+        except native.WindowsPublicationUncertain:
+            raise
+        except native.MigrationLockBusy:
+            raise MigrationBusyError("another memory migration command is running") from None
+        except (OSError, native.pywintypes.error, ValueError, TypeError) as exc:
+            raise OSError("Windows migration state could not be verified") from exc
+        return
     root = migration_root(home)
     root.mkdir(parents=True, exist_ok=True)
     path = root / LOCK_NAME

@@ -213,10 +213,10 @@ def test_cancellation_or_a_failing_prompt_is_a_denial(env, answer):
 def test_a_failed_denial_compaction_stays_active_and_blocks_archives(env, monkeypatch):
     real = mm.write_document
 
-    def write(path, doc):
+    def write(path, doc, **kwargs):
         if doc["state"] == "rolled_back":
             raise OSError("disk full")
-        real(path, doc)
+        real(path, doc, **kwargs)
     monkeypatch.setattr(mm, "write_document", write)
     report = start(env, Answers(False))
     assert (report.status, report.code) == (MigrationStatus.STOPPED, "denial_not_complete")
@@ -230,9 +230,9 @@ def test_approval_writes_the_authorization_ahead_of_the_commit(env, monkeypatch)
     order = []
     real_write = mm.write_document
 
-    def write(path, doc):
+    def write(path, doc, **kwargs):
         order.append(("write", tuple(b.get("status") for b in doc["batches"]), len(env.store.receipts)))
-        real_write(path, doc)
+        real_write(path, doc, **kwargs)
     monkeypatch.setattr(mm, "write_document", write)
     start(env, Answers(True, True))
     first_approved = next(i for i, (_, statuses, _) in enumerate(order) if statuses[0] == "approved")
@@ -290,7 +290,7 @@ def test_completion_switches_an_additive_home_and_compacts(env):
 def test_switch_happens_after_conformance_and_before_compaction(env, monkeypatch):
     order = []
     real = mm.write_document
-    monkeypatch.setattr(mm, "write_document", lambda p, d: (order.append(d["state"]), real(p, d)))
+    monkeypatch.setattr(mm, "write_document", lambda p, d, **kwargs: (order.append(d["state"]), real(p, d, **kwargs)))
     real_switch = env.switch
     env.switch = lambda: (order.append("switch"), real_switch())
     start(env, Answers(True, True))

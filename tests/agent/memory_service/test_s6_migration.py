@@ -61,8 +61,8 @@ def _patched_write(write):
 def _crash_after_first_write(real):
     fired = []
 
-    def write(path, doc):
-        real(path, doc)
+    def write(path, doc, **kwargs):
+        real(path, doc, **kwargs)
         if not fired:
             fired.append(True)
             raise Crash()
@@ -193,10 +193,10 @@ def test_a_failed_rollback_compaction_exits_one_and_keeps_the_config(s6):
     config = _config_bytes(s6)
 
     def failing(real):
-        def write(path, doc):
+        def write(path, doc, **kwargs):
             if doc["state"] == "rolled_back":
                 raise OSError("disk full")
-            real(path, doc)
+            real(path, doc, **kwargs)
         return write
     with _patched_write(failing):
         assert _run(_args(migrate_command="rollback", yes=True)) == 1
@@ -246,6 +246,8 @@ def test_resume_and_reconcile_commands_map_exit_codes(s6):
     s6.answers.extend([True, True])
     assert _run(_args(migrate_command="resume")) == 0
     corrupt = mm.manifest_path(s6.home, "example", "ep-1", "a" * 32)
+    with mm.migration_lock(s6.home) as scope:
+        mm.write_document(corrupt, {"state": "active"}, scope=scope)
     corrupt.write_bytes(b"{")
     assert _run(_args(migrate_command="reconcile", run_id="a" * 32)) == 2
     assert _run(_args(migrate_command="reconcile", run_id="a" * 32, discard=True, yes=True)) == 0

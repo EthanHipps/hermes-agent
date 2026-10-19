@@ -120,8 +120,8 @@ def rollback_migrations(raw_config: Mapping[str, Any], *, home: Path, backend_fa
                                "No memory migration was in progress.", warnings=_foreign_note(home, provider))
     try:
         with ExitStack() as stack:
-            stack.enter_context(mm.migration_lock(home))
-            runs = _active(mm.list_runs(home, provider))            # re-read under the lock
+            scope = stack.enter_context(mm.migration_lock(home))
+            runs = _active(mm.list_runs(home, provider, scope=scope))            # re-read under the lock
             unreadable = [r.import_run_id for r in runs if r.document is None]
             if unreadable:
                 return MigrationReport(MigrationStatus.REFUSED, "reconcile_required",
@@ -143,8 +143,12 @@ def rollback_migrations(raw_config: Mapping[str, Any], *, home: Path, backend_fa
                 receipt = mm.compact(run.document, state=mm.ROLLED_BACK, outcome="operator_rollback",
                                      settled=settled, updated_at=now)
                 try:
-                    mm.write_document(run.path, mm.to_document(receipt))
-                except OSError:
+                    mm.write_document(run.path, mm.to_document(receipt), scope=scope)
+                except OSError as exc:
+                    if getattr(exc, "code", None) == "migration_state_uncertain":
+                        return MigrationReport(MigrationStatus.STOPPED, exc.code,
+                            "The rollback publication was not confirmed; run 'hermes memory migrate reconcile'.",
+                            run_id=run.import_run_id)
                     remaining = ", ".join(r.import_run_id for r, _ in plans if r.import_run_id not in done)
                     return MigrationReport(MigrationStatus.STOPPED, "rollback_not_complete",
                                            f"The rollback could not be recorded; still in progress: {remaining}. "
@@ -155,6 +159,9 @@ def rollback_migrations(raw_config: Mapping[str, Any], *, home: Path, backend_fa
                                    warnings=_foreign_note(home, provider))
     except mm.MigrationBusyError as exc:
         return MigrationReport(MigrationStatus.STOPPED, exc.code, "Another memory migration command is running.")
+    except OSError:
+        return MigrationReport(MigrationStatus.STOPPED, "reconcile_required",
+                               "The migration state could not be verified; nothing changed.")
 
 
 def reconcile_migration(raw_config: Mapping[str, Any], run_id: str, *, home: Path, discard: bool = False,
@@ -162,15 +169,15 @@ def reconcile_migration(raw_config: Mapping[str, Any], run_id: str, *, home: Pat
     """C7F-3 / R45-16: settle one run by local proof or a probe and compact it to reconciled (or discarded)."""
     home = Path(home)
 
-    def matches() -> List[mm.RunFile]:
-        return [r for r in mm.list_runs(home) if r.import_run_id == run_id]
+    def matches(scope=None) -> List[mm.RunFile]:
+        return [r for r in mm.list_runs(home, scope=scope) if r.import_run_id == run_id]
 
     if not matches():                                              # no state: no lock file either (R45-23)
         return MigrationReport(MigrationStatus.REFUSED, "not_found", f"No migration state for run {run_id}.")
     try:
         with ExitStack() as stack:
-            stack.enter_context(mm.migration_lock(home))
-            found = matches()                                      # re-read under the lock
+            scope = stack.enter_context(mm.migration_lock(home))
+            found = matches(scope)                                      # re-read under the lock
             if len(found) != 1:
                 return MigrationReport(MigrationStatus.REFUSED, "not_found" if not found else "ambiguous_migration",
                                        f"Run {run_id} is not exactly one migration file; nothing was changed.")
@@ -181,7 +188,7 @@ def reconcile_migration(raw_config: Mapping[str, Any], run_id: str, *, home: Pat
                                            f"The state of run {run_id} is unreadable. Rerun with --discard to "
                                            "delete it; nothing was changed.", run_id=run_id)
                 try:
-                    run.path.unlink()
+                    mm.remove_document(run.path, scope=scope)
                 except OSError:
                     return MigrationReport(MigrationStatus.STOPPED, "reconcile_not_complete",
                                            f"The unreadable state of run {run_id} could not be deleted.", run_id=run_id)
@@ -202,14 +209,20 @@ def reconcile_migration(raw_config: Mapping[str, Any], run_id: str, *, home: Pat
             receipt = mm.compact(run.document, state=mm.ROLLED_BACK, outcome=outcome, settled=settled,
                                  updated_at=rfc3339(clock()))
             try:
-                mm.write_document(run.path, mm.to_document(receipt))
-            except OSError:
+                mm.write_document(run.path, mm.to_document(receipt), scope=scope)
+            except OSError as exc:
+                if getattr(exc, "code", None) == "migration_state_uncertain":
+                    return MigrationReport(MigrationStatus.STOPPED, exc.code,
+                        "The reconciliation publication was not confirmed; inspect this run again.", run_id=run_id)
                 return MigrationReport(MigrationStatus.STOPPED, "reconcile_not_complete",
                                        f"The reconciliation of run {run_id} could not be recorded.", run_id=run_id)
             return MigrationReport(MigrationStatus.RECONCILED, None, f"Run {run_id} reconciled ({outcome}).",
                                    run_id=run_id)
     except mm.MigrationBusyError as exc:
         return MigrationReport(MigrationStatus.STOPPED, exc.code, "Another memory migration command is running.")
+    except OSError:
+        return MigrationReport(MigrationStatus.STOPPED, "reconcile_required",
+                               "The migration state could not be verified; nothing changed.")
 
 
 @dataclass(frozen=True)

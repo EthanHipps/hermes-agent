@@ -32,13 +32,13 @@ def _crash_on(monkeypatch, predicate, *, after_write: bool):
     real = mm.write_document
     fired = []
 
-    def write(path, doc):
+    def write(path, doc, **kwargs):
         if not fired and predicate(doc):
             fired.append(True)
             if after_write:
-                real(path, doc)
+                real(path, doc, **kwargs)
             raise Crash()
-        real(path, doc)
+        real(path, doc, **kwargs)
     monkeypatch.setattr(mm, "write_document", write)
 
 
@@ -201,11 +201,11 @@ def test_a_failed_completion_write_after_the_switch_still_names_the_restart(env,
     real = mm.write_document
     fired = []
 
-    def write(path, doc):
+    def write(path, doc, **kwargs):
         if not fired and doc.get("state") == "completed":
             fired.append(True)
             raise OSError("disk full")
-        real(path, doc)
+        real(path, doc, **kwargs)
     monkeypatch.setattr(mm, "write_document", write)
     report = start(env, Answers(True, True))
     assert (report.status, report.code) == (MigrationStatus.STOPPED, "completion_not_recorded")

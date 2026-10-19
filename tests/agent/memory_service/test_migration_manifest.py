@@ -149,7 +149,8 @@ def test_unsafe_segments_never_become_paths(tmp_path, provider, epoch):
 
 def test_written_files_are_canonical_and_read_back(tmp_path):
     path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
-    mm.write_document(path, mm.to_document(_manifest()))
+    with mm.migration_lock(tmp_path) as scope:
+        mm.write_document(path, mm.to_document(_manifest()), scope=scope)
     assert path.read_bytes() == mm.encode(mm.to_document(_manifest()))
     assert mm.read_document(path, provider="example", provider_epoch=EPOCH, import_run_id=RUN) == _manifest()
 
@@ -170,7 +171,8 @@ def _c9_agrees(home):
 
 def test_writer_and_c9_reader_agree_through_every_state(tmp_path):
     path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
-    mm.write_document(path, mm.to_document(_manifest()))
+    with mm.migration_lock(tmp_path) as scope:
+        mm.write_document(path, mm.to_document(_manifest()), scope=scope)
     _c9_agrees(tmp_path)
     with pytest.raises(MigrationInProgressError):
         refuse_if_migration_in_progress([tmp_path])
@@ -178,8 +180,9 @@ def test_writer_and_c9_reader_agree_through_every_state(tmp_path):
     for manifest, state, outcome in ((_manifest(), "rolled_back", "operator_denied"), (done, "completed", "completed")):
         settled = {b.batch_id: ("committed", b.result.tx_id) if b.result else ("not_committed", None)
                    for b in manifest.batches}
-        mm.write_document(path, mm.to_document(mm.compact(manifest, state=state, outcome=outcome, settled=settled,
-                                                           updated_at=COMPACTED)))
+        with mm.migration_lock(tmp_path) as scope:
+            mm.write_document(path, mm.to_document(mm.compact(manifest, state=state, outcome=outcome, settled=settled,
+                                                               updated_at=COMPACTED)), scope=scope)
         _c9_agrees(tmp_path)
         assert active_migration_manifests(tmp_path) == [] and mm.list_runs(tmp_path)[0].document.state == state
 
@@ -196,7 +199,8 @@ def test_a_torn_or_corrupt_file_blocks_both_readers(tmp_path, raw):
 
 def test_an_interrupted_write_leaves_a_temp_file_both_readers_ignore(tmp_path):
     path = mm.manifest_path(tmp_path, "example", EPOCH, RUN)
-    mm.write_document(path, mm.to_document(_manifest()))
+    with mm.migration_lock(tmp_path) as scope:
+        mm.write_document(path, mm.to_document(_manifest()), scope=scope)
     (path.parent / ".tmp_leftover.tmp").write_bytes(b"{\"state\": \"act")
     _c9_agrees(tmp_path)
     assert [r.path for r in mm.list_runs(tmp_path)] == [path]
