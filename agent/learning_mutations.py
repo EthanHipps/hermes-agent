@@ -157,10 +157,10 @@ def _delete_memory(node_id: str) -> dict[str, Any]:
 
 # ── Edit ────────────────────────────────────────────────────────────────────
 
-def edit_node(node_id: str, content: str, *, memory_context: Any = None) -> dict[str, Any]:
+def edit_node(node_id: str, content: str, *, memory_context: Any = None, memory_admission: Optional[str] = None) -> dict[str, Any]:
     if (cfg := _curated_config(node_id)) is not None:
         from agent.learning_curated import curated_edit
-        return curated_edit(cfg, node_id, content, memory_context)
+        return curated_edit(cfg, node_id, content, memory_context, memory_admission=memory_admission)
     return _dispatch(node_id, _edit_memory, _edit_skill, content)
 
 

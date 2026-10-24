@@ -710,7 +710,7 @@ export function SkillsView({
     setSkillSaving(true)
 
     try {
-      await editLearningNode(skillEditor.name, skillDraft, scopeProfile)
+      await editLearningNode(skillEditor.name, skillDraft, scopeProfile, null)
       notify({
         kind: 'success',
         title: t.skills.skillUpdated,

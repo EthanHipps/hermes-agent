@@ -26,6 +26,7 @@ from utils import is_truthy_value
 logger = logging.getLogger(__name__)
 
 PROVIDER_API_VERSION = 1
+PROVIDER_CONTRACT_REVISION = 2
 
 #: Operations an authoritative provider must implement (§9.3).
 REQUIRED_OPERATIONS = (

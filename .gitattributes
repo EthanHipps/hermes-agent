@@ -32,3 +32,6 @@ docker/entrypoint.sh text eol=lf
 *.html  text eol=lf
 *.svg   text eol=lf
 *.ps1   text eol=crlf
+
+# Keep the shared provider contract fixture bytes identical across platforms.
+tests/fixtures/provider-contract-v2/** -text

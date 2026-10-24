@@ -32,7 +32,7 @@ def test_memory_alias_persists_with_content_precedence(tmp_path, monkeypatch):
     def call(**args):
         return json.loads(INLINE_TOOL_EXECUTORS["memory"](agent, args, ctx))
 
-    assert call(action="add", target="user", content="Household owns an estate.")["success"]
+    assert call(action="add", target="user", content="Household owns an estate.", memory_admission="prompt_like")["success"]
     result = call(action="replace", target="user", old_text="Household owns an estate.",
                   new_text="Household owns a saloon.")
     assert result["success"], result

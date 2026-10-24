@@ -186,7 +186,7 @@ def _background_delete_gate(action, operations, target="memory", content=None, o
 def memory_tool(action: str = None, target: str = "memory", content: str = None, old_text: str = None,
                 new_text: str = None, operations: Optional[List[Dict[str, Any]]] = None,
                 store: Optional[MemoryStore] = None, *, service: Any = None, budget: Any = None,
-                approval_session_id: Optional[str] = None) -> str:
+                approval_session_id: Optional[str] = None, memory_admission: Optional[str] = None) -> str:
     """Tool entry point; returns a JSON string. Single op (action + content/old_text)
     or batch (``operations``, atomic against the final budget). ``new_text``
     aliases ``content`` — callers mirror ``old_text`` with it (patch-tool shape).
@@ -197,7 +197,7 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
         from tools.memory_tool_curated import curated_memory_tool
         return curated_memory_tool(service, action=action, target=target, content=content, old_text=old_text,
                                    new_text=new_text, operations=operations, budget=budget,
-                                   approval_session_id=approval_session_id)
+                                   approval_session_id=approval_session_id, memory_admission=memory_admission)
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
     if content is None and new_text is not None:
@@ -333,6 +333,8 @@ MEMORY_SCHEMA = {
                 "type": "string",
                 "description": "Alias for 'content' (single-op shape). Provided so the replace/remove old_text/new_text pairing works; if both are set, 'content' wins."
             },
+            "memory_admission": {"type": "string", "enum": ["declarative", "prompt_like"], "description":
+                "Explicit author choice for memory add/replace: declarative for facts; prompt_like for instructions, role/prompt text or commands retained as isolated raw data. Required in provider-managed mode; omit for user/remove."},
             "operations": {
                 "type": "array",
                 "description": (
@@ -347,6 +349,8 @@ MEMORY_SCHEMA = {
                         "content": {"type": "string", "description": "Entry content for add/replace. Alias: 'new_text'."},
                         "new_text": {"type": "string", "description": "Alias for 'content' in a batch op."},
                         "old_text": {"type": "string", "description": "Substring identifying the entry for replace/remove."},
+                        "memory_admission": {"type": "string", "enum": ["declarative", "prompt_like"], "description":
+                "Explicit author choice for memory add/replace: declarative for facts; prompt_like for instructions, role/prompt text or commands retained as isolated raw data. Required in provider-managed mode; omit for user/remove."},
                     },
                     "required": ["action"],
                 },
@@ -390,7 +394,7 @@ registry.register(
     schema=MEMORY_SCHEMA,
     handler=lambda args, **kw: memory_tool(
         action=args.get("action", ""), target=args.get("target", "memory"), store=kw.get("store"),
-        **{k: args.get(k) for k in ("content", "old_text", "new_text", "operations")}),
+        **{k: args.get(k) for k in ("content", "old_text", "new_text", "operations", "memory_admission")}),
     check_fn=check_memory_requirements,
     emoji="🧠",
     dynamic_schema_overrides=_build_memory_schema_overrides)

@@ -608,7 +608,9 @@ async def _learning_mutation(profile: Optional[str], fn, status: int, fallback: 
     becomes ``HTTPException(status, message)``."""
     res = await scoped_to_thread(profile, fn)
     if not res.get("ok"):
-        raise HTTPException(status_code=status, detail=res.get("message", fallback))
+        detail = ({"code": res["code"], "message": res["message"]}
+                  if res.get("code") == "memory_admission_required" else res.get("message", fallback))
+        raise HTTPException(status_code=status, detail=detail)
     return res
 
 
@@ -636,7 +638,8 @@ async def update_learning_node(body: LearningNodeEdit):
     from agent.learning_mutations import edit_node
     ctx = admin_context_or_400(body.org_id, body.project_id, body.repo_id)
     return await _learning_mutation(
-        body.profile, lambda: edit_node(body.id, body.content, memory_context=ctx), 400, "edit failed")
+        body.profile, lambda: edit_node(body.id, body.content, memory_context=ctx,
+                                       memory_admission=body.memory_admission), 400, "edit failed")
 
 
 # Portal — Nous Portal auth + Tool Gateway routing status (read-only).

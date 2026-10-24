@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
+# Rust str::trim uses Unicode White_Space, which excludes Python's U+001C–001F.
+_RUST_WHITESPACE = "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SURFACE_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -36,6 +39,13 @@ class WireError(ValueError):
         super().__init__(f"{path}: {message}")
         self.path = path
         self.message = message
+
+
+class ContractCompatibilityError(WireError):
+    """An exact legacy negotiation shape proved contract incompatibility.
+
+    Backends must preserve this subtype rather than erase it as transport noise.
+    """
 
 
 def canonical_json(obj: Any) -> bytes:
@@ -166,6 +176,28 @@ class WireModel:
         obj = cls(**kwargs)  # type: ignore[call-arg]
         obj.validate(path)
         return obj
+
+    @classmethod
+    def from_json(cls, raw: Union[str, bytes], path: str = "$"):
+        """Decode serialized strict I-JSON without losing duplicate object keys."""
+        def object_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise WireError(path, "duplicate object key")
+                result[key] = value
+            return result
+
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            data = json.loads(raw, object_pairs_hook=object_pairs)
+            canonical_json(data)  # integer range, float and UTF-8 subset, including envelopes
+        except WireError:
+            raise
+        except (ValueError, UnicodeError) as exc:
+            raise WireError(path, "invalid strict I-JSON") from exc
+        return cls.from_wire(data, path)
 
     def to_wire(self) -> Dict[str, Any]:
         return {f.name: _encode(getattr(self, f.name)) for f in fields(self)}  # type: ignore[arg-type]
@@ -344,8 +376,26 @@ class StoredEntry(WireModel):
         _validate_entry_channel(self, path)
 
 
+class GeneralDeliveryItem(WireModel):
+    """Closed delivery union; generated metadata never acquires record authority."""
+
+    @classmethod
+    def from_wire(cls, data: Any, path: str = "$"):
+        if cls is not GeneralDeliveryItem:
+            return super().from_wire(data, path)
+        if not isinstance(data, dict):
+            raise WireError(path, "must be an object")
+        if "kind" not in data:
+            return DeliveredEntry.from_wire(data, path)
+        variants = {"registry_verify": RegistryVerifyEntry, "task_context": TaskContextEntry}
+        kind = data["kind"]
+        if not isinstance(kind, str) or kind not in variants:
+            raise WireError(f"{path}.kind", "unknown generated delivery kind")
+        return variants[kind].from_wire(data, path)
+
+
 @dataclass(frozen=True)
-class DeliveredEntry(WireModel):
+class DeliveredEntry(GeneralDeliveryItem):
     id: str
     text: str
     origin_scope: ScopeRef
@@ -358,6 +408,39 @@ class DeliveredEntry(WireModel):
 
     def validate(self, path: str = "$") -> None:
         _validate_entry_channel(self, path)
+
+
+@dataclass(frozen=True)
+class RegistryVerifyEntry(GeneralDeliveryItem):
+    kind: Literal["registry_verify"]
+    origin_scope: ScopeRef
+    verify_id: str
+    argv: Tuple[str, ...]
+    cwd: str
+
+    def validate(self, path: str = "$") -> None:
+        _require(self.origin_scope.kind == "repository" and bool(self.origin_scope.id), f"{path}.origin_scope", "repository scope required")
+        _require(bool(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", self.verify_id)), f"{path}.verify_id", "invalid registry identifier")
+        _require(bool(self.argv) and bool(self.argv[0].strip(_RUST_WHITESPACE)) and all("\0" not in a for a in self.argv), f"{path}.argv", "invalid command argv")
+        if self.cwd != ".":
+            _require(bool(self.cwd) and bool(re.fullmatch(r"[A-Za-z0-9._/ -]+", self.cwd)), f"{path}.cwd", "invalid repository-relative path")
+            for part in self.cwd.split("/"):
+                stem = part.split(".")[0].upper()
+                device = stem in ("CON", "PRN", "AUX", "NUL") or bool(re.fullmatch(r"(?:COM|LPT)[1-9]", stem))
+                _require(part not in ("", ".", "..") and not part.endswith((".", " ")) and not device, f"{path}.cwd", "invalid repository-relative path")
+
+
+@dataclass(frozen=True)
+class TaskContextEntry(GeneralDeliveryItem):
+    kind: Literal["task_context"]
+    task_id: str
+    origin_scope: ScopeRef
+    delivery_tier: DeliveryTier
+    text: str
+    source_ids: Tuple[str, ...]
+
+    def validate(self, path: str = "$") -> None:
+        _require(all(self.source_ids) and len(self.source_ids) == len(set(self.source_ids)), f"{path}.source_ids", "source identifiers must be nonempty and unique")
 
 
 @dataclass(frozen=True)
@@ -382,9 +465,11 @@ class CandidateEntry(WireModel):
     target: Target
     proposed_policy_key: Optional[str]
     import_source_identity: Optional[ImportSourceIdentity]
+    memory_admission: Optional[Literal["declarative", "prompt_like"]]
 
     def validate(self, path: str = "$") -> None:
         _require(bool(self.client_ref), f"{path}.client_ref", "must be non-empty")
+        _decode(Optional[Literal["declarative", "prompt_like"]], self.memory_admission, f"{path}.memory_admission")
 
 
 @dataclass(frozen=True)
@@ -446,18 +531,45 @@ class Limits(WireModel):
 class NegotiateRequest(WireModel):
     host: Literal["hermes"]
     supported_api_versions: Tuple[int, ...]
+    supported_contract_revisions: Tuple[int, ...]
     required_operations: Tuple[Operation, ...]
+
+
+    def validate(self, path: str = "$") -> None:
+        revisions = self.supported_contract_revisions
+        _require(bool(revisions), f"{path}.supported_contract_revisions", "must be nonempty")
+        for i, revision in enumerate(revisions):
+            _decode(int, revision, f"{path}.supported_contract_revisions[{i}]")
+            _require_positive(revision, f"{path}.supported_contract_revisions[{i}]")
+        _require(len(set(revisions)) == len(revisions), f"{path}.supported_contract_revisions", "must be unique")
 
 
 @dataclass(frozen=True)
 class Negotiation(WireModel):
     provider: str
     selected_api_version: int
+    selected_contract_revision: int
     operations: Tuple[Operation, ...]
     capabilities: Capabilities
     limits: Limits
 
+    @classmethod
+    def from_wire(cls, data: Any, path: str = "$"):
+        legacy_fields = {"provider", "selected_api_version", "operations", "capabilities", "limits"}
+        if isinstance(data, dict) and set(data) == legacy_fields:
+            try:
+                # Validate every legacy field before classifying; this projection
+                # is never returned, bound, or retried as a compatible response.
+                super().from_wire({**data, "selected_contract_revision": 2}, path)
+            except WireError:
+                pass
+            else:
+                raise ContractCompatibilityError(path, "legacy negotiation lacks required contract revision")
+        return super().from_wire(data, path)
+
     def validate(self, path: str = "$") -> None:
+        _decode(int, self.selected_contract_revision, f"{path}.selected_contract_revision")
+        _require_positive(self.selected_contract_revision, f"{path}.selected_contract_revision")
         # Any positive integer decodes. §9.1 assigns the version decision to
         # the host: an incompatible provider API MUST be a configuration error
         # and MUST NOT be reinterpreted, so the host has to SEE the selected
@@ -554,7 +666,7 @@ class CuratedSnapshot(WireModel):
     revision: CompositeRevision
     limits: CuratedLimits
     mutation_entries: Tuple[StoredEntry, ...]
-    delivery_entries: Tuple[DeliveredEntry, ...]
+    delivery_entries: Tuple[GeneralDeliveryItem, ...]
     hidden_preservation_state: HiddenPreservationState
 
     def validate(self, path: str = "$") -> None:
@@ -568,7 +680,10 @@ class CuratedSnapshot(WireModel):
             _require(e.record_channel == channel and e.target == self.target, f"{path}.mutation_entries[{i}]", f"must be a {channel} record for target {self.target}")
         allowed = ("general", "hermes_memory") if self.target == "memory" else ("hermes_user",)
         for i, e in enumerate(self.delivery_entries):
-            _require(e.record_channel in allowed, f"{path}.delivery_entries[{i}]", f"{self.target} snapshots deliver only {' or '.join(allowed)} records")
+            if isinstance(e, DeliveredEntry):
+                _require(e.record_channel in allowed, f"{path}.delivery_entries[{i}]", f"{self.target} snapshots deliver only {' or '.join(allowed)} records")
+            else:
+                _require(self.target == "memory" and isinstance(e, (RegistryVerifyEntry, TaskContextEntry)), f"{path}.delivery_entries[{i}]", "generated context is only allowed in memory/general delivery")
         if self.status == "degraded_global_only":
             ok = (
                 len(self.visible_scopes) == 1 and self.visible_scopes[0].kind == "principal_global"
@@ -720,6 +835,7 @@ class StageRequest(WireModel):
         olds = [d.record_id or d.old_record_id for d in delta if d.action in ("retire", "supersede")]
         _require(len(olds) == len(set(olds)), f"{path}.mutation_delta", "old record IDs must be unique")
         for i, c in enumerate(cands):
+            c.validate(f"{path}.candidate_entries[{i}]")
             _require(c.target == self.target, f"{path}.candidate_entries[{i}].target", "must equal the request target")
             if kind == "import":
                 _require(c.import_source_identity is not None and c.import_source_identity.source_kind == self.intent.source_kind, f"{path}.candidate_entries[{i}].import_source_identity", "import candidates need an identity whose source_kind matches the intent")

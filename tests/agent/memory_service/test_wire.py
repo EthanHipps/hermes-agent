@@ -116,6 +116,7 @@ def test_negotiation_limits_invariants():
     neg = {
         "provider": "example",
         "selected_api_version": 1,
+        "selected_contract_revision": 2,
         "operations": ["bind_session", "validate_session", "load_curated", "stage_curated", "inspect_staged", "commit_curated"],
         "capabilities": {"recall_context": False, "capture_continuity": True},
         "limits": {
@@ -206,6 +207,7 @@ def _stage_request(**over):
                 "target": "memory",
                 "proposed_policy_key": None,
                 "import_source_identity": None,
+                "memory_admission": None,
             }
         ],
         "provenance": {
@@ -497,3 +499,214 @@ def test_canonical_json_matches_rfc8785_for_the_subset():
         w.canonical_json({"f": 1.5})
     with pytest.raises(ValueError):
         w.canonical_json({"é": 1})
+
+
+def _contract_vectors(kind):
+    """Every sealed vector has exactly one executed contract boundary."""
+    from collections import Counter
+    from pathlib import Path
+
+    vectors = json.loads((Path(__file__).parents[2] / "fixtures/provider-contract-v2/vectors.json").read_bytes())
+    boundaries = {
+        "codec": (70, "test_revision_two_shared_codec_contract"),
+        "negotiation": (14, "test_revision_two_shared_negotiation_vectors"),
+        "lane": (18, "test_revision_two_shared_contextual_lanes"),
+        "lane_batch": (1, "test_revision_two_shared_contextual_batch"),
+        "binding": (3, "test_revision_two_shared_binding_retry_identity"),
+    }
+    assert Counter(v["kind"] for v in vectors) == {key: value[0] for key, value in boundaries.items()}
+    ids = [v["id"] for v in vectors]
+    assert len(ids) == len(set(ids)) == 106
+    assert all(isinstance(vector_id, str) and vector_id for vector_id in ids)
+    assert kind in boundaries
+    return [vector for vector in vectors if vector["kind"] == kind]
+
+
+def test_revision_two_shared_codec_contract():
+    """Accepted H2/OR-W12-1 structural contract, at direct and serialized boundaries."""
+    vectors = _contract_vectors("codec")
+    for vector in vectors:
+        schema = getattr(w, vector["input"]["schema"])
+        value = vector["input"]["value"]
+        if vector["expected"]["accepted"]:
+            assert schema.from_wire(value).to_wire() == value, vector["id"]
+            assert schema.from_json(json.dumps(value)).to_wire() == value, vector["id"]
+        else:
+            with pytest.raises(w.WireError):
+                schema.from_wire(value)
+            with pytest.raises(w.WireError):
+                schema.from_json(json.dumps(value))
+    candidate = next(v["input"]["value"] for v in vectors if v["id"] == "candidate-memory-declarative")
+    duplicate = json.dumps(candidate).replace('"memory_admission": "declarative"', '"memory_admission": null, "memory_admission": "declarative"')
+    with pytest.raises(w.WireError, match="duplicate"):
+        w.CandidateEntry.from_json(duplicate)
+    parsed = w.CandidateEntry.from_wire(candidate)
+    with pytest.raises(w.WireError, match="memory_admission"):
+        dataclasses.replace(parsed, memory_admission=True).validate()
+    with pytest.raises(TypeError):
+        w.CandidateEntry(**{k: getattr(parsed, k) for k in candidate if k != "memory_admission"})
+
+
+    # Rust command_argv uses Unicode White_Space, unlike Python's extra ASCII separators.
+    registry = next(v["input"]["value"] for v in vectors if v["id"] == "delivery-registry")
+    whitespace_cases = [(first, True) for first in "\x1c\x1d\x1e\x1f"]
+    whitespace_cases += [(first, False) for first in
+                         "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"]
+    for first, accepted in whitespace_cases:
+        value = {**registry, "argv": [first]}
+        if accepted:
+            assert w.RegistryVerifyEntry.from_wire(value).to_wire() == value
+            assert w.RegistryVerifyEntry.from_json(json.dumps(value)).to_wire() == value
+        else:
+            with pytest.raises(w.WireError, match="argv"):
+                w.RegistryVerifyEntry.from_wire(value)
+
+
+
+def test_revision_two_shared_negotiation_vectors():
+    """Shared requests reach the fake protocol boundary; no provider conformance claim."""
+    from agent.memory_service.errors import ProviderError
+    from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore
+    vectors = _contract_vectors("negotiation")
+    for vector in vectors:
+        store = FakeProviderStore()
+        backend = FakeAuthoritativeBackend(store)
+        try:
+            request = w.NegotiateRequest.from_wire(vector["input"]["value"])
+            result = backend.negotiate(request).result
+        except w.WireError:
+            assert vector["expected"].get("error_code") == "invalid_request", vector["id"]
+        except ProviderError as exc:
+            assert exc.code == vector["expected"]["error_code"], vector["id"]
+        else:
+            assert vector["expected"]["accepted"], vector["id"]
+            assert result.selected_contract_revision == vector["expected"]["selected_contract_revision"]
+        finally:
+            backend.shutdown()
+        assert not store.handles and not store.stages
+
+
+def _contextual_contract_plan(snapshot, candidates, source_kind=None):
+    from agent.memory_service.mutation import PlannedMutation
+
+    imported = source_kind is not None
+    entries = tuple(w.CandidateEntry(
+        client_ref=candidate["client_ref"], text="contract " + candidate["client_ref"],
+        destination_scope=snapshot.default_write_scope, target=snapshot.target,
+        proposed_policy_key=None,
+        import_source_identity=w.ImportSourceIdentity(
+            source_kind=source_kind,
+            parser_version={"native_memory": "hermes-native-v0.20.6", "legacy_archive": "hermes-legacy-archive-v1"}[source_kind],
+            source_id="shared-corpus", item_key="item-" + str(index),
+        ) if imported else None,
+        memory_admission=candidate["memory_admission"],
+    ) for index, candidate in enumerate(candidates))
+    intent = (w.MutationIntent(kind="import", import_run_id="shared-import", source_kind=source_kind)
+              if imported else w.MutationIntent(kind="bulk_edit" if len(entries) > 1 else "add"))
+    return PlannedMutation(
+        intent=intent, candidate_entries=entries,
+        mutation_delta=tuple(w.MutationDeltaItem(action="add", client_ref=c.client_ref) for c in entries),
+        requested_write_scopes=(snapshot.default_write_scope,),
+        projected_texts=tuple(c.text for c in entries), message="contract fixture",
+    )
+
+
+@pytest.mark.parametrize("vector", _contract_vectors("lane"), ids=lambda vector: vector["id"])
+def test_revision_two_shared_contextual_lanes(tmp_path, vector):
+    """Context refusals precede fake staging; accepted source lanes remain distinct."""
+    from agent.memory_service.errors import ProviderError
+    from agent.memory_service.mutation import _mutation_request
+    from tests.agent.memory_service.test_curated_mutation import _service, _store
+
+    store = _store()
+    service, backend = _service(tmp_path, store)
+    try:
+        snapshot = service.load_curated(vector["input"]["target"])
+        declaration = {"client_ref": "shared-candidate", "memory_admission": vector["input"]["memory_admission"]}
+        plan = _contextual_contract_plan(snapshot, [declaration], vector["input"]["source_kind"])
+        request = _mutation_request(service, snapshot, plan, vector["id"], "hermes", "memory_tool")
+        if vector["expected"]["accepted"]:
+            result = service.stage_curated(request)
+            assert [(a.client_ref, a.disposition, a.record_channel) for a in result.admissions] == [
+                (declaration["client_ref"], vector["expected"]["disposition"], vector["expected"]["record_channel"])]
+        else:
+            with pytest.raises(ProviderError) as exc:
+                service.stage_curated(request)
+            assert (exc.value.code, exc.value.outcome) == (vector["expected"]["code"], "not_committed")
+            assert not store.stages and not store.stage_by_request
+        assert backend.count("stage_curated") == 1
+        assert not store.records and not store.import_index and not store.receipts
+    finally:
+        backend.shutdown()
+
+
+@pytest.mark.parametrize("vector", _contract_vectors("lane_batch"), ids=lambda vector: vector["id"])
+def test_revision_two_shared_contextual_batch(tmp_path, vector):
+    """The real host builder and serialized fake preserve per-client-ref lane order."""
+    from agent.memory_service.mutation import _mutation_request
+    from tests.agent.memory_service.test_curated_mutation import _service, _store
+
+    store = _store()
+    service, backend = _service(tmp_path, store)
+    try:
+        snapshot = service.load_curated(vector["input"]["target"])
+        plan = _contextual_contract_plan(snapshot, vector["input"]["candidates"], vector["input"]["source_kind"])
+        request = _mutation_request(service, snapshot, plan, vector["id"], "hermes", "memory_tool")
+        result = service.stage_curated(request)
+        assert vector["expected"]["accepted"]
+        assert [{key: getattr(a, key) for key in ("client_ref", "disposition", "record_channel")}
+                for a in result.admissions] == vector["expected"]["admissions"]
+        assert [c.to_wire()["memory_admission"] for c in backend.calls[-1][1].candidate_entries] == [
+            c["memory_admission"] for c in vector["input"]["candidates"]]
+        assert not store.records and not store.receipts
+    finally:
+        backend.shutdown()
+
+
+@pytest.mark.parametrize("vector", _contract_vectors("binding"), ids=lambda vector: vector["id"])
+def test_revision_two_shared_binding_retry_identity(tmp_path, vector):
+    """Host ordered projection/retry identity, not the production ygg binding hash."""
+    from agent.memory_service.errors import ProviderError
+    from agent.memory_service.mutation import _mutation_request, _with_exact_retry
+    from tests.agent.memory_service.test_curated_mutation import _service, _store
+
+    store = _store()
+    service, backend = _service(tmp_path, store)
+    try:
+        assert service._negotiation.selected_contract_revision == vector["input"]["contract_revision"] == 2
+        assert next(req for op, req in backend.calls if op == "negotiate").supported_contract_revisions == (2,)
+        snapshot = service.load_curated("memory")
+        original = _contextual_contract_plan(snapshot, vector["input"]["original"])
+        request = _mutation_request(service, snapshot, original, vector["id"], "hermes", "memory_tool")
+        # Reach a written stage and lose the reply, then use the real immutable retry helper.
+        store.fail_transport("stage_curated", phase="during")
+        staged = _with_exact_retry(service, "memory", lambda: service.stage_curated(request))
+        stages = [req for op, req in backend.calls if op == "stage_curated"]
+        assert len(stages) == 2 and w.canonical_json(stages[0].to_wire()) == w.canonical_json(stages[1].to_wire())
+        assert list(store.stages) == [staged.stage_handle_b64url]
+        assert store.stages[staged.stage_handle_b64url].result == staged
+
+        changed = _contextual_contract_plan(snapshot, vector["input"]["retry"])
+        retry_plan = dataclasses.replace(original, candidate_entries=changed.candidate_entries)
+        retry = _mutation_request(service, snapshot, retry_plan, vector["id"], "hermes", "memory_tool")
+        if vector["expected"]["same_binding"]:
+            replay = service.stage_curated(retry)
+            assert replay == staged
+            assert replay.approval_binding_sha256 == staged.approval_binding_sha256
+        else:
+            with pytest.raises(ProviderError) as exc:
+                service.stage_curated(retry)
+            assert (exc.value.code, exc.value.outcome) == ("idempotency_mismatch", "not_committed")
+
+        stages = [req.to_wire() for op, req in backend.calls if op == "stage_curated"]
+        projection = lambda body: [{key: c[key] for key in ("client_ref", "memory_admission")}
+                                   for c in body["candidate_entries"]]
+        assert projection(stages[0]) == vector["input"]["original"]
+        assert projection(stages[-1]) == vector["input"]["retry"]
+        assert (projection(stages[0]) == projection(stages[-1])) is vector["expected"]["same_projection"]
+        assert (w.canonical_json(stages[0]) == w.canonical_json(stages[-1])) is vector["expected"]["same_binding"]
+        assert list(store.stages) == [staged.stage_handle_b64url]
+        assert store.stages[staged.stage_handle_b64url].result == staged
+        assert not store.records and not store.receipts
+    finally:
+        backend.shutdown()

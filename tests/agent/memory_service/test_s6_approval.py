@@ -27,7 +27,7 @@ from tools.memory_tool_curated import ConsolidationBudget
 EPOCH = "ep-opaque-7f3a"
 GLOBAL = w.ScopeRef(kind="principal_global", id="ethan")
 USER_ADD = {"action": "add", "target": "user", "content": "prefers terse replies"}
-MEMORY_ADD = {"action": "add", "target": "memory", "content": "uses pnpm"}
+MEMORY_ADD = {"action": "add", "target": "memory", "content": "uses pnpm", "memory_admission": "declarative"}
 
 
 def _tool_defs(*names):

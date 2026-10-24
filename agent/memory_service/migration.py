@@ -362,7 +362,7 @@ class _Run:
             raise _Stop("source_changed", "The native source changed since it was staged; roll back and start again.")
         return tuple(w.CandidateEntry(
             client_ref=ref, text=text, destination_scope=batch.destination_scope, target=batch.target,
-            proposed_policy_key=None,
+            proposed_policy_key=None, memory_admission=None,
             import_source_identity=w.ImportSourceIdentity(source_kind=self.source.source_kind,
                                                           parser_version=self.source.parser_version,
                                                           source_id=self.source.source_id, item_key=key))
@@ -620,7 +620,7 @@ class _Run:
         for b in self.batches:
             snapshot = self._load(service, b.target)
             stored = {e.id: e for e in snapshot.mutation_entries}
-            delivered = {e.id for e in snapshot.delivery_entries}
+            delivered = {e.id for e in snapshot.delivery_entries if isinstance(e, w.DeliveredEntry)}
             hashes = {h.client_ref: h.canonical_sha256 for h in b.candidate_hashes}
             for a in b.admissions:
                 if a.disposition == "withheld_raw":

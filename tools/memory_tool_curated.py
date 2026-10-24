@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from agent.memory_service import wire as w
 from agent.memory_service.mutation import (
@@ -88,34 +88,69 @@ class NativeCall:
     content: Optional[str]
     old_text: Optional[str]
     operations: Optional[List[Dict[str, Any]]]
+    memory_admission: Optional[Literal["declarative", "prompt_like"]] = None
+
+
+@dataclass(frozen=True)
+class _NativeOp:
+    action: Optional[str]
+    content: str
+    old_text: str
+    memory_admission: Optional[Literal["declarative", "prompt_like"]]
 
 
 @dataclass(frozen=True)
 class _Item:
     text: str
-    entry: Optional[w.StoredEntry]  # the snapshot entry this text stands for; None for a new add
+    entry: Optional[w.StoredEntry]
+    memory_admission: Optional[Literal["declarative", "prompt_like"]] = None
+    raw_add: bool = False  # duplicate authored add preserves the visible snapshot entry
+    conflicting_admission: bool = False
 
 
-def _native_ops(call: NativeCall) -> List[Tuple[Any, str, str]]:
-    """``(action, content, old_text)`` exactly as MemoryStore normalizes them."""
+def _native_ops(call: NativeCall) -> List[_NativeOp]:
+    """Selected authored new text, with native single/batch alias precedence."""
     if call.operations:
-        return [((op or {}).get("action"), ((op or {}).get("content") or (op or {}).get("new_text") or "").strip(),
-                 ((op or {}).get("old_text") or "").strip()) for op in call.operations]
-    return [(call.action, (call.content or "").strip(), (call.old_text or "").strip())]
+        return [_NativeOp((op or {}).get("action"),
+                          ((op or {}).get("content") or (op or {}).get("new_text") or "").strip(),
+                          ((op or {}).get("old_text") or "").strip(),
+                          (op or {}).get("memory_admission")) for op in call.operations]
+    return [_NativeOp(call.action, (call.content or "").strip(), (call.old_text or "").strip(),
+                      call.memory_admission)]
 
 
 def _replay_identity(snapshot: w.CuratedSnapshot, call: NativeCall) -> List[_Item]:
-    """The native index logic once more, on items that remember their snapshot entry."""
+    """Replay native positions while retaining the final author's declaration."""
     items = [_Item(entry.text, entry) for entry in snapshot.mutation_entries]
-    for action, content, old_text in _native_ops(call):
+    for op in _native_ops(call):
         texts = [item.text for item in items]
-        if action == "add":
-            if content not in texts:
-                items.append(_Item(content, None))
+        if op.action == "add":
+            if op.content not in texts:
+                items.append(_Item(op.content, None, op.memory_admission))
+            else:
+                index = texts.index(op.content)
+                item = items[index]
+                conflict = (item.memory_admission is not None and item.memory_admission != op.memory_admission)
+                items[index] = replace(item, memory_admission=op.memory_admission,
+                                       raw_add=item.raw_add or (item.memory_admission is None and item.entry is not None
+                                                                    and op.memory_admission == "prompt_like"),
+                                       conflicting_admission=item.conflicting_admission or conflict)
             continue
-        index, _ = _find_unique_match(texts, old_text)
-        items[index:index + 1] = [_Item(content, items[index].entry)] if action == "replace" else []
+        index, _ = _find_unique_match(texts, op.old_text)
+        items[index:index + 1] = ([_Item(op.content, items[index].entry, op.memory_admission)]
+                                  if op.action == "replace" else [])
     return items
+
+
+def _admission_refusal() -> PlanShortCircuit:
+    return PlanShortCircuit({"success": False, "code": "memory_admission_required", "error":
+                             "An explicit memory admission declaration is required. Nothing was saved."})
+
+
+def _valid_admission(target: str, op: _NativeOp) -> bool:
+    if target == "memory" and op.action in ("add", "replace"):
+        return type(op.memory_admission) is str and op.memory_admission in ("declarative", "prompt_like")
+    return op.memory_admission is None
 
 
 def _raw_texts(call: NativeCall) -> List[str]:
@@ -145,24 +180,37 @@ def _intent(delta: List[w.MutationDeltaItem]) -> w.MutationIntent:
     return single[item.action]()
 
 
-def _candidate(client_ref: str, text: str, scope: w.ScopeRef, target: str) -> w.CandidateEntry:
-    return w.CandidateEntry(client_ref=client_ref, text=MemoryStore.normalize_entry(text), destination_scope=scope,
-                            target=target, proposed_policy_key=None, import_source_identity=None)
+def _candidate(client_ref: str, item: _Item, scope: w.ScopeRef, target: str) -> w.CandidateEntry:
+    return w.CandidateEntry(client_ref=client_ref, text=MemoryStore.normalize_entry(item.text), destination_scope=scope,
+                            target=target, proposed_policy_key=None, import_source_identity=None, memory_admission=item.memory_admission)
 
 
 def _to_plan(snapshot: w.CuratedSnapshot, items: List[_Item], message: str, response: Dict[str, Any],
              budget: ConsolidationBudget) -> Union[PlannedMutation, PlanShortCircuit]:
     key = MemoryStore.normalize_entry  # duplicates are judged on the candidate (stored) form
-    unchanged = {key(i.text) for i in items if i.entry is not None and key(i.text) == key(i.entry.text)}
+    choices: Dict[str, str] = {}
+    for item in items:
+        text = key(item.text)
+        if item.conflicting_admission or (item.memory_admission is not None and text in choices
+                                          and choices[text] != item.memory_admission):
+            return PlanShortCircuit({"success": False, "code": "memory_admission_conflict", "error":
+                                     "Conflicting memory admission declarations. Nothing was saved."})
+        if item.memory_admission is not None:
+            choices[text] = item.memory_admission
+    unchanged = {key(i.text) for i in items if i.entry is not None and key(i.text) == key(i.entry.text)
+                 and (i.memory_admission != "prompt_like" or i.raw_add)}
     kept_ids, changed, seen = set(), [], set()
     for item in items:
         text = key(item.text)
-        if item.entry is not None and text == key(item.entry.text):
+        if item.raw_add:
             kept_ids.add(item.entry.id)
-        elif text not in unchanged and text not in seen:  # native reload would de-duplicate the rest
+            changed.append(item)
+        elif item.entry is not None and text == key(item.entry.text) and item.memory_admission != "prompt_like":
+            kept_ids.add(item.entry.id)
+        elif (item.memory_admission == "prompt_like" or text not in unchanged) and text not in seen:  # native reload would de-duplicate the rest
             seen.add(text)
             changed.append(item)
-    superseding = {item.entry.id: item for item in changed if item.entry is not None}
+    superseding = {item.entry.id: item for item in changed if item.entry is not None and not item.raw_add}
     delta: List[w.MutationDeltaItem] = []
     candidates: List[w.CandidateEntry] = []
     scopes: List[w.ScopeRef] = []
@@ -174,16 +222,16 @@ def _to_plan(snapshot: w.CuratedSnapshot, items: List[_Item], message: str, resp
             delta.append(w.MutationDeltaItem(action="retire", record_id=entry.id))
         else:
             ref = f"c{len(candidates) + 1}"
-            candidates.append(_candidate(ref, replacement.text, entry.origin_scope, snapshot.target))
+            candidates.append(_candidate(ref, replacement, entry.origin_scope, snapshot.target))
             delta.append(w.MutationDeltaItem(action="supersede", old_record_id=entry.id, replacement_client_ref=ref))
         scopes.append(entry.origin_scope)
     for item in changed:
-        if item.entry is not None:
+        if item.entry is not None and not item.raw_add:
             continue
         if snapshot.default_write_scope is None:  # §9.2 L971
             return PlanShortCircuit(dict(_SCOPE_UNRESOLVED))
         ref = f"c{len(candidates) + 1}"
-        candidates.append(_candidate(ref, item.text, snapshot.default_write_scope, snapshot.target))
+        candidates.append(_candidate(ref, item, snapshot.default_write_scope, snapshot.target))
         delta.append(w.MutationDeltaItem(action="add", client_ref=ref))
         scopes.append(snapshot.default_write_scope)
     if not delta:  # a no-op: native would write the same entries and report success
@@ -200,6 +248,9 @@ def plan_native_call(snapshot: w.CuratedSnapshot, call: NativeCall,
     from tools import memory_tool as facade  # late import: facade + sibling rule (root AGENTS.md)
 
     target = snapshot.target
+    if (call.operations and call.memory_admission is not None) or any(
+            not _valid_admission(target, op) for op in _native_ops(call)):
+        return _admission_refusal()
     view = SnapshotMemoryStore(snapshot)
     view._consolidation_failures = budget.failures
     if call.operations:
@@ -208,18 +259,22 @@ def plan_native_call(snapshot: w.CuratedSnapshot, call: NativeCall,
         invalid = facade._validate_single_op(view, call.action, target, call.content, call.old_text)
         response = (json.loads(invalid) if invalid is not None
                     else facade._STORE_ACTIONS[call.action][0](view, target, call.content, call.old_text))
-    if view.captured is None:  # refusal, failure or native no-op: no provider mutation
+    raw_noop = (view.captured is None and response.get("success") is True
+                and any(op.memory_admission == "prompt_like" for op in _native_ops(call)))
+    if view.captured is None and not raw_noop:  # refusal, failure or declarative native no-op
         budget.failures = view._consolidation_failures
         return PlanShortCircuit(response)
     items = _replay_identity(snapshot, call)
-    if tuple(item.text for item in items) != view.captured:
+    expected = view.captured if view.captured is not None else tuple(e.text for e in snapshot.mutation_entries)
+    if tuple(item.text for item in items) != expected:
         logger.error("memory tool identity replay disagrees with the native result; refusing")
         return PlanShortCircuit({"success": False, "error": "Memory could not map this change to stored entries. Nothing was saved."})
-    candidates = [item for item in items if item.entry is None or item.text != item.entry.text]
+    candidates = [item for item in items if item.entry is None or item.text != item.entry.text
+                  or item.memory_admission == "prompt_like"]
     hit = _candidate_scan(call, candidates)
     if hit:
         return PlanShortCircuit({"success": False, "error": hit})
-    return _to_plan(snapshot, items, view.captured_message, response, budget)
+    return _to_plan(snapshot, items, view.captured_message or response.get("message", "Entry added."), response, budget)
 
 
 # ---- model-facing responses -------------------------------------------------------------------
@@ -308,7 +363,8 @@ def curated_memory_tool(service: MemoryService, *, action: Optional[str] = None,
                         content: Optional[str] = None, old_text: Optional[str] = None,
                         new_text: Optional[str] = None, operations: Any = None,
                         budget: Optional[ConsolidationBudget] = None,
-                        approval_session_id: Optional[str] = None) -> str:
+                        approval_session_id: Optional[str] = None,
+                        memory_admission: Optional[Literal["declarative", "prompt_like"]] = None) -> str:
     """The memory tool in a provider-managed session; returns the tool's JSON string.
 
     ``approval_session_id`` names the Hermes session whose persisted identity an approval may
@@ -333,7 +389,8 @@ def curated_memory_tool(service: MemoryService, *, action: Optional[str] = None,
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
     elif action not in facade._STORE_ACTIONS:
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
-    call = NativeCall(action=action, content=content, old_text=old_text, operations=operations or None)
+    call = NativeCall(action=action, content=content, old_text=old_text, operations=operations or None,
+                      memory_admission=memory_admission)
     outcome = run_curated_mutation(service, target, lambda snapshot: plan_native_call(snapshot, call, budget),
                                    extra_approval=_host_write_approval(),
                                    approval=memory_tool_approval_channel(approval_session_id))

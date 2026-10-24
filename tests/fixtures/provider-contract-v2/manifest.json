@@ -1,0 +1,6 @@
+{
+  "schema": "ygg.provider-contract-v2/v1",
+  "api_version": 1,
+  "contract_revision": 2,
+  "vector_file": "vectors.json"
+}

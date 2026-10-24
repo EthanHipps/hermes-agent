@@ -66,14 +66,18 @@ def _escape(text: str) -> str:
 
 
 def _body(entry: w.DeliveredEntry) -> List[str]:
+    return _text_body(entry.text, entry.id)
+
+
+def _text_body(text: str, identifier: str) -> List[str]:
     if THREAT_SCAN_ON_RENDER:
         from tools.threat_patterns import scan_for_threats
 
-        findings = scan_for_threats(entry.text, scope="strict")
+        findings = scan_for_threats(text, scope="strict")
         if findings:
             logger.warning("curated memory record blocked at render (%d pattern(s))", len(findings))
-            return [BLOCKED_NOTE.format(id=_label(entry.id), names=", ".join(findings))]
-    return _escape(entry.text).splitlines() or [""]
+            return [BLOCKED_NOTE.format(id=_label(identifier), names=", ".join(findings))]
+    return _escape(text).splitlines() or [""]
 
 
 def _fit(entries: Sequence[w.DeliveredEntry], limit: Optional[int]) -> Tuple[List[w.DeliveredEntry], int]:
@@ -90,8 +94,21 @@ def _fit(entries: Sequence[w.DeliveredEntry], limit: Optional[int]) -> Tuple[Lis
     return kept, 0
 
 
-def _region(label: str, entries: Sequence[w.DeliveredEntry]) -> List[str]:
+def _region(label: str, entries: Sequence[w.GeneralDeliveryItem]) -> List[str]:
     out = [f"### {label}"]
+    if any(not isinstance(e, w.DeliveredEntry) for e in entries):
+        # Preserve the generated packet's order, with no invented record ID,
+        # provenance, lane or policy authority. Commands remain quoted data.
+        for entry in entries:
+            if isinstance(entry, w.DeliveredEntry):
+                out.extend(_region(label, [entry])[1:])
+            else:
+                out.append(f"[MEMORY_GENERATED_CONTEXT_BEGIN kind={entry.kind}]")
+                out.append(EVIDENCE_PREAMBLE)
+                text = w.canonical_json(entry.to_wire()).decode("utf-8")
+                out.extend(f"> {line}" for line in _text_body(text, entry.kind))
+                out.append(f"[MEMORY_GENERATED_CONTEXT_END kind={entry.kind}]")
+        return out
     for entry in (e for e in entries if e.lane == "trusted_instruction"):
         first, *rest = _body(entry)
         out.append(f"- {first}")
@@ -110,11 +127,23 @@ def render_curated_prompt(memory: Optional[w.CuratedSnapshot], user: Optional[w.
     """General packet once (from ``memory``), then memory, then user (§9.3 L1237)."""
     if (memory is not None and memory.target != "memory") or (user is not None and user.target != "user"):
         raise ValueError("render_curated_prompt takes the memory snapshot, then the user snapshot")
-    sources: List[Tuple[str, List[w.DeliveredEntry], Optional[int]]] = []
+    sources: List[Tuple[str, List[w.GeneralDeliveryItem], Optional[int]]] = []
     if memory is not None:
         general_limit = memory.limits.initial_general_chars if HOST_ENFORCES_GENERAL_BUDGET else None
-        sources.append(("general", [e for e in memory.delivery_entries if e.record_channel == "general"], general_limit))
-        sources.append(("hermes_memory", [e for e in memory.delivery_entries if e.record_channel == "hermes_memory"], memory.limits.memory_chars))
+        general = []
+        seen_generated = set()
+        for entry in memory.delivery_entries:
+            if isinstance(entry, w.DeliveredEntry):
+                if entry.record_channel == "general":
+                    general.append(entry)
+                continue
+            identifier = entry.verify_id if isinstance(entry, w.RegistryVerifyEntry) else entry.task_id
+            key = (entry.kind, entry.origin_scope, identifier)
+            if key not in seen_generated:
+                seen_generated.add(key)
+                general.append(entry)
+        sources.append(("general", general, general_limit))
+        sources.append(("hermes_memory", [e for e in memory.delivery_entries if isinstance(e, w.DeliveredEntry) and e.record_channel == "hermes_memory"], memory.limits.memory_chars))
     if user is not None:
         sources.append(("hermes_user", list(user.delivery_entries), user.limits.user_chars))
     lines: List[str] = []
@@ -124,11 +153,15 @@ def render_curated_prompt(memory: Optional[w.CuratedSnapshot], user: Optional[w.
         kept, dropped = _fit(entries, limit)
         if kept:
             lines.extend(_region(_LABELS[channel], kept))
-            delivered.extend(e.id for e in kept)
+            for entry in kept:
+                if isinstance(entry, w.DeliveredEntry):
+                    delivered.append(entry.id)
+                elif isinstance(entry, w.TaskContextEntry):
+                    delivered.extend(identifier for identifier in dict.fromkeys((entry.task_id, *entry.source_ids)) if identifier not in delivered)
         if dropped:
             omitted.append((channel, dropped))
             lines.append(OMISSION_NOTE.format(count=dropped, label=_LABELS[channel].lower(), limit=limit))
-    if not delivered and not omitted:
+    if not lines:
         return EMPTY_RENDER
     if memory is not None and memory.status == "degraded_global_only":
         lines.insert(0, DEGRADED_NOTE)

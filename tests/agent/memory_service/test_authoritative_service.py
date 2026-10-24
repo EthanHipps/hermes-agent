@@ -40,7 +40,7 @@ def _select(tmp_path, backend, **memory):
 
 def _mutation(snapshot, request_id="r1", text="x"):
     scope = snapshot.default_write_scope
-    return MutationRequest(target="memory", request_id=request_id, expected_revision=snapshot.revision, hidden_preservation_state=snapshot.hidden_preservation_state, requested_write_scopes=(scope,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target="memory", proposed_policy_key=None, import_source_identity=None),), provenance=PROVENANCE)
+    return MutationRequest(target="memory", request_id=request_id, expected_revision=snapshot.revision, hidden_preservation_state=snapshot.hidden_preservation_state, requested_write_scopes=(scope,), intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=(w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target="memory", proposed_policy_key=None, import_source_identity=None, memory_admission="declarative"),), provenance=PROVENANCE)
 
 
 def test_start_negotiates_binds_and_freezes_identity(tmp_path):

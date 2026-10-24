@@ -64,7 +64,7 @@ def _service(tmp_path, store, **memory):
 
 def _add_plan(snapshot, text="a fact"):
     cand = w.CandidateEntry(client_ref="c1", text=text, destination_scope=snapshot.default_write_scope,
-                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None)
+                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None, memory_admission="declarative" if snapshot.target == "memory" else None)
     return PlannedMutation(intent=w.MutationIntent(kind="add"),
                            mutation_delta=(w.MutationDeltaItem(action="add", client_ref="c1"),),
                            candidate_entries=(cand,), requested_write_scopes=(snapshot.default_write_scope,),
@@ -74,7 +74,7 @@ def _add_plan(snapshot, text="a fact"):
 
 def _replace_plan(snapshot, entry, text):
     cand = w.CandidateEntry(client_ref="c1", text=text, destination_scope=entry.origin_scope,
-                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None)
+                            target=snapshot.target, proposed_policy_key=None, import_source_identity=None, memory_admission="declarative" if snapshot.target == "memory" else None)
     return PlannedMutation(intent=w.MutationIntent(kind="replace", matched_entry_id=entry.id),
                            mutation_delta=(w.MutationDeltaItem(action="supersede", old_record_id=entry.id,
                                                                replacement_client_ref="c1"),),

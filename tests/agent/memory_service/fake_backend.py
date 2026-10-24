@@ -673,7 +673,9 @@ class FakeAuthoritativeBackend:
     # -- operation bodies -----------------------------------------------------
 
     def _do_negotiate(self, request: w.NegotiateRequest) -> w.Negotiation:
-        return w.Negotiation(provider=self.provider, selected_api_version=self.api_version, operations=tuple(self.operations), capabilities=w.Capabilities(recall_context=self.recall, capture_continuity=self.continuity), limits=self._store.limits)
+        if 2 not in request.supported_contract_revisions:
+            self._raise("negotiate", "incompatible_api", None)
+        return w.Negotiation(provider=self.provider, selected_api_version=self.api_version, operations=tuple(self.operations), capabilities=w.Capabilities(recall_context=self.recall, capture_continuity=self.continuity), limits=self._store.limits, selected_contract_revision=2)
 
     def _do_bind(self, request: w.BindRequest) -> w.BindResult:
         store = self._store
@@ -920,13 +922,23 @@ class FakeAuthoritativeBackend:
         """One admission decision per candidate."""
         store = self._store
         target = request.target
+        # Context policy belongs to admission, after known-stage replay checks.
+        # Validate the whole batch before assigning any candidate IDs or hashes.
+        for cand in request.candidate_entries:
+            valid = (cand.memory_admission is None if request.intent.kind == "import" or target == "user"
+                     else cand.memory_admission in ("declarative", "prompt_like"))
+            if not valid:
+                self._raise(op, "invalid_request", None)
         admissions: List[w.AdmissionDecision] = []
         hashes: List[w.CandidateHash] = []
         new_import_tuples: set = set()
         for cand in request.candidate_entries:
             sha = hashlib.sha256(cand.text.encode("utf-8")).hexdigest()
             hashes.append(w.CandidateHash(client_ref=cand.client_ref, canonical_sha256=sha))
-            disposition = store.admission_classifier(cand) if store.admission_classifier else _DEFAULT_DISPOSITION[target]
+            raw = (cand.memory_admission == "prompt_like" or
+                   (cand.import_source_identity is not None and cand.import_source_identity.source_kind == "legacy_archive"))
+            disposition = ("withheld_raw" if raw else store.admission_classifier(cand)
+                           if store.admission_classifier else _DEFAULT_DISPOSITION[target])
             effect = "create_record"
             assigned = "r" + secrets.token_hex(12)
             if request.intent.kind == "import":

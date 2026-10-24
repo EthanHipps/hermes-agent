@@ -51,6 +51,11 @@ interface AuxTaskCopy {
 }
 
 export interface Translations {
+  memoryAdmission: {
+    label: string
+    declarative: string
+    promptLike: string
+  }
   connectors: {
     title: string
     connect: string

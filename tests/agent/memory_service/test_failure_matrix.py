@@ -85,7 +85,7 @@ def _resume(tmp_path, store, session_state, *, policy="fail_closed", factory=Non
 
 def _mutation(snapshot, request_id="r1", text="x", *, scope=None, target="memory", intent=None, delta=None, provenance=PROVENANCE) -> MutationRequest:
     scope = scope or snapshot.default_write_scope
-    candidates = (w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target=target, proposed_policy_key=None, import_source_identity=None),)
+    candidates = (w.CandidateEntry(client_ref="c1", text=text, destination_scope=scope, target=target, proposed_policy_key=None, import_source_identity=None, memory_admission="declarative" if target == "memory" else None),)
     return MutationRequest(target=target, request_id=request_id, expected_revision=snapshot.revision, hidden_preservation_state=snapshot.hidden_preservation_state, requested_write_scopes=(scope,), intent=intent or w.MutationIntent(kind="add"), mutation_delta=delta if delta is not None else (w.MutationDeltaItem(action="add", client_ref="c1"),), candidate_entries=candidates, provenance=provenance)
 
 
@@ -707,3 +707,25 @@ def test_row17_resume_fault_knobs_exist(tmp_path, operation):
     store.fail_transport(operation)
     with pytest.raises(MemoryBlockedError):
         _resume(tmp_path, store, first.session_state)
+
+
+@pytest.mark.parametrize("policy", POLICIES)
+@pytest.mark.parametrize("fault", ["legacy", "mismatch", "invalid_request", "incompatible_api"])
+def test_revision_two_incompatibility_never_binds_or_touches_native(tmp_path, policy, fault):
+    """H2: proven incompatible schemas are configuration errors under either policy."""
+    from tests.agent.memory_service.native_sentinel import native_memory_sentinel
+    store = _store()
+    if fault == "legacy":
+        store.corrupt_result("negotiate", drop_key("selected_contract_revision"))
+    elif fault == "mismatch":
+        store.corrupt_result("negotiate", set_key("selected_contract_revision", 1))
+    else:
+        store.fail_typed("negotiate", fault)
+    factory = _Factory(store)
+    with native_memory_sentinel(deny=True) as sentinel:
+        with pytest.raises(MemoryConfigurationError):
+            _select(tmp_path, store, policy=policy, factory=factory)
+        sentinel.assert_untouched()
+    assert [op for op, _ in factory.backend.calls] == ["negotiate"]
+    assert factory.backend.shutdown_calls == 1
+    assert not store.handles and not store.stages

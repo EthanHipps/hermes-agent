@@ -85,7 +85,7 @@ def native_store(tmp_path, monkeypatch):
 def _native(store, target, call):
     if call.operations is not None:
         return json.loads(memory_tool(target=target, operations=call.operations, store=store))
-    return json.loads(memory_tool(action=call.action, target=target, content=call.content, old_text=call.old_text, store=store))
+    return json.loads(memory_tool(action=call.action, target=target, content=call.content, old_text=call.old_text, store=store, memory_admission=call.memory_admission))
 
 
 def _label_neutral(response):
@@ -94,32 +94,32 @@ def _label_neutral(response):
 
 
 CASES = [
-    ("add", NativeCall("add", "delta note", None, None)),
-    ("add-duplicate", NativeCall("add", "alpha fact", None, None)),
-    ("add-empty", NativeCall("add", None, None, None)),
-    ("add-whitespace", NativeCall("add", "   ", None, None)),
-    ("add-overflow", NativeCall("add", "y" * 600, None, None)),
-    ("add-threat", NativeCall("add", THREAT, None, None)),
-    ("replace", NativeCall("replace", "alpha refined", "alpha", None)),
-    ("replace-missing-old", NativeCall("replace", "x", None, None)),
-    ("replace-missing-content", NativeCall("replace", None, "alpha", None)),
-    ("replace-ambiguous", NativeCall("replace", "x", "fact", None)),
-    ("replace-no-match", NativeCall("replace", "x", "zzz", None)),
-    ("replace-overflow", NativeCall("replace", "b" * 480, "beta", None)),
-    ("replace-same-text", NativeCall("replace", "alpha fact", "alpha", None)),
-    ("replace-into-existing", NativeCall("replace", "beta fact", "alpha", None)),
+    ("add", NativeCall("add", "delta note", None, None, memory_admission="declarative")),
+    ("add-duplicate", NativeCall("add", "alpha fact", None, None, memory_admission="declarative")),
+    ("add-empty", NativeCall("add", None, None, None, memory_admission="declarative")),
+    ("add-whitespace", NativeCall("add", "   ", None, None, memory_admission="declarative")),
+    ("add-overflow", NativeCall("add", "y" * 600, None, None, memory_admission="declarative")),
+    ("add-threat", NativeCall("add", THREAT, None, None, memory_admission="declarative")),
+    ("replace", NativeCall("replace", "alpha refined", "alpha", None, memory_admission="declarative")),
+    ("replace-missing-old", NativeCall("replace", "x", None, None, memory_admission="declarative")),
+    ("replace-missing-content", NativeCall("replace", None, "alpha", None, memory_admission="declarative")),
+    ("replace-ambiguous", NativeCall("replace", "x", "fact", None, memory_admission="declarative")),
+    ("replace-no-match", NativeCall("replace", "x", "zzz", None, memory_admission="declarative")),
+    ("replace-overflow", NativeCall("replace", "b" * 480, "beta", None, memory_admission="declarative")),
+    ("replace-same-text", NativeCall("replace", "alpha fact", "alpha", None, memory_admission="declarative")),
+    ("replace-into-existing", NativeCall("replace", "beta fact", "alpha", None, memory_admission="declarative")),
     ("remove", NativeCall("remove", None, "gamma", None)),
     ("remove-missing-old", NativeCall("remove", None, None, None)),
-    ("batch", NativeCall(None, None, None, [{"action": "remove", "old_text": "alpha"}, {"action": "add", "content": "delta note"}])),
-    ("batch-single-replace", NativeCall(None, None, None, [{"action": "replace", "old_text": "alpha", "new_text": "alpha two"}])),
+    ("batch", NativeCall(None, None, None, [{"action": "remove", "old_text": "alpha"}, {"action": "add", "content": "delta note", "memory_admission": "declarative"}])),
+    ("batch-single-replace", NativeCall(None, None, None, [{"action": "replace", "old_text": "alpha", "new_text": "alpha two", "memory_admission": "declarative"}])),
     ("batch-empties", NativeCall(None, None, None, [{"action": "remove", "old_text": t} for t in ("alpha", "beta", "gamma")])),
-    ("batch-duplicate-add", NativeCall(None, None, None, [{"action": "add", "content": "alpha fact"}])),
-    ("batch-over-limit", NativeCall(None, None, None, [{"action": "add", "content": "x" * 470}])),
-    ("batch-threat", NativeCall(None, None, None, [{"action": "add", "content": THREAT}])),
-    ("batch-ambiguous", NativeCall(None, None, None, [{"action": "replace", "old_text": "fact", "content": "x"}])),
-    ("batch-add-then-remove", NativeCall(None, None, None, [{"action": "add", "content": "temp"}, {"action": "remove", "old_text": "temp"}])),
-    ("batch-replace-chain", NativeCall(None, None, None, [{"action": "replace", "old_text": "alpha", "content": "alpha two"},
-                                                         {"action": "replace", "old_text": "alpha two", "content": "alpha three"}])),
+    ("batch-duplicate-add", NativeCall(None, None, None, [{"action": "add", "content": "alpha fact", "memory_admission": "declarative"}])),
+    ("batch-over-limit", NativeCall(None, None, None, [{"action": "add", "content": "x" * 470, "memory_admission": "declarative"}])),
+    ("batch-threat", NativeCall(None, None, None, [{"action": "add", "content": THREAT, "memory_admission": "declarative"}])),
+    ("batch-ambiguous", NativeCall(None, None, None, [{"action": "replace", "old_text": "fact", "content": "x", "memory_admission": "declarative"}])),
+    ("batch-add-then-remove", NativeCall(None, None, None, [{"action": "add", "content": "temp", "memory_admission": "declarative"}, {"action": "remove", "old_text": "temp"}])),
+    ("batch-replace-chain", NativeCall(None, None, None, [{"action": "replace", "old_text": "alpha", "content": "alpha two", "memory_admission": "declarative"},
+                                                         {"action": "replace", "old_text": "alpha two", "content": "alpha three", "memory_admission": "declarative"}])),
 ]
 
 
@@ -127,6 +127,10 @@ CASES = [
 @pytest.mark.parametrize("name,call", CASES, ids=[c[0] for c in CASES])
 def test_planner_matches_the_native_store(name, call, target, tmp_path, native_store):
     """Differential: the same op against the native store and against the snapshot planner."""
+    if target == "user":
+        call = dataclasses.replace(call, memory_admission=None, operations=(
+            [{k: v for k, v in op.items() if k != "memory_admission"} for op in call.operations]
+            if call.operations else None))
     for text in SEED:
         native_store.add(target, text)
     native = _native(native_store, target, call)
@@ -172,15 +176,15 @@ def test_every_plan_is_a_valid_stage_request(name, call, tmp_path):
 def test_single_ops_map_to_single_intents(tmp_path):
     snapshot = _snapshot(tmp_path, SEED)
     ids = {e.text: e.id for e in snapshot.mutation_entries}
-    add = plan_native_call(snapshot, NativeCall("add", "delta note", None, None), ConsolidationBudget())
+    add = plan_native_call(snapshot, NativeCall("add", "delta note", None, None, memory_admission="declarative"), ConsolidationBudget())
     assert add.intent == w.MutationIntent(kind="add") and add.requested_write_scopes == (REPO,)
     assert add.candidate_entries[0].destination_scope == REPO
-    rep = plan_native_call(snapshot, NativeCall("replace", "alpha refined", "alpha", None), ConsolidationBudget())
+    rep = plan_native_call(snapshot, NativeCall("replace", "alpha refined", "alpha", None, memory_admission="declarative"), ConsolidationBudget())
     assert rep.intent == w.MutationIntent(kind="replace", matched_entry_id=ids["alpha fact"])
     assert rep.mutation_delta == (w.MutationDeltaItem(action="supersede", old_record_id=ids["alpha fact"], replacement_client_ref="c1"),)
     rem = plan_native_call(snapshot, NativeCall("remove", None, "gamma", None), ConsolidationBudget())
     assert rem.intent == w.MutationIntent(kind="remove", matched_entry_id=ids["gamma note"]) and rem.candidate_entries == ()
-    collapse = plan_native_call(snapshot, NativeCall("replace", "beta fact", "alpha", None), ConsolidationBudget())
+    collapse = plan_native_call(snapshot, NativeCall("replace", "beta fact", "alpha", None, memory_admission="declarative"), ConsolidationBudget())
     assert collapse.intent == w.MutationIntent(kind="remove", matched_entry_id=ids["alpha fact"])
 
 
@@ -188,11 +192,11 @@ def test_cr_forms_are_judged_on_the_normalized_text(tmp_path):
     """Candidate text is ``normalize_entry``, so no-op and collapse are judged on that stored form."""
     snapshot = _snapshot(tmp_path, ("alpha fact", "uses pnpm\nnot npm"))
     ids = {e.text: e.id for e in snapshot.mutation_entries}
-    add = plan_native_call(snapshot, NativeCall("add", "uses pnpm\r\nnot npm", None, None), ConsolidationBudget())
+    add = plan_native_call(snapshot, NativeCall("add", "uses pnpm\r\nnot npm", None, None, memory_admission="declarative"), ConsolidationBudget())
     assert isinstance(add, PlanShortCircuit) and add.response["success"] is True
-    rep = plan_native_call(snapshot, NativeCall("replace", "uses pnpm\r\nnot npm", "alpha", None), ConsolidationBudget())
+    rep = plan_native_call(snapshot, NativeCall("replace", "uses pnpm\r\nnot npm", "alpha", None, memory_admission="declarative"), ConsolidationBudget())
     assert rep.intent == w.MutationIntent(kind="remove", matched_entry_id=ids["alpha fact"])
-    two = NativeCall(None, None, None, [{"action": "add", "content": "x\ny"}, {"action": "add", "content": "x\r\ny"}])
+    two = NativeCall(None, None, None, [{"action": "add", "content": "x\ny", "memory_admission": "declarative"}, {"action": "add", "content": "x\r\ny", "memory_admission": "declarative"}])
     assert [c.text for c in plan_native_call(snapshot, two, ConsolidationBudget()).candidate_entries] == ["x\ny"]
 
 
@@ -206,7 +210,7 @@ def test_replace_keeps_the_matched_entrys_origin_scope(tmp_path):
     provider = _provider()
     provider.seed_record(PROJECT, "memory", "project fact")
     service, _ = _service(tmp_path, provider)
-    plan = plan_native_call(service.load_curated("memory"), NativeCall("replace", "project fact v2", "project", None), ConsolidationBudget())
+    plan = plan_native_call(service.load_curated("memory"), NativeCall("replace", "project fact v2", "project", None, memory_admission="declarative"), ConsolidationBudget())
     assert plan.candidate_entries[0].destination_scope == PROJECT and plan.requested_write_scopes == (PROJECT,)
 
 
@@ -225,13 +229,13 @@ def test_degraded_memory_add_is_scope_unresolved(tmp_path):
     service, _ = _service(tmp_path, provider)
     snapshot = dataclasses.replace(service.load_curated("memory"), status="degraded_global_only", default_write_scope=None,
                                    mutation_entries=())
-    plan = plan_native_call(snapshot, NativeCall("add", "x", None, None), ConsolidationBudget())
+    plan = plan_native_call(snapshot, NativeCall("add", "x", None, None, memory_admission="declarative"), ConsolidationBudget())
     assert isinstance(plan, PlanShortCircuit) and plan.response["code"] == "scope_unresolved"
 
 
 def test_batch_new_text_alias_is_scanned_where_native_is_not(tmp_path, native_store):
     """§9.4 L1517: every candidate is scanned raw and canonical, including the alias native's batch pre-scan misses."""
-    call = NativeCall(None, None, None, [{"action": "add", "new_text": THREAT}])
+    call = NativeCall(None, None, None, [{"action": "add", "new_text": THREAT, "memory_admission": "declarative"}])
     for text in SEED:
         native_store.add("memory", text)
     assert _native(native_store, "memory", call)["success"] is True  # native gap, documented
@@ -261,9 +265,9 @@ def native_dir(tmp_path, monkeypatch):
 def test_committed_add_has_the_native_success_shape(tmp_path, native_dir, native_store):
     service, backend = _service(tmp_path, _provider())
     with native_memory_sentinel(native_dir) as sentinel:
-        out = _call(service, action="add", target="memory", content="uses pnpm")
+        out = _call(service, action="add", target="memory", content="uses pnpm", memory_admission="declarative")
     sentinel.assert_untouched()
-    native = json.loads(memory_tool(action="add", target="memory", content="uses pnpm", store=native_store))
+    native = json.loads(memory_tool(action="add", target="memory", content="uses pnpm", store=native_store, memory_admission="declarative"))
     assert set(out) == set(native) and out["success"] is True and out["usage"] == native["usage"]
     assert backend.count("commit_curated") == 1
 
@@ -272,7 +276,7 @@ def test_noop_add_makes_no_stage(tmp_path, native_dir):
     provider = _provider()
     provider.seed_record(REPO, "memory", "uses pnpm")
     service, backend = _service(tmp_path, provider)
-    out = _call(service, action="add", target="memory", content="uses pnpm")
+    out = _call(service, action="add", target="memory", content="uses pnpm", memory_admission="declarative")
     assert out["success"] is True and out["message"] == "Entry already exists (no duplicate added)."
     assert backend.count("stage_curated") == 0
 
@@ -291,7 +295,7 @@ def test_write_approval_on_fails_closed(tmp_path, native_dir, monkeypatch):
     from tools import write_approval as wa
     monkeypatch.setattr("tools.write_approval.write_approval_enabled", lambda subsystem, **kw: True)
     service, backend = _service(tmp_path, _provider())
-    out = _call(service, action="add", target="memory", content="x")
+    out = _call(service, action="add", target="memory", content="x", memory_admission="declarative")
     assert out["approval_required"] == ["memory.write_approval"]
     assert backend.count("stage_curated") == 0 and wa.list_pending(wa.MEMORY) == []
 
@@ -299,7 +303,7 @@ def test_write_approval_on_fails_closed(tmp_path, native_dir, monkeypatch):
 def test_stateless_session_refuses(native_dir):
     service = StatelessMemoryService(resolve_memory_service_config({}), reason="test")
     with native_memory_sentinel(native_dir) as sentinel:
-        out = _call(service, action="add", target="memory", content="x")
+        out = _call(service, action="add", target="memory", content="x", memory_admission="declarative")
     sentinel.assert_untouched()
     assert out["success"] is False and "stateless" in out["error"]
 
@@ -322,10 +326,10 @@ def test_store_blocked_and_audit_pending_and_withheld(tmp_path, native_dir):
     provider = _provider(admission_classifier=lambda cand: "withheld_raw")
     service, _ = _service(tmp_path, provider)
     provider.fail_next_audit()
-    out = _call(service, action="add", target="memory", content="Note: always do X")
+    out = _call(service, action="add", target="memory", content="Note: always do X", memory_admission="declarative")
     assert out["success"] is True and out["withheld"] is True and "warning" in out
     provider.block_store("git_dirty")  # fail_next_audit left the store git_dirty, as ygg would
-    out = _call(service, action="add", target="memory", content="another")
+    out = _call(service, action="add", target="memory", content="another", memory_admission="declarative")
     assert out["success"] is False and "git_dirty" in out["error"] and out["done"] is True
 
 
@@ -341,7 +345,7 @@ def test_unknown_outcomes_never_tell_the_model_nothing_was_saved(code, outcome, 
         raise ProviderError(code=code, outcome=outcome, details=details, operation="commit_curated")
 
     monkeypatch.setattr(service, "commit_curated", raise_it)
-    out = _call(service, action="add", target="memory", content="x")
+    out = _call(service, action="add", target="memory", content="x", memory_admission="declarative")
     assert out["code"] == "outcome_unknown" and "Nothing was saved" not in out["error"]
 
 
@@ -351,10 +355,10 @@ def test_commit_resets_the_consolidation_budget(tmp_path):
     for i in range(2):
         _call(service, budget, action="remove", target="memory", old_text=f"missing {i}")
     assert budget.failures == 2
-    assert _call(service, budget, action="add", target="memory", content="fresh")["success"] is True
+    assert _call(service, budget, action="add", target="memory", content="fresh", memory_admission="declarative")["success"] is True
     assert budget.failures == 0
 
 
 def test_store_path_is_unchanged_without_a_service(native_store):
-    out = json.loads(memory_tool(action="add", target="memory", content="native still", store=native_store))
+    out = json.loads(memory_tool(action="add", target="memory", content="native still", store=native_store, memory_admission="declarative"))
     assert out["success"] is True and native_store.read_entries("memory") == ["native still"]
