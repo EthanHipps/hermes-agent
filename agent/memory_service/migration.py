@@ -225,7 +225,8 @@ class _Run:
     def __init__(self, *, home: Path, provider: str, provider_epoch: str, run_id: str, identity: mm.Identity,
                  source: mm.Source, batches: Sequence[mm.Batch], archive: Optional[Path], clock, locks: ExitStack,
                  items: Sequence[SourceItem] = (), exists: bool = False, created_at: Optional[str] = None,
-                 updated_at: Optional[str] = None) -> None:
+                 updated_at: Optional[str] = None, scope=None) -> None:
+        self.scope = scope
         self.home, self.provider, self.epoch, self.run_id = Path(home), provider, provider_epoch, run_id
         self.identity, self.source, self.batches = identity, source, list(batches)
         self.archive, self.clock, self.locks, self.exists = archive, clock, locks, exists
@@ -251,17 +252,24 @@ class _Run:
         self.created_at, self.updated_at = (self.created_at or now), now
         try:
             if not self.exists:
-                self.locks.enter_context(mm.migration_lock(self.home))
-                if active_migration_manifests(self.home):
+                self.scope = self.locks.enter_context(mm.migration_lock(self.home))
+                active = (mm._windows_call(self.scope, "has_active") if self.scope is not None
+                          else active_migration_manifests(self.home))
+                if active:
                     raise _Stop(MIGRATION_IN_PROGRESS, "Another memory migration became active meanwhile; nothing "
                                 "was recorded. Resume, roll back or reconcile it; this run's stage expires on its own.")
-            mm.write_document(self.path, mm.to_document(self.manifest()))
+            mm.write_document(self.path, mm.to_document(self.manifest()), scope=self.scope)
         except (OSError, mm.MigrationBusyError, _Stop) as exc:
             self.batches[index] = previous
             self.created_at, self.updated_at = stamps
             if isinstance(exc, _Stop):
                 raise
             code = getattr(exc, "code", None) or "state_not_recorded"
+            if code == "migration_state_uncertain":
+                self.exists = True  # the attempted publication may already name this run
+                raise _Stop(code, "The migration state publication was not confirmed. "
+                                  "Retained state needs verification; run 'hermes memory migrate resume' "
+                                  "or reconcile this run.") from exc
             raise _Stop(code, "The migration state could not be recorded; nothing new was saved. "
                               + ("Run the command again." if not self.exists else
                                  "Run 'hermes memory migrate resume'.")) from exc
@@ -327,11 +335,11 @@ class _Run:
 
     @classmethod
     def resume(cls, manifest: mm.ActiveManifest, *, home: Path, archive: Optional[Path], clock,
-               locks: ExitStack) -> "_Run":
+               locks: ExitStack, scope=None) -> "_Run":
         return cls(home=home, provider=manifest.provider, provider_epoch=manifest.provider_epoch,
                    run_id=manifest.import_run_id, identity=manifest.identity, source=manifest.source,
                    batches=manifest.batches, archive=archive, clock=clock, locks=locks, exists=True,
-                   created_at=manifest.created_at, updated_at=manifest.updated_at)
+                   created_at=manifest.created_at, updated_at=manifest.updated_at, scope=scope)
 
     @staticmethod
     def _read(kind: str, home: Path, archive: Optional[Path], keys: Tuple[str, ...]) -> List[SourceItem]:
@@ -573,7 +581,7 @@ class _Run:
                                  f"Run 'hermes memory migrate reconcile {self.run_id}'.", run_id=self.run_id)
         try:
             on_disk = mm.read_document(self.path, provider=self.provider, provider_epoch=self.epoch,
-                                       import_run_id=self.run_id)
+                                       import_run_id=self.run_id, scope=self.scope)
         except mm.MigrationStateError:
             return failed
         if on_disk != self.manifest():
@@ -588,8 +596,12 @@ class _Run:
                 return failed
         try:
             mm.write_document(self.path, mm.to_document(mm.compact(on_disk, state=mm.ROLLED_BACK, outcome=outcome,
-                                                                     settled=settled, updated_at=rfc3339(self.clock()))))
-        except OSError:
+                                                                     settled=settled, updated_at=rfc3339(self.clock()))), scope=self.scope)
+        except OSError as exc:
+            if getattr(exc, "code", None) == "migration_state_uncertain":
+                return MigrationReport(MigrationStatus.STOPPED, exc.code,
+                    "The migration closure publication was not confirmed; run 'hermes memory migrate reconcile'.",
+                    run_id=self.run_id)
             return failed
         return MigrationReport(status, code, message, run_id=self.run_id, batches=self.summaries())
 
@@ -649,8 +661,11 @@ class _Run:
                              settled={b.batch_id: ("committed", b.result.tx_id) for b in self.batches},
                              updated_at=rfc3339(self.clock()))
         try:
-            mm.write_document(self.path, mm.to_document(receipt))
+            mm.write_document(self.path, mm.to_document(receipt), scope=self.scope)
         except OSError as exc:
+            if getattr(exc, "code", None) == "migration_state_uncertain":
+                raise _Stop(exc.code, "The completion publication was not confirmed; run "
+                           "'hermes memory migrate resume'." + restart) from exc
             raise _Stop("completion_not_recorded", "The completion could not be recorded; run "
                                                    "'hermes memory migrate resume'." + restart) from exc
         message = f"Migration {self.run_id} complete."
@@ -689,8 +704,8 @@ def _same_identity(frozen: Any, assertion: mm.Identity) -> bool:
         assertion.principal_id, assertion.logical_session_id, assertion.org_id, assertion.project_id, assertion.repo_id)
 
 
-def _active_runs(home: Path, provider: str, run_id: Optional[str]) -> List[mm.RunFile]:
-    return [r for r in mm.list_runs(home, provider)
+def _active_runs(home: Path, provider: str, run_id: Optional[str], *, scope=None) -> List[mm.RunFile]:
+    return [r for r in mm.list_runs(home, provider, scope=scope)
             if (r.document is None or r.document.state == mm.ACTIVE) and (run_id is None or r.import_run_id == run_id)]
 
 
@@ -706,8 +721,8 @@ def resume_migration(raw_config: Mapping[str, Any], *, home: Path, prompt: Promp
         return MigrationReport(MigrationStatus.REFUSED, "no_active_migration", "No memory migration is in progress.")
     try:
         with ExitStack() as locks:
-            locks.enter_context(mm.migration_lock(home))
-            runs = _active_runs(home, provider, run_id)               # re-read under the lock
+            scope = locks.enter_context(mm.migration_lock(home))
+            runs = _active_runs(home, provider, run_id, scope=scope)               # re-read under the lock
             if len(runs) != 1:
                 if not runs:
                     return MigrationReport(MigrationStatus.REFUSED, "no_active_migration",
@@ -730,10 +745,13 @@ def resume_migration(raw_config: Mapping[str, Any], *, home: Path, prompt: Promp
                                            "The provider epoch or the administrative identity changed since this run "
                                            f"started; run 'hermes memory migrate reconcile {manifest.import_run_id}'.",
                                            run_id=manifest.import_run_id)
-                run = _Run.resume(manifest, home=home, archive=archive, clock=clock, locks=locks)
+                run = _Run.resume(manifest, home=home, archive=archive, clock=clock, locks=locks, scope=scope)
                 return _drive(run, service, prompt, switch_to_authoritative)
     except mm.MigrationBusyError as exc:
         return MigrationReport(MigrationStatus.STOPPED, exc.code, "Another memory migration command is running.")
+    except OSError:
+        return MigrationReport(MigrationStatus.STOPPED, "reconcile_required",
+                               "The migration state could not be verified; nothing changed.")
     except ADMIN_FAILURES as exc:
         return MigrationReport(MigrationStatus.STOPPED, getattr(exc, "code", None) or "unavailable",
                                "The memory provider could not be reached; nothing changed.")

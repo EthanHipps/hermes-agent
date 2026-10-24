@@ -23,8 +23,8 @@ def env(tmp_path):
 def _crash_after_manifest(env, monkeypatch):
     real = mm.write_document
 
-    def write(path, doc):
-        real(path, doc)
+    def write(path, doc, **kwargs):
+        real(path, doc, **kwargs)
         raise Crash()
     monkeypatch.setattr(mm, "write_document", write)
     with pytest.raises(Crash):
@@ -127,7 +127,8 @@ def test_reconcile_after_an_epoch_change_needs_discard(env):
 
 def test_reconcile_discard_deletes_an_unreadable_file_only_with_discard(env):
     path = mm.manifest_path(env.home, "example", "ep-1", "a" * 32)
-    path.parent.mkdir(parents=True)
+    with mm.migration_lock(env.home) as scope:
+        mm.write_document(path, {"state": "active"}, scope=scope)
     path.write_bytes(b"{\"state\": \"act")
     report = _reconcile(env, "a" * 32)
     assert (report.status, report.code) == (MigrationStatus.REFUSED, "reconcile_needs_discard") and path.exists()
@@ -156,10 +157,10 @@ def test_a_failed_rollback_compaction_stays_active_and_changes_no_mode(env, monk
     before = path.read_bytes()
     real = mm.write_document
 
-    def write(p, doc):
+    def write(p, doc, **kwargs):
         if doc["state"] == "rolled_back":
             raise OSError("disk full")
-        real(p, doc)
+        real(p, doc, **kwargs)
     monkeypatch.setattr(mm, "write_document", write)
     report = _rollback(env)
     assert (report.status, report.code) == (MigrationStatus.STOPPED, "rollback_not_complete")
@@ -173,7 +174,8 @@ def test_reconcile_settles_a_run_under_another_provider_by_local_proof(env, monk
     doc = json.loads(path.read_bytes())
     doc.update(schema="other.hermes-migration/v1", import_run_id="e" * 32)
     foreign = mm.manifest_path(env.home, "other", "ep-1", "e" * 32)
-    mm.write_document(foreign, doc)
+    with mm.migration_lock(env.home) as scope:
+        mm.write_document(foreign, doc, scope=scope)
     path.unlink()
     backends = len(env.backends)
     report = _reconcile(env, "e" * 32)
@@ -203,7 +205,8 @@ def test_a_foreign_providers_approved_batch_is_never_probed_as_ours(env):     # 
     doc = json.loads(path.read_bytes())
     doc.update(schema="other.hermes-migration/v1", import_run_id="e" * 32)
     foreign = mm.manifest_path(env.home, "other", "ep-1", "e" * 32)
-    mm.write_document(foreign, doc)
+    with mm.migration_lock(env.home) as scope:
+        mm.write_document(foreign, doc, scope=scope)
     path.unlink()
     backends = len(env.backends)
     report = _reconcile(env, "e" * 32)
