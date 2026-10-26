@@ -153,6 +153,19 @@ def open_session_view(config: MemoryServiceConfig, state: "HostSessionState", *,
     return view
 
 
+def _agent_spawned_surface() -> Optional[str]:
+    """``"kanban"`` or ``"delegated"`` when an agent, not a human, started this process; else ``None``.
+
+    The kanban dispatcher's environment is a worker's grant, and every terminal spawn under a worker or a
+    delegate carries the delegated-child marker (``delegation_context.delegated_child_subprocess_env``).
+    """
+    from agent.delegation_context import is_delegated_child_process_context, is_dispatcher_owned_worker_context
+
+    if os.environ.get("HERMES_KANBAN_TASK") and is_dispatcher_owned_worker_context():
+        return "kanban"
+    return "delegated" if is_delegated_child_process_context() else None
+
+
 def init_memory_service(
     raw_config,
     *,
@@ -204,6 +217,11 @@ def init_memory_service(
         # Ruling R43-8 (§9.6 L1585, §9.3 L1229): a scheduled or delegated agent with no explicit
         # service never binds for itself — rejected before any provider contact, with no record.
         return UnboundMemoryService(config, surface=platform), None
+    spawned_by = _agent_spawned_surface()
+    if spawned_by is not None:
+        # Same rule for a process an agent started: a directory bind is for human-initiated sessions only
+        # (§9.3 L1229, §9.7 L1625), and a kanban task's workspace is chosen by whoever created the task.
+        return UnboundMemoryService(config, surface=spawned_by), None
 
     binding = (
         resolve_session_binding(logical_session_id, session_db=session_db)

@@ -370,3 +370,25 @@ def test_a_skip_memory_worker_agent_has_no_service(tmp_path, monkeypatch):
     env = Env(tmp_path, monkeypatch)
     worker = env.agent("worker-1", platform="curator", skip_memory=True, enabled_toolsets=["skills"], tools=("skills_list",))
     assert worker._memory_service is None and env.factory_calls == 0 and _records() == {}
+
+
+@pytest.mark.parametrize("spawn_env", [{"HERMES_KANBAN_TASK": "t_0123abcd"},          # dispatcher-spawned worker
+                                       {"HERMES_DELEGATED_CHILD_CONTEXT": "1"}],      # started from its terminal
+                         ids=["kanban_worker", "worker_descendant"])
+def test_an_agent_spawned_process_never_binds_from_its_workspace(tmp_path, monkeypatch, spawn_env):
+    """No human started it, so even in a directory the registry resolves it gets no curated memory."""
+    env = Env(tmp_path, monkeypatch)
+    for key, value in spawn_env.items():
+        monkeypatch.setenv(key, value)
+    with native_memory_sentinel(_native_dir()) as sentinel:
+        agent = env.agent("kanban-worker-1")
+    sentinel.assert_untouched()
+    assert isinstance(agent._memory_service, UnboundMemoryService)
+    assert env.factory_calls == 0 and _records() == {}
+
+
+def test_an_additive_kanban_worker_keeps_native_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_0123abcd")
+    env = Env(tmp_path, monkeypatch, additive=True, memory_enabled=True, user_profile_enabled=True)
+    agent = env.agent("kanban-worker-2")
+    assert agent._memory_service.disposition is MemoryDisposition.BUILTIN and agent._memory_store is not None
