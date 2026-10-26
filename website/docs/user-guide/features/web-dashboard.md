@@ -579,7 +579,9 @@ same auth gate as the rest of `/api/`.
 | `DELETE /api/credentials/pool/{provider}/{index}` | Remove a key (1-based index) |
 | `GET /api/memory` | Active provider + available providers + built-in file sizes |
 | `PUT /api/memory/provider` | Select a provider (empty = built-in only) |
-| `POST /api/memory/reset` | Reset built-in memory. Body: `{target: all\|memory\|user}` |
+| `POST /api/memory/reset` | Reset built-in memory. Body: `{target: all\|memory\|user}`. With provider-managed memory (`memory.provider_mode: authoritative`): one target plus explicit `scopes`; answers 202 with a `pending_id` that waits for approval |
+| `GET /api/memory/approvals` | Provider-managed memory: pending approvals, each with a preview of the change. Query: `profile?` |
+| `POST /api/memory/approvals/{pending_id}` | Approve or deny one. Body: `{decision: approve\|deny, profile?}` |
 | `POST /api/gateway/start` · `/stop` · `/restart` | Gateway lifecycle (backgrounded) |
 | `POST /api/ops/doctor` · `/security-audit` · `/backup` · `/import` | Diagnostics & maintenance (backgrounded; tail via `/api/actions/{name}/status`) |
 | `GET /api/ops/hooks` | Configured shell hooks + allowlist status |

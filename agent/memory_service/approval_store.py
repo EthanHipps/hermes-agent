@@ -115,8 +115,8 @@ def load_staging_identity(session_id: str, *, hermes_home: Optional[Path] = None
     The one resolver deferral and replay share: a Hermes session's host-state record, or (contract C6b-9)
     an administrative identity's record for an ``admin:<sha256>`` key.
     """
-    from agent.memory_service.admin import ADMIN_KEY_PREFIX, load_admin_state   # late: admin -> mutation -> here
-    if session_id.startswith(ADMIN_KEY_PREFIX):
+    from agent.memory_service.admin import is_admin_key, load_admin_state   # late: admin -> mutation -> here
+    if is_admin_key(session_id):
         return load_admin_state(session_id, hermes_home)
     try:
         return load_host_state(session_id, hermes_home=hermes_home)
@@ -133,7 +133,7 @@ def approvals_dir(hermes_home: Optional[Path] = None) -> Path:
 
 
 def valid_pending_id(value: str) -> bool:
-    return isinstance(value, str) and bool(_PENDING_ID_RE.match(value))
+    return isinstance(value, str) and bool(_PENDING_ID_RE.fullmatch(value))   # `$` alone admits a trailing newline
 
 
 def new_pending_id() -> str:

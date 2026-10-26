@@ -43,7 +43,9 @@ PromptFn = Callable[[ApprovalPrompt], Optional[bool]]  # True approve, False den
 @dataclass(frozen=True)
 class ApprovalChannel:
     prompt: Optional[PromptFn] = None
-    session_id: Optional[str] = None   # Hermes session id; deferral + write-ahead only when its C2 record matches (X6b-2)
+    # A Hermes session id, or an administrative identity's record key (C6b-9); deferral and write-ahead only
+    # when the identity record it names matches the staging service's (X6b-2).
+    session_id: Optional[str] = None
     origin: str = "foreground"
     clock: Callable[[], datetime] = utcnow
 

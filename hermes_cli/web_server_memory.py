@@ -407,13 +407,22 @@ def _require_memory_provider_ready(name: str) -> None:
 # Every administrative call goes through agent/memory_service/admin.py (contract C6b-5): an explicit
 # administrative identity, never the process directory, and never a native MEMORY.md/USER.md touch.
 
-#: ``payload["code"]`` -> (HTTP status, ``error``) for a refused provider-managed change; anything else,
-#: ``outcome_unknown`` included (the change may have been saved), is 503 rather than a client error.
+#: ``payload["code"]`` -> (HTTP status, ``error``) for a provider-managed change that was refused and not
+#: saved; anything else, ``outcome_unknown`` included (the change may have been saved), is 503 rather than a
+#: client error.
 _CURATED_FAILURES = {
     "approval_unavailable": (409, "approval_unavailable"),
     "unauthorized_scope": (400, "unauthorized_scope"),
     "invalid_request": (400, "invalid_request"),
     "memory_admission_required": (400, "memory_admission_required"),
+    "secret_rejected": (400, "secret_rejected"),
+    "limit_exceeded": (400, "limit_exceeded"),
+    "scope_unresolved": (400, "scope_unresolved"),
+    "version_conflict": (409, "version_conflict"),
+    "ambiguous_policy": (409, "ambiguous_policy"),
+    "stage_expired": (409, "stage_expired"),
+    "approval_invalid": (409, "approval_invalid"),
+    "approval_expired": (409, "approval_expired"),
     "configuration_error": (409, "memory_configuration_error"),
     "target_disabled": (409, "target_disabled"),
 }

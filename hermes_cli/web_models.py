@@ -388,6 +388,7 @@ class MemoryReset(BaseModel):
 
 class MemoryApprovalDecision(BaseModel):
     decision: Literal["approve", "deny"]
+    profile: Optional[str] = None
 
 class BackupRequest(BaseModel):
     output: Optional[str] = None  # defaults to a timestamped zip in the home dir

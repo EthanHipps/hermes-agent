@@ -151,7 +151,18 @@ def test_an_approval_whose_outcome_is_unknown_is_503_and_kept_for_the_identical_
     resp = client.post(f"/api/memory/approvals/{pid}", json={"decision": "approve"})
     assert resp.status_code == 503 and resp.json()["detail"]["status"] == "unknown"
     assert load_pending_approval(pid).outcome == "unknown"
+    denied = client.post(f"/api/memory/approvals/{pid}", json={"decision": "deny"})   # it may have been saved
+    assert denied.status_code == 409 and denied.json()["detail"]["status"] == "refused"
     assert client.post(f"/api/memory/approvals/{pid}", json={"decision": "approve"}).json()["status"] == "committed"
+
+
+def test_the_approvals_router_refuses_what_it_cannot_decide(env):
+    client = _client()
+    for pid, decision in (("not-an-id", "approve"), ("0123456789ab", "deny")):
+        assert client.post(f"/api/memory/approvals/{pid}", json={"decision": decision}).status_code == 404
+    (get_hermes_home() / "config.yaml").write_text("model: test\n", encoding="utf-8")       # additive now
+    assert client.get("/api/memory/approvals").json() == {"provider_managed": False, "approvals": []}
+    assert client.post("/api/memory/approvals/0123456789ab", json={"decision": "approve"}).status_code == 409
 
 
 def test_reset_of_an_ineligible_scope_is_400(env):
@@ -200,6 +211,11 @@ def test_journey_rest_failures_keep_their_code_and_an_unknown_outcome_is_not_a_4
     edited = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 9",
                                                     "memory_admission": "declarative", **REPO_CTX})
     assert edited.status_code == 503 and edited.json()["detail"]["code"] == "outcome_unknown"
+    env.store.fail_typed("stage_curated", "secret_rejected", outcome="not_committed",
+                         details={"event_id": "e-1", "detector_code": "aws_access_key"})
+    refused = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 10",
+                                                     "memory_admission": "declarative", **REPO_CTX})
+    assert refused.status_code == 400 and refused.json()["detail"]["code"] == "secret_rejected"   # refused, not down
     env.store.fail_transport("negotiate")
     down = client.get("/api/learning/node", params={"id": node, **REPO_CTX})
     assert down.status_code == 503 and down.json()["detail"]["code"]

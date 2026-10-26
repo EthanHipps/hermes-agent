@@ -1,20 +1,21 @@
 """Pending provider-managed memory approvals: list, approve, deny (contract C6b-9; §9.4 steps 7-9).
 
 The dashboard and desktop counterpart of ``/memory pending|approve|reject``. A change that needs approval
-(a reset, a journey edit of the user profile or of a non-default scope) is staged and waits here under the
-identity that staged it. Approving replays the identical byte-free commit under that identity; denying drops
-the handle and persists nothing (§9.5 L1542, L1562). This is an owner surface: it lists every record and
-acts as the staging identity's principal. Inspection text holds entry bodies for the immediate UI only;
+(a reset, or a journey edit or delete of the user profile or of a non-default scope) is staged and waits
+here under the identity that staged it. Approving replays the identical byte-free commit under that
+identity; denying drops the handle and persists nothing (§9.5 L1542, L1562). This is an owner surface: it
+lists every record and acts as the staging identity's principal. ``profile`` selects the home, as on the
+journey routes that stage these changes. Inspection text holds entry bodies for the immediate UI only;
 records never do (§9.3 L1357).
 """
 
-import asyncio
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import MemoryApprovalDecision
+from hermes_cli.web_routers._common import scoped_to_thread
 
 router = APIRouter()
 
@@ -24,8 +25,8 @@ load_config = late("load_config", "hermes_cli.config")
 _NOT_PROVIDER_MANAGED = ("Pending memory approvals apply to provider-managed memory only "
                          "(memory.provider_mode: authoritative).")
 
-#: ReplayStatus value -> (HTTP status, message). An unknown or unavailable outcome is never a client error:
-#: the approved request is kept, and approving again retries it identically.
+#: ReplayStatus value -> (HTTP status, message). A result that may have been saved (unknown, unavailable,
+#: void_unconfirmed) is never a client error, which would read as "refused, nothing saved".
 _APPROVE: Dict[str, Tuple[int, str]] = {
     "committed": (200, "Approved and saved."),
     "not_found": (404, "No pending memory approval has this id."),
@@ -33,7 +34,7 @@ _APPROVE: Dict[str, Tuple[int, str]] = {
     "conflict": (409, "Memory changed after this was staged, so nothing was saved; make the change again."),
     "rejected": (409, "The memory provider refused the approved change ({code}); nothing was saved."),
     "void": (409, "This change can no longer be approved ({code}); nothing was saved."),
-    "void_unconfirmed": (409, "This approved change can no longer be settled ({code}); it may have been saved."),
+    "void_unconfirmed": (503, "This approved change can no longer be settled ({code}); it may have been saved."),
     "unknown": (503, "The memory provider did not confirm the result; approving again retries the identical "
                      "request."),
     "unavailable": (503, "The approval was not applied ({code}); the request is kept."),
@@ -63,42 +64,53 @@ def _row(review: Any) -> Dict[str, Any]:
     return row
 
 
-async def _provider_managed_config() -> Any:
+def _provider_managed_config() -> Any:
     from agent.memory_service.bootstrap import requests_authoritative_mode
 
-    cfg = await asyncio.to_thread(load_config)
+    cfg = load_config()
     return cfg if requests_authoritative_mode(cfg) else None
 
 
-@router.get("/api/memory/approvals")
-async def list_memory_approvals():
-    """Every pending record with its live inspection; settled ones (saved, expired, void) are reported once."""
+def _list() -> Dict[str, Any]:
     from agent.memory_service.approval_replay import review_pending_approvals
 
-    cfg = await _provider_managed_config()
+    cfg = _provider_managed_config()
     if cfg is None:
         return {"provider_managed": False, "approvals": []}
-    reviews = await asyncio.to_thread(review_pending_approvals, raw_config=cfg)
-    return {"provider_managed": True, "approvals": [_row(review) for review in reviews]}
+    return {"provider_managed": True, "approvals": [_row(r) for r in review_pending_approvals(raw_config=cfg)]}
+
+
+def _decide(pending_id: str, decision: str) -> Tuple[int, Any]:
+    from agent.memory_service.approval_replay import reject_pending_approval, replay_pending_approval
+
+    cfg = _provider_managed_config()
+    if cfg is None:
+        return 409, _NOT_PROVIDER_MANAGED
+    warning = None
+    if decision == "approve":
+        report = replay_pending_approval(pending_id, raw_config=cfg)
+        status, code, table = report.status.value, report.code, _APPROVE
+        if report.audit_pending:
+            warning = "Saved and published; the memory provider's audit trail is pending."
+    else:
+        status, code, table = reject_pending_approval(pending_id).value, None, _DENY
+    http_status, message = table[status]
+    payload = {"ok": http_status == 200, "pending_id": pending_id, "status": status, "code": code,
+               "message": message.format(code=code or "unknown")}
+    if warning:
+        payload["warning"] = warning
+    return http_status, payload
+
+
+@router.get("/api/memory/approvals")
+async def list_memory_approvals(profile: Optional[str] = None):
+    """Every pending record with its live inspection; settled ones (saved, expired, void) are reported once."""
+    return await scoped_to_thread(profile, _list)
 
 
 @router.post("/api/memory/approvals/{pending_id}")
 async def decide_memory_approval(pending_id: str, body: MemoryApprovalDecision):
-    from agent.memory_service.approval_replay import reject_pending_approval, replay_pending_approval
-
-    cfg = await _provider_managed_config()
-    if cfg is None:
-        raise HTTPException(status_code=409, detail=_NOT_PROVIDER_MANAGED)
-    if body.decision == "approve":
-        report = await asyncio.to_thread(replay_pending_approval, pending_id, raw_config=cfg)
-        status, code, table = report.status.value, report.code, _APPROVE
-    else:
-        status, code, table = (await asyncio.to_thread(reject_pending_approval, pending_id)).value, None, _DENY
-    http_status, message = table[status]
-    payload = {"ok": http_status == 200, "pending_id": pending_id, "status": status, "code": code,
-               "message": message.format(code=code or "unknown")}
-    if body.decision == "approve" and report.audit_pending:
-        payload["warning"] = "Saved and published; the memory provider's audit trail is pending."
+    http_status, payload = await scoped_to_thread(body.profile, lambda: _decide(pending_id, body.decision))
     if http_status != 200:
         raise HTTPException(status_code=http_status, detail=payload)
     return payload

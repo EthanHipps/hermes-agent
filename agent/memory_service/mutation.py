@@ -335,8 +335,8 @@ def run_curated_mutation(
 
     ``approval=None`` (or a channel with no prompt and no deferrable session) refuses an
     approval-requiring mutation before staging, exactly as R38-1. Deferral and write-ahead
-    need the channel's session to hold a C2 record equal to this service's
-    ``session_state`` (ruling X6b-2).
+    need the identity record the channel names (a session's C2 record, or an administrative
+    one) to equal this service's ``session_state`` (ruling X6b-2; C6b-9).
     """
     attempts = 0
     while attempts < max_attempts:

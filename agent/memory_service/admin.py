@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -50,8 +51,15 @@ logger = logging.getLogger(__name__)
 
 ADMIN_PLATFORM = "admin"
 ADMIN_STATE_DIRNAME = "admin"
-#: An approval record's ``session_id`` holding this prefix names an administrative identity (contract C6b-9).
+#: An approval record's ``session_id`` of exactly this shape names an administrative identity (contract C6b-9).
+#: The full match matters: Hermes session ids can be client-chosen (API server), so a mere prefix would
+#: misroute a session called ``admin:…`` away from its own record.
 ADMIN_KEY_PREFIX = "admin:"
+_ADMIN_KEY = re.compile(r"admin:[0-9a-f]{64}")
+
+
+def is_admin_key(key: str) -> bool:
+    return isinstance(key, str) and _ADMIN_KEY.fullmatch(key) is not None
 #: Everything opening or using an administrative identity may raise instead of returning a typed outcome.
 ADMIN_FAILURES = (MemoryConfigurationError, MemoryServiceError, w.WireError)
 _KIND_FOR_PREFIX = {"global": "principal_global", "organization": "organization", "project": "project",

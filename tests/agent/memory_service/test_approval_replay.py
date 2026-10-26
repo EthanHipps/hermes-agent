@@ -236,3 +236,14 @@ def test_an_approval_deferred_under_an_administrative_identity_survives_review_a
     report = _replay(env, outcome.pending_id)
     assert report.status is ReplayStatus.COMMITTED and _user_texts(env) == ["prefers terse replies"]
     assert list_pending_approvals() == []
+
+
+def test_a_session_whose_id_merely_starts_with_admin_is_still_a_session(env, tmp_path):
+    """Session ids can be client-chosen; only an exact administrative record key names an admin identity."""
+    service, _ = init_memory_service(env.raw, logical_session_id="admin:my-chat", platform="cli",
+                                     store_factory=_never_built, profile_id="default",
+                                     working_directory=str(tmp_path / "repo"), backend_factory=env.factory)
+    outcome = run_curated_mutation(service, "user", lambda s: _add(s, "likes tea"),
+                                   approval=ApprovalChannel(session_id="admin:my-chat", clock=env.store.clock.now))
+    assert outcome.status is MutationStatus.PENDING_APPROVAL
+    assert _replay(env, outcome.pending_id).status is ReplayStatus.COMMITTED
