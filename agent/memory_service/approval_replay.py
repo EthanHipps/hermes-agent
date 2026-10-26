@@ -1,8 +1,9 @@
 """Deferred approvals: review, approve and reject (§9.4 steps 7–9; §9.5 L1542, L1562; R39; contract C6b-4).
 
 A replay never borrows a live agent's service (D-R39-5). It resumes the staging
-session's persisted identity on its own transport, using the C2 host-state record
-that the approval record names (§4.1 L250, L262; ruling R39-4). The transport is
+identity on its own transport, from the record the approval names: a session's C2
+host-state record (§4.1 L250, L262; ruling R39-4), or an administrative identity's
+record (contract C6b-9; ``approval_store.load_staging_identity``). The transport is
 ``bootstrap.open_session_view``: negotiate plus validate, no bind, as R40's
 continuity capture uses it (K-4). The commit is byte-free, and its authorization
 is written to the record before the first send (ruling R39-7). An unknown outcome
@@ -22,10 +23,9 @@ from agent.memory_service import wire as w
 from agent.memory_service.approval import build_authorization, render_stage_inspection, utcnow
 from agent.memory_service.approval_store import (
     ApprovalStoreError, PendingApproval, drop_pending_approval, list_pending_approvals, load_pending_approval,
-    save_pending_approval, valid_pending_id)
+    load_staging_identity, save_pending_approval, valid_pending_id)
 from agent.memory_service.errors import (
-    BindingInvalidError, MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError,
-    TargetDisabledError)
+    MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError, TargetDisabledError)
 from agent.memory_service.mutation import _OutcomeUnknown, _with_exact_retry
 from agent.memory_service.service import CommitIntent, InspectRequest
 
@@ -102,7 +102,6 @@ def _drop(pending_id: str) -> None:
 def _open_view(record: PendingApproval, raw_config: Any, backend_factory) -> Tuple[Any, Optional[ReplayStatus], Optional[str]]:
     from agent.memory_service.bootstrap import open_session_view
     from agent.memory_service.config import MemoryConfigurationError, MemoryMode, resolve_memory_service_config
-    from agent.memory_service.host_state import load_host_state
 
     try:
         config = resolve_memory_service_config(raw_config)
@@ -112,10 +111,7 @@ def _open_view(record: PendingApproval, raw_config: Any, backend_factory) -> Tup
         return None, ReplayStatus.UNAVAILABLE, "not_authoritative"
     if not config.target_enabled(record.target):  # D-R39-9 (§9.1 L945)
         return None, ReplayStatus.VOID, "target_disabled"
-    try:
-        host = load_host_state(record.session_id)
-    except BindingInvalidError:
-        host = None
+    host = load_staging_identity(record.session_id)   # a session's record, or an administrative one (C6b-9)
     state = host.state if host is not None else None
     if (state is None or state.provider_epoch != record.provider_epoch
             or state.identity.logical_session_id != record.logical_session_id):

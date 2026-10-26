@@ -27,9 +27,10 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
 from agent.memory_service import wire as w
 from agent.memory_service.approval import ApprovalChannel, ApprovalPrompt, build_authorization, render_stage_inspection, rfc3339
 from agent.memory_service.approval_store import (
-    ApprovalStoreError, PendingApproval, drop_pending_approval, new_pending_id, save_pending_approval)
+    ApprovalStoreError, PendingApproval, drop_pending_approval, load_staging_identity, new_pending_id,
+    save_pending_approval)
 from agent.memory_service.errors import (
-    BindingInvalidError, MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError)
+    MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError)
 from agent.memory_service.service import CommitIntent, InspectRequest, MemoryService, MutationRequest
 
 logger = logging.getLogger(__name__)
@@ -194,11 +195,7 @@ def _deferrable(approval: Optional[ApprovalChannel], service: MemoryService) -> 
     """Ruling X6b-2 (§4.1 L250): persist an approval record only when replay can resume the staging identity."""
     if approval is None or not approval.session_id:
         return False
-    from agent.memory_service.host_state import load_host_state
-    try:
-        record = load_host_state(approval.session_id)
-    except BindingInvalidError:
-        return False
+    record = load_staging_identity(approval.session_id)   # a session's record, or an administrative one (C6b-9)
     state = getattr(service, "session_state", None)
     return record is not None and record.state is not None and state is not None and record.state == state
 

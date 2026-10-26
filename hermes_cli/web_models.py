@@ -386,6 +386,9 @@ class MemoryReset(BaseModel):
     project_id: Optional[str] = None
     repo_id: Optional[str] = None
 
+class MemoryApprovalDecision(BaseModel):
+    decision: Literal["approve", "deny"]
+
 class BackupRequest(BaseModel):
     output: Optional[str] = None  # defaults to a timestamped zip in the home dir
 

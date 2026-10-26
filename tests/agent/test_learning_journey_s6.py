@@ -138,12 +138,22 @@ def test_detail_reads_the_snapshot_and_positional_ids_are_stale(env):
 
 
 @pytest.mark.parametrize("scope,target,need", [(USER, "user", ["target_user"]), (PROJ, "memory", ["non_default_scope"])])
-def test_approval_requiring_edits_fail_closed_without_staging(env, scope, target, need):
+def test_approval_requiring_edits_wait_for_approval(env, scope, target, need):
     r = env.store.seed_record(scope, target, "old")
     source = "profile" if target == "user" else "memory"
     out = lm.edit_node(f"memory:{source}:{r.id}", "new", memory_context=REPO_CTX, memory_admission="declarative" if target == "memory" else None)
-    assert (out["ok"], out["code"], out["approval_required"]) == (False, "approval_unavailable", need)
-    assert _count(env, "stage_curated") == 0 and env.store.records[r.id].lifecycle == "active"
+    assert (out["ok"], out["code"], out["approval_required"]) == (False, "approval_pending", need)
+    assert out["pending_id"] and _count(env, "commit_curated") == 0 and env.store.records[r.id].lifecycle == "active"
+
+
+def test_an_approved_journey_edit_supersedes_by_id(env):
+    from agent.memory_service.approval_replay import ReplayStatus, replay_pending_approval
+    from hermes_cli.config import load_config
+    r = env.store.seed_record(USER, "user", "prefers terse replies", lane="trusted_instruction")
+    out = lm.edit_node(f"memory:profile:{r.id}", "prefers short replies", memory_context=REPO_CTX)
+    assert replay_pending_approval(out["pending_id"], raw_config=load_config()).status is ReplayStatus.COMMITTED
+    assert env.store.records[r.id].lifecycle == "superseded"
+    assert [x.text for x in env.store.records_for(USER, "user")] == ["prefers short replies"]
 
 
 def test_edit_validation_matches_the_memory_tool(env):

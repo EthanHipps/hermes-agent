@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.memory_service import wire as w
-from agent.memory_service.errors import MemoryServiceError
-from agent.memory_service.host_state import HOST_STATE_ROOT_DIRNAME
+from agent.memory_service.errors import BindingInvalidError, MemoryServiceError
+from agent.memory_service.host_state import HOST_STATE_ROOT_DIRNAME, HostStateRecord, load_host_state
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,21 @@ class PendingApproval:
                 outcome=data["outcome"], origin=data["origin"], created_at=data["created_at"])
         except (KeyError, TypeError, ValueError) as exc:  # WireError is a ValueError
             raise ApprovalStoreError("approval record is malformed") from exc
+
+
+def load_staging_identity(session_id: str, *, hermes_home: Optional[Path] = None) -> Optional[HostStateRecord]:
+    """The persisted identity an approval's ``session_id`` names; None when it is missing or unreadable.
+
+    The one resolver deferral and replay share: a Hermes session's host-state record, or (contract C6b-9)
+    an administrative identity's record for an ``admin:<sha256>`` key.
+    """
+    from agent.memory_service.admin import ADMIN_KEY_PREFIX, load_admin_state   # late: admin -> mutation -> here
+    if session_id.startswith(ADMIN_KEY_PREFIX):
+        return load_admin_state(session_id, hermes_home)
+    try:
+        return load_host_state(session_id, hermes_home=hermes_home)
+    except BindingInvalidError:
+        return None
 
 
 def approvals_dir(hermes_home: Optional[Path] = None) -> Path:

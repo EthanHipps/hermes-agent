@@ -219,3 +219,20 @@ def test_a_void_approved_record_is_dropped_without_claiming_nothing_was_saved(en
     assert list_pending_approvals() == []
     assert "nothing was saved" not in _REVIEW_LINE[ReviewState.VOID_UNCONFIRMED].format(id=pids[0])
     assert "nothing was saved" not in _REPLAY_TEXT[ReplayStatus.VOID_UNCONFIRMED].format(id=pids[1], code=replayed.code)
+
+
+def test_an_approval_deferred_under_an_administrative_identity_survives_review_and_replays(env):
+    """Non-session surfaces stage under their persisted administrative identity, not a Hermes session."""
+    from agent.memory_service.admin import AdminContext, admin_service
+    from agent.memory_service.config import resolve_memory_service_config
+    context = AdminContext()
+    key = context.record_key(resolve_memory_service_config(env.raw))
+    with admin_service(env.raw, context=context, backend_factory=env.factory) as service:
+        outcome = run_curated_mutation(service, "user", lambda s: _add(s, "prefers terse replies"),
+                                       approval=ApprovalChannel(session_id=key, clock=env.store.clock.now))
+    assert outcome.status is MutationStatus.PENDING_APPROVAL
+    [review] = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
+    assert review.state is ReviewState.AWAITING and review.pending_id == outcome.pending_id
+    report = _replay(env, outcome.pending_id)
+    assert report.status is ReplayStatus.COMMITTED and _user_texts(env) == ["prefers terse replies"]
+    assert list_pending_approvals() == []

@@ -26,7 +26,8 @@ from hermes_cli.config import get_config_path, get_env_path
 from hermes_constants import get_process_hermes_home, profile_name_for_home
 from hermes_cli.web_models import CuratorPause, LearningNodeRef, LearningNodeEdit, DebugShareRequest
 from hermes_cli.web_routers._common import scoped_to_thread
-from hermes_cli.web_server_memory import admin_context_or_400, rest_disposition
+from hermes_cli.web_server_memory import (admin_context_or_400, approval_pending_response, curated_failure,
+                                          rest_disposition)
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -604,14 +605,21 @@ async def get_learning_graph(profile: Optional[str] = None, org_id: Optional[str
 
 
 async def _learning_mutation(profile: Optional[str], fn, status: int, fallback: str):
-    """Run a learning_mutations call under ``_profile_scope`` off-loop; a non-ok result
-    becomes ``HTTPException(status, message)``."""
+    """Run a learning_mutations call under ``_profile_scope`` off-loop.
+
+    A non-ok native result (it carries no ``code``) becomes ``HTTPException(status, message)``. A
+    provider-managed one keeps its typed payload as ``detail``: 202 when it waits for approval, and never a
+    client error when its outcome is unknown.
+    """
     res = await scoped_to_thread(profile, fn)
-    if not res.get("ok"):
-        detail = ({"code": res["code"], "message": res["message"]}
-                  if res.get("code") == "memory_admission_required" else res.get("message", fallback))
-        raise HTTPException(status_code=status, detail=detail)
-    return res
+    if res.get("ok"):
+        return res
+    if "code" not in res:
+        raise HTTPException(status_code=status, detail=res.get("message", fallback))
+    if res["code"] == "approval_pending":
+        return approval_pending_response(res)
+    code_status, error = curated_failure(res)
+    raise HTTPException(status_code=code_status, detail={**res, "error": error})
 
 
 @router.get("/api/learning/node")

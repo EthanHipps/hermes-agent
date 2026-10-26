@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Union
 
 from agent.memory_service import wire as w
+from agent.memory_service.approval import ApprovalChannel, PromptFn
 from agent.memory_service.archive import archive_disposition
 from agent.memory_service.config import (MemoryConfigurationError, MemoryMode, MemoryServiceConfig,
                                          resolve_memory_service_config)
@@ -49,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 ADMIN_PLATFORM = "admin"
 ADMIN_STATE_DIRNAME = "admin"
+#: An approval record's ``session_id`` holding this prefix names an administrative identity (contract C6b-9).
+ADMIN_KEY_PREFIX = "admin:"
 #: Everything opening or using an administrative identity may raise instead of returning a typed outcome.
 ADMIN_FAILURES = (MemoryConfigurationError, MemoryServiceError, w.WireError)
 _KIND_FOR_PREFIX = {"global": "principal_global", "organization": "organization", "project": "project",
@@ -93,7 +96,7 @@ class AdminContext:
     def record_key(self, config: MemoryServiceConfig) -> str:
         """``admin:<sha256>`` over provider, principal and the chain: one persisted identity per context."""
         material = {"provider": config.provider, "principal_id": config.principal_id, **self.as_dict()}
-        return "admin:" + hashlib.sha256(w.canonical_json(material)).hexdigest()
+        return ADMIN_KEY_PREFIX + hashlib.sha256(w.canonical_json(material)).hexdigest()
 
     def requested_context(self, config: MemoryServiceConfig, *, profile_id: str,
                           logical_session_id: str) -> w.RequestedContext:
@@ -125,14 +128,19 @@ def admin_state_path(key: str, hermes_home: Optional[Path] = None) -> Path:
     return Path(hermes_home) / HOST_STATE_ROOT_DIRNAME / ADMIN_STATE_DIRNAME / (key.split(":", 1)[1] + ".json")
 
 
-def _load_record(key: str, hermes_home: Optional[Path]) -> Optional[HostStateRecord]:
+def load_admin_state(key: str, hermes_home: Optional[Path] = None) -> Optional[HostStateRecord]:
+    """The persisted identity behind an ``admin:<sha256>`` key (contract C6b-9); None when absent or unreadable.
+
+    Approval replay and deferral resolve an administrative staging identity through this, so an approval
+    staged by a non-session surface is resumed exactly like one staged by a Hermes session.
+    """
     path = admin_state_path(key, hermes_home)
     if not path.exists():
         return None
     try:
         record = HostStateRecord.from_dict(json.loads(path.read_text(encoding="utf-8")), session_id=key)
     except (OSError, ValueError, MemoryServiceError):  # BindingInvalidError is a MemoryServiceError
-        logger.warning("administrative memory identity record is unreadable; binding a new one")
+        logger.warning("administrative memory identity record is unreadable")
         return None
     return record if record.state is not None else None
 
@@ -169,7 +177,7 @@ def admin_service(raw_config: Any, *, context: AdminContext, backend_factory: An
     if config.provider_mode is not MemoryMode.AUTHORITATIVE:
         raise MemoryConfigurationError("an administrative memory identity requires provider_mode: authoritative")
     key = context.record_key(config)
-    record = _load_record(key, hermes_home)
+    record = load_admin_state(key, hermes_home)   # unreadable: bind a new identity below
     service = None
     if record is not None:
         try:
@@ -192,6 +200,19 @@ def admin_service(raw_config: Any, *, context: AdminContext, backend_factory: An
         yield service
     finally:
         service.shutdown()
+
+
+def admin_approval_channel(raw_config: Any, context: AdminContext, *, origin: str,
+                           prompt: Optional[PromptFn] = None) -> ApprovalChannel:
+    """An approval channel that names *context*'s persisted identity (contract C6b-9).
+
+    An approval-requiring change from an administrative surface then waits in the approval store,
+    and an approved one has its authorization written ahead of the commit, instead of failing closed.
+    Replay resumes the same identity. Deferral needs that record to still be the one the staging
+    service bound (``mutation._deferrable``); a concurrent re-bind fails closed instead.
+    """
+    return ApprovalChannel(prompt=prompt, session_id=context.record_key(resolve_memory_service_config(raw_config)),
+                           origin=origin)
 
 
 def plan_reset(snapshot: w.CuratedSnapshot, scopes: Sequence[w.ScopeRef]) -> Union[PlannedMutation, PlanShortCircuit]:
@@ -252,11 +273,30 @@ def _short_circuit(outcome: MutationOutcome) -> Dict[str, Any]:
 
 
 def _approval_unavailable(outcome: MutationOutcome) -> Dict[str, Any]:
-    # R42 ships fail-closed (R38-1; ruling X6b-4) until the R42 follow-up adopts R39's flow (C6b-9).
     required = list(outcome.approval_requirements)
+    reason = ("the approval could not be recorded" if outcome.error_code == "approval_store_unavailable"
+              else "no approval could be requested for it here")
     return {"ok": False, "code": "approval_unavailable", "approval_required": required,
-            "message": f"This change needs explicit approval ({', '.join(required)}) and approval is not "
-                       "available for provider-managed memory yet, so nothing was changed."}
+            "message": f"This change needs explicit approval ({', '.join(required)}), and {reason}, so nothing "
+                       "was changed."}
+
+
+def _approval_pending(outcome: MutationOutcome) -> Dict[str, Any]:
+    """Staged and waiting for a decision: identifiers, scopes and hidden-effect counts only, never a body."""
+    stage = outcome.stage
+    required = list(outcome.approval_requirements)
+    payload: Dict[str, Any] = {"ok": False, "code": "approval_pending", "pending_id": outcome.pending_id,
+                               "approval_required": required,
+                               "message": f"This change needs explicit approval ({', '.join(required)}). It is "
+                                          "waiting in the pending memory approvals; nothing is changed until it "
+                                          "is approved."}
+    if stage is not None:
+        payload["expires_at"] = stage.expires_at
+        payload["scopes"] = [format_scope(s) for s in stage.requested_write_scopes]
+        payload["hidden_effects"] = [{"scope": format_scope(h.scope), "lane": h.lane, "action": h.action,
+                                      "count": h.count, "record_channel": h.record_channel}
+                                     for h in stage.hidden_effects]
+    return payload
 
 
 def _rejected(outcome: MutationOutcome) -> Dict[str, Any]:
@@ -285,11 +325,12 @@ def _outcome_unknown(outcome: MutationOutcome) -> Dict[str, Any]:
 
 
 #: Correction C68-5: keyed by MutationStatus, with a content-free fallback for members added later
-#: (R39's DENIED and PENDING_APPROVAL, C6b-2).
+#: (R39's DENIED, C6b-2).
 _OUTCOME_PAYLOADS: Dict[MutationStatus, Callable[[MutationOutcome], Dict[str, Any]]] = {
     MutationStatus.COMMITTED: _committed,
     MutationStatus.SHORT_CIRCUIT: _short_circuit,
     MutationStatus.APPROVAL_UNAVAILABLE: _approval_unavailable,
+    MutationStatus.PENDING_APPROVAL: _approval_pending,
     MutationStatus.REJECTED: _rejected,
     MutationStatus.CONFLICT_EXHAUSTED: _conflict_exhausted,
     MutationStatus.UNAVAILABLE: _unavailable,
