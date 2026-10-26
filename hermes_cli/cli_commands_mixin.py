@@ -2401,7 +2401,11 @@ class CLICommandsMixin:
             try:
                 subprocess.call([*shlex.split(editor), path])
             except Exception:
-                # Fall back to a bare invocation (editor value may not be argv-splittable everywhere).
+                # POSIX: fall back to /bin/sh, which expands what argv cannot (~, $VARS). Not on
+                # Windows: shlex.quote is /bin/sh quoting, and cmd.exe hands a non-executable editor
+                # to its file association (an "Open With" dialog), so the error is reported instead.
+                if os.name == "nt":
+                    raise
                 subprocess.call(f"{editor} {shlex.quote(path)}", shell=True)
             with open(path, "r", encoding="utf-8") as fh:
                 raw = fh.read()
