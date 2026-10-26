@@ -327,9 +327,12 @@ def _unavailable(outcome: MutationOutcome) -> Dict[str, Any]:
 
 def _outcome_unknown(outcome: MutationOutcome) -> Dict[str, Any]:
     # X-4 / correction R-5: never "nothing was changed" -- the write may have landed.
-    return {"ok": False, "code": "outcome_unknown",
-            "message": "The memory provider did not confirm whether this change was saved. "
-                       "Refresh to see the current state."}
+    payload: Dict[str, Any] = {"ok": False, "code": "outcome_unknown",
+                               "message": "The memory provider did not confirm whether this change was saved. "
+                                          "Refresh to see the current state."}
+    if outcome.pending_id:   # the approved request was kept, so approving it again retries it identically (R39-7)
+        payload["pending_id"] = outcome.pending_id
+    return payload
 
 
 #: Correction C68-5: keyed by MutationStatus, with a content-free fallback for members added later

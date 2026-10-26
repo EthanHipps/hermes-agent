@@ -622,6 +622,18 @@ def is_shared_multi_user_session(
     return not (thread_sessions_per_user if source.thread_id else group_sessions_per_user)
 
 
+# These adapters use "dm" for a broadcast topic, a channel, or an agent peer, so a reply there is
+# published rather than delivered to one person.
+_NOT_PAIRED_DM_PLATFORMS = frozenset({"ntfy", "raft", "a2a"})
+
+
+def is_paired_dm(source: Any) -> bool:
+    """True when a reply to *source* reaches its sender alone: a real one-to-one conversation."""
+    platform = str(getattr(getattr(source, "platform", None), "value", getattr(source, "platform", None))).lower()
+    return (getattr(source, "chat_type", None) in {"dm", "private"} and bool(getattr(source, "chat_id", None))
+            and platform not in _NOT_PAIRED_DM_PLATFORMS)
+
+
 def _session_key_namespace(profile: Optional[str]) -> str:
     """``agent:<ns>`` prefix for a session key: default/None profile → ``agent:main``
     (BYTE-IDENTICAL to every historical key); named profile → ``agent:<name>`` so two

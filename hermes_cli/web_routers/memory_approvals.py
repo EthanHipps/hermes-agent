@@ -77,7 +77,8 @@ def _list() -> Dict[str, Any]:
     cfg = _provider_managed_config()
     if cfg is None:
         return {"provider_managed": False, "approvals": []}
-    return {"provider_managed": True, "approvals": [_row(r) for r in review_pending_approvals(raw_config=cfg)]}
+    reviews = review_pending_approvals(raw_config=cfg, principal=None)   # an owner surface: every record
+    return {"provider_managed": True, "approvals": [_row(r) for r in reviews]}
 
 
 def _decide(pending_id: str, decision: str) -> Tuple[int, Any]:
@@ -88,12 +89,12 @@ def _decide(pending_id: str, decision: str) -> Tuple[int, Any]:
         return 409, _NOT_PROVIDER_MANAGED
     warning = None
     if decision == "approve":
-        report = replay_pending_approval(pending_id, raw_config=cfg)
+        report = replay_pending_approval(pending_id, raw_config=cfg, principal=None)
         status, code, table = report.status.value, report.code, _APPROVE
         if report.audit_pending:
             warning = "Saved and published; the memory provider's audit trail is pending."
     else:
-        status, code, table = reject_pending_approval(pending_id).value, None, _DENY
+        status, code, table = reject_pending_approval(pending_id, principal=None).value, None, _DENY
     http_status, message = table[status]
     payload = {"ok": http_status == 200, "pending_id": pending_id, "status": status, "code": code,
                "message": message.format(code=code or "unknown")}

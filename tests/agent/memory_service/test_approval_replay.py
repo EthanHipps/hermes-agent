@@ -72,7 +72,8 @@ def _defer(env, text="prefers terse replies"):
 
 def _replay(env, pid):
     with native_memory_sentinel(env.native_dir) as sentinel:
-        report = replay_pending_approval(pid, raw_config=env.raw, backend_factory=env.factory, clock=env.store.clock.now)
+        report = replay_pending_approval(pid, raw_config=env.raw, principal=None, backend_factory=env.factory,
+                                         clock=env.store.clock.now)
     sentinel.assert_untouched()
     return report
 
@@ -158,17 +159,17 @@ def test_an_unreachable_provider_keeps_the_record(env, operation):
 def test_reject_drops_the_record_and_calls_no_provider(env):
     pid = _defer(env)
     views = len(env.backends)
-    assert reject_pending_approval(pid) is RejectStatus.DROPPED
+    assert reject_pending_approval(pid, principal=None) is RejectStatus.DROPPED
     assert len(env.backends) == views and list_pending_approvals() == []
-    assert reject_pending_approval(pid) is RejectStatus.NOT_FOUND
-    assert reject_pending_approval("../escape") is RejectStatus.NOT_FOUND
+    assert reject_pending_approval(pid, principal=None) is RejectStatus.NOT_FOUND
+    assert reject_pending_approval("../escape", principal=None) is RejectStatus.NOT_FOUND
 
 
 def test_reject_refuses_an_approved_record_whose_result_is_unconfirmed(env):
     pid = _defer(env)
     env.store.fail_transport("commit_curated", phase="after_publish", times=2)
     _replay(env, pid)
-    assert reject_pending_approval(pid) is RejectStatus.REFUSED and load_pending_approval(pid) is not None
+    assert reject_pending_approval(pid, principal=None) is RejectStatus.REFUSED and load_pending_approval(pid) is not None
 
 
 def test_review_renders_live_inspections_and_settles_terminal_states(env):
@@ -177,7 +178,7 @@ def test_review_renders_live_inspections_and_settles_terminal_states(env):
     live = _defer(env, "new ask")
     env.store.clock.advance(1801)                              # the first stage's TTL (3600 s) has passed
     with native_memory_sentinel(env.native_dir) as sentinel:
-        reviews = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
+        reviews = review_pending_approvals(raw_config=env.raw, principal=None, backend_factory=env.factory)
     sentinel.assert_untouched()
     states = {r.pending_id: r for r in reviews}
     assert states[expired].state is ReviewState.EXPIRED and states[live].state is ReviewState.AWAITING
@@ -190,7 +191,7 @@ def test_review_of_a_committed_unknown_record_reports_it_saved(env):
     pid = _defer(env)
     env.store.fail_transport("commit_curated", phase="after_publish", times=2)
     _replay(env, pid)
-    [review] = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
+    [review] = review_pending_approvals(raw_config=env.raw, principal=None, backend_factory=env.factory)
     assert review.state is ReviewState.COMMITTED and list_pending_approvals() == []
 
 
@@ -210,9 +211,9 @@ def test_a_void_approved_record_is_dropped_without_claiming_nothing_was_saved(en
     assert _user_texts(env) == ["likes tea", "prefers terse replies"]     # both commits landed
     raw = void(env)
     with native_memory_sentinel(env.native_dir) as sentinel:
-        replayed = replay_pending_approval(pids[1], raw_config=raw, backend_factory=env.factory,
+        replayed = replay_pending_approval(pids[1], raw_config=raw, principal=None, backend_factory=env.factory,
                                            clock=env.store.clock.now)
-        [review] = review_pending_approvals(raw_config=raw, backend_factory=env.factory)
+        [review] = review_pending_approvals(raw_config=raw, principal=None, backend_factory=env.factory)
     sentinel.assert_untouched()
     assert replayed.status is ReplayStatus.VOID_UNCONFIRMED
     assert review.pending_id == pids[0] and review.state is ReviewState.VOID_UNCONFIRMED
@@ -231,7 +232,7 @@ def test_an_approval_deferred_under_an_administrative_identity_survives_review_a
         outcome = run_curated_mutation(service, "user", lambda s: _add(s, "prefers terse replies"),
                                        approval=ApprovalChannel(session_id=key, clock=env.store.clock.now))
     assert outcome.status is MutationStatus.PENDING_APPROVAL
-    [review] = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
+    [review] = review_pending_approvals(raw_config=env.raw, principal=None, backend_factory=env.factory)
     assert review.state is ReviewState.AWAITING and review.pending_id == outcome.pending_id
     report = _replay(env, outcome.pending_id)
     assert report.status is ReplayStatus.COMMITTED and _user_texts(env) == ["prefers terse replies"]
@@ -247,3 +248,42 @@ def test_a_session_whose_id_merely_starts_with_admin_is_still_a_session(env, tmp
                                    approval=ApprovalChannel(session_id="admin:my-chat", clock=env.store.clock.now))
     assert outcome.status is MutationStatus.PENDING_APPROVAL
     assert _replay(env, outcome.pending_id).status is ReplayStatus.COMMITTED
+
+
+def _staged_by(env, pid, principal):
+    """A copy of record *pid* staged under another principal's session. The fake provider binds one principal,
+    so the other identity exists only as host state: enough for the filter, which never contacts the provider."""
+    import dataclasses
+    from agent.memory_service.approval_store import save_pending_approval
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+    state = env.service.session_state
+    lsid = f"lsid-{principal}"
+    identity = dataclasses.replace(state.identity, principal_id=principal, logical_session_id=lsid)
+    save_host_state(HostStateRecord(f"sess-{principal}", "provider_authoritative",
+                                    dataclasses.replace(state, identity=identity)))
+    record = dataclasses.replace(load_pending_approval(pid), pending_id="fedcba987654",
+                                 session_id=f"sess-{principal}", logical_session_id=lsid)
+    save_pending_approval(record)
+    return record.pending_id
+
+
+def test_a_principal_never_sees_settles_or_drops_another_principals_approval(env):
+    """A filtered caller acts only on records whose staging identity is its own principal's; anything it cannot
+    attribute (another principal's, or unreadable) is "not found", with no provider contact and no drop."""
+    from agent.memory_service.approval_replay import pending_ids
+    from agent.memory_service.approval_store import approvals_dir
+    mine = _defer(env, "prefers terse replies")
+    theirs = _staged_by(env, mine, "bob")
+    (approvals_dir() / "0123456789ab.json").write_text("{not json", encoding="utf-8")       # unattributable
+    views = len(env.backends)
+    assert pending_ids(principal="bob") == [theirs] and pending_ids(principal="ethan") == [mine]
+    for pid in (theirs, "0123456789ab"):
+        assert replay_pending_approval(pid, raw_config=env.raw, principal="ethan", backend_factory=env.factory,
+                                       clock=env.store.clock.now).status is ReplayStatus.NOT_FOUND
+        assert reject_pending_approval(pid, principal="ethan") is RejectStatus.NOT_FOUND
+    assert len(env.backends) == views                                    # no provider contact for any of it
+    reviews = review_pending_approvals(raw_config=env.raw, principal="ethan", backend_factory=env.factory)
+    assert [(r.pending_id, r.state) for r in reviews] == [(mine, ReviewState.AWAITING)]
+    assert {p for p, _ in list_pending_approvals()} == {mine, theirs, "0123456789ab"}       # nothing dropped
+    owner = {p for p in pending_ids(principal=None)}
+    assert owner == {mine, theirs, "0123456789ab"}

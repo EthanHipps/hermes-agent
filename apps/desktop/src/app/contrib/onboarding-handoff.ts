@@ -161,13 +161,17 @@ export function useOnboardingHandoff({
             personalize: async () => {
               const answers = $onboardingAnswers.get()
 
-              const result = await request<{ saved?: boolean; profile?: string; target?: string }>(
+              const result = await request<{ pending_id?: string; profile?: string; saved?: boolean; target?: string }>(
                 owner,
                 'profiles.remember_onboarding',
                 { answers: { ...answers, connectors: answers.connectors.map(connectorTitle) } }
               )
 
-              if (!result.saved || result.profile !== BUILD_PROFILE || result.target !== 'user') {
+              // Provider-managed memory keeps the facts in the pending memory approvals instead (`pending_id`):
+              // they are recorded, and a retry would only stage them a second time.
+              const recorded = result.saved || Boolean(result.pending_id)
+
+              if (!recorded || result.profile !== BUILD_PROFILE || result.target !== 'user') {
                 throw new Error('Could not save your onboarding preferences. Retry before starting the first build.')
               }
             },

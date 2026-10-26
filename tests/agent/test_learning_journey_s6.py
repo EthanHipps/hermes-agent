@@ -151,7 +151,8 @@ def test_an_approved_journey_edit_supersedes_by_id(env):
     from hermes_cli.config import load_config
     r = env.store.seed_record(USER, "user", "prefers terse replies", lane="trusted_instruction")
     out = lm.edit_node(f"memory:profile:{r.id}", "prefers short replies", memory_context=REPO_CTX)
-    assert replay_pending_approval(out["pending_id"], raw_config=load_config()).status is ReplayStatus.COMMITTED
+    assert replay_pending_approval(out["pending_id"], raw_config=load_config(),
+                                   principal=None).status is ReplayStatus.COMMITTED
     assert env.store.records[r.id].lifecycle == "superseded"
     assert [x.text for x in env.store.records_for(USER, "user")] == ["prefers short replies"]
 

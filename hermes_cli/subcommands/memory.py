@@ -37,6 +37,7 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
         "--scope", action="append", metavar="SCOPE", default=None,
         help="authoritative only: a scope to reset — global:<principal>, organization:<id>, project:<id> "
              "or repository:<id>; repeatable")
+    _add_context_flags(_reset_parser)   # authoritative only: the chain the reset's scopes belong to
     _migrate_parser = memory_sub.add_parser(
         "migrate", help="Move native MEMORY.md/USER.md into the authoritative memory provider (§9.9)",
         description="Exit codes: 0 = your decision was carried out; 1 = stopped or rejected (state may remain); "

@@ -31,7 +31,8 @@ def _fmt_pending_list(subsystem: str) -> str:
 
 
 def handle_pending_subcommand(
-    subsystem: str, args: List[str], *, memory_store=None, set_mode_fn=None) -> Optional[str]:
+    subsystem: str, args: List[str], *, memory_store=None, set_mode_fn=None,
+    memory_principal: Optional[str] = None, memory_bodies: bool = True) -> Optional[str]:
     """Dispatch a /memory or /skills write-approval subcommand.
 
     ``memory_store`` applies approved memory writes (CLI passes its live store; gateway a freshly
@@ -40,11 +41,14 @@ def handle_pending_subcommand(
     other handling (e.g. /skills search).
 
     In a home whose config requests authoritative memory, /memory works only on handle-only
-    approval records (R39) and never uses ``memory_store``.
+    approval records (R39) and never uses ``memory_store``. There a gateway passes the caller's
+    ``memory_principal``, so only that principal's records are touched, and ``memory_bodies=False``
+    where the chat may hold other principals' users; owner surfaces keep the defaults.
     """
     if subsystem == wa.MEMORY and _memory_is_provider_managed():
         from hermes_cli.write_approval_commands_curated import handle_curated_memory_subcommand
-        return handle_curated_memory_subcommand(args, set_mode_fn=set_mode_fn)
+        return handle_curated_memory_subcommand(args, principal=memory_principal, bodies=memory_bodies,
+                                                set_mode_fn=set_mode_fn)
     if not args:
         return f"{_fmt_state(subsystem)}\n\n" + _fmt_pending_list(subsystem)
     sub, rest = args[0].lower(), args[1:]

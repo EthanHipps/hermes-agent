@@ -1,9 +1,7 @@
 """Health probe and content-free status over MemoryService (R41; contract C6b-13).
 
-Administrative identity, the reset planner and administrative scope selection belong to
-``agent/memory_service/admin.py`` (R42, contract C6b-5; ruling X6b-3); ``format_scope_ref``/
-``parse_scope_ref`` encode §11.2 L1837 exactly as C6b-5's selectors do and are removed by the R41
-follow-up in favour of them.
+Administrative identity, the reset planner and the §11.2 L1837 scope encoding belong to
+``agent/memory_service/admin.py`` (R42, contract C6b-5; ruling X6b-3).
 
 * ``probe_provider`` negotiates and nothing else (§9.10 L1683: negotiate publishes no state).
 * ``collect_memory_status`` reports mode, identity, scopes and degraded state from a live or
@@ -22,29 +20,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from agent.memory_service import wire as w
+from agent.memory_service.admin import format_scope
 from agent.memory_service.config import PROVIDER_API_VERSION, MemoryServiceConfig
 from agent.memory_service.errors import MemoryServiceError, ProviderTransportError
 
 logger = logging.getLogger(__name__)
-
-_PREFIX = {"principal_global": "global", "organization": "organization", "project": "project",
-           "repository": "repository"}
-_KIND = {prefix: kind for kind, prefix in _PREFIX.items()}
-
-
-def format_scope_ref(scope: w.ScopeRef) -> str:
-    """§11.2 L1837's canonical CLI encoding of a ``ScopeRef``."""
-    return f"{_PREFIX[scope.kind]}:{scope.id}"
-
-
-def parse_scope_ref(text: str) -> w.ScopeRef:
-    """The inverse of :func:`format_scope_ref`; ``ValueError`` on anything else."""
-    prefix, sep, ident = (text or "").strip().partition(":")
-    kind = _KIND.get(prefix)
-    if not sep or kind is None or not ident.strip():
-        raise ValueError(f"{text!r} is not a scope reference; use global:<principal>, "
-                         "organization:<id>, project:<id> or repository:<id>")
-    return w.ScopeRef(kind=kind, id=ident.strip())
 
 
 @dataclass(frozen=True)
@@ -125,9 +105,9 @@ def _target_status(service: Any, target: str) -> TargetStatus:
         return TargetStatus(target, True, error=getattr(exc, "code", None) or "blocked")
     return TargetStatus(
         target, True, status=snapshot.status,
-        visible_scopes=tuple(format_scope_ref(s) for s in snapshot.visible_scopes),
-        default_write_scope=format_scope_ref(snapshot.default_write_scope) if snapshot.default_write_scope else None,
-        eligible_write_scopes=tuple(format_scope_ref(s) for s in snapshot.eligible_write_scopes),
+        visible_scopes=tuple(format_scope(s) for s in snapshot.visible_scopes),
+        default_write_scope=format_scope(snapshot.default_write_scope) if snapshot.default_write_scope else None,
+        eligible_write_scopes=tuple(format_scope(s) for s in snapshot.eligible_write_scopes),
         entries=len(snapshot.mutation_entries))
 
 

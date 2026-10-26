@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent.memory_service import wire as w
-from agent.memory_service.status import collect_memory_status, format_scope_ref, parse_scope_ref, probe_provider
+from agent.memory_service.admin import format_scope
+from agent.memory_service.status import collect_memory_status, probe_provider
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
 
 EPOCH_A = "EPOCHVALUEAAAA"
@@ -43,19 +44,6 @@ def _context():
     return w.RequestedContext(principal_id="ethan", profile_id="default", logical_session_id="s-1", platform="cli",
                               org_id=None, project_id=None, repo_id=None, workspace_id=None,
                               resolution_source="directory", canonical_directory=os.path.realpath(os.getcwd()))
-
-
-@pytest.mark.parametrize("text,kind", [("global:ethan", "principal_global"), ("organization:o-1", "organization"),
-                                       ("project:p-1", "project"), ("repository:r-1", "repository")])
-def test_scope_refs_round_trip_the_cli_encoding(text, kind):   # §11.2 L1837
-    scope = parse_scope_ref(text)
-    assert scope.kind == kind and format_scope_ref(scope) == text
-
-
-@pytest.mark.parametrize("text", ["", "repo:r-1", "repository:", "r-1", "principal_global:ethan"])
-def test_scope_refs_reject_anything_else(text):
-    with pytest.raises(ValueError):
-        parse_scope_ref(text)
 
 
 def test_probe_reports_a_healthy_provider_without_binding(authoritative_env):
@@ -94,7 +82,7 @@ def test_status_shows_identity_scopes_and_binding_revision_but_no_opaque_value(a
     memory = next(t for t in status.targets if t.target == "memory")
     assert status.disposition == "provider_authoritative" and status.identity["principal_id"] == "ethan"
     assert status.identity["binding_revision"] == service.identity.binding_revision
-    assert memory.default_write_scope == format_scope_ref(snapshot.default_write_scope) and memory.entries == 1
+    assert memory.default_write_scope == format_scope(snapshot.default_write_scope) and memory.entries == 1
     dumped = json.dumps(status.as_dict())
     assert "opaque_binding_b64url" not in dumped and service.identity.opaque_binding_b64url not in dumped
     assert EPOCH_A not in dumped   # the fake's revision tokens are small integers, so only the epoch is asserted absent
