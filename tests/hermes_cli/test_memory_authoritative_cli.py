@@ -207,3 +207,9 @@ def test_reset_refuses_a_malformed_scope_with_the_encoding_hint(authoritative_en
     from hermes_cli.memory_authoritative import reset_command
     code = reset_command({"memory": authoritative_env.memory}, _reset_args(scope=["repo:x"]))
     assert code == 2 and "repository:<id>" in capsys.readouterr().out
+
+
+def test_a_repository_reset_without_its_chain_says_how_to_name_the_chain(authoritative_env, terminal, capsys):
+    from hermes_cli.memory_authoritative import reset_command
+    code = reset_command({"memory": authoritative_env.memory}, _reset_args(project=None, repository=None))
+    assert code == 2 and "--repository" in capsys.readouterr().out

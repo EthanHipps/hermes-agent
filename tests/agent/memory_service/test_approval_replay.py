@@ -287,3 +287,27 @@ def test_a_principal_never_sees_settles_or_drops_another_principals_approval(env
     assert {p for p, _ in list_pending_approvals()} == {mine, theirs, "0123456789ab"}       # nothing dropped
     owner = {p for p in pending_ids(principal=None)}
     assert owner == {mine, theirs, "0123456789ab"}
+
+
+def test_a_filtered_caller_finds_neither_another_principals_approved_record_nor_its_own_stale_one(env):
+    """The filter runs before the "already approved" refusal, so another principal's approved record is "not
+    found", never "refused". A record of the caller's own principal whose staging identity no longer matches is
+    attributable to nobody but the owner: "not found" too, and kept."""
+    import dataclasses
+    from agent.memory_service.host_state import HostStateRecord, save_host_state
+    mine = _defer(env, "prefers terse replies")
+    unconfirmed = _defer(env, "likes tea")
+    env.store.fail_transport("commit_curated", phase="after_publish", times=2)
+    _replay(env, unconfirmed)                                   # kept as approved: its result is unconfirmed
+    theirs = _staged_by(env, unconfirmed, "bob")
+    assert load_pending_approval(theirs).decision == "approved"
+    state = env.service.session_state
+    rotated = dataclasses.replace(state, identity=dataclasses.replace(state.identity, logical_session_id="lsid-new"))
+    save_host_state(HostStateRecord(load_pending_approval(mine).session_id, "provider_authoritative", rotated))
+    views = len(env.backends)
+    assert reject_pending_approval(theirs, principal="ethan") is RejectStatus.NOT_FOUND
+    assert replay_pending_approval(mine, raw_config=env.raw, principal="ethan", backend_factory=env.factory,
+                                   clock=env.store.clock.now).status is ReplayStatus.NOT_FOUND
+    assert reject_pending_approval(mine, principal="ethan") is RejectStatus.NOT_FOUND
+    assert review_pending_approvals(raw_config=env.raw, principal="ethan", backend_factory=env.factory) == []
+    assert len(env.backends) == views and {p for p, _ in list_pending_approvals()} == {mine, unconfirmed, theirs}

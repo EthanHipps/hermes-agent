@@ -60,12 +60,15 @@ _ADMIN_KEY = re.compile(r"admin:[0-9a-f]{64}")
 
 def is_admin_key(key: str) -> bool:
     return isinstance(key, str) and _ADMIN_KEY.fullmatch(key) is not None
+
+
 #: Everything opening or using an administrative identity may raise instead of returning a typed outcome.
 ADMIN_FAILURES = (MemoryConfigurationError, MemoryServiceError, w.WireError)
 _KIND_FOR_PREFIX = {"global": "principal_global", "organization": "organization", "project": "project",
                     "repository": "repository"}
 _PREFIX_FOR_KIND = {kind: prefix for prefix, kind in _KIND_FOR_PREFIX.items()}
 _MAX_ID_CHARS = 256
+_TARGET_LABEL = {"memory": "memory", "user": "user profile"}
 
 
 class AdminIdentityError(ValueError):
@@ -241,7 +244,7 @@ def plan_reset(snapshot: w.CuratedSnapshot, scopes: Sequence[w.ScopeRef]) -> Uni
     return PlannedMutation(intent=w.MutationIntent(kind="reset", reset_scopes=ordered), mutation_delta=(),
                            candidate_entries=(), requested_write_scopes=ordered,
                            projected_texts=tuple(e.text for e in snapshot.mutation_entries if e.origin_scope not in ordered),
-                           message=f"Reset {snapshot.target} memory in {len(ordered)} scope(s).")
+                           message=f"Reset the {_TARGET_LABEL[snapshot.target]} in {len(ordered)} scope(s).")
 
 
 def authority_report(raw_config: Any) -> Optional[Dict[str, Any]]:

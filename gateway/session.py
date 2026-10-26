@@ -627,9 +627,9 @@ def is_shared_multi_user_session(
 _NOT_PAIRED_DM_PLATFORMS = frozenset({"ntfy", "raft", "a2a"})
 
 
-def is_paired_dm(source: Any) -> bool:
+def is_paired_dm(source: SessionSource) -> bool:
     """True when a reply to *source* reaches its sender alone: a real one-to-one conversation."""
-    platform = str(getattr(getattr(source, "platform", None), "value", getattr(source, "platform", None))).lower()
+    platform = str(getattr(source.platform, "value", source.platform)).lower()
     return (getattr(source, "chat_type", None) in {"dm", "private"} and bool(getattr(source, "chat_id", None))
             and platform not in _NOT_PAIRED_DM_PLATFORMS)
 

@@ -74,6 +74,16 @@ export function readHandoffReceipt(key: string): HandoffReceipt | null {
   return value
 }
 
+// The onboarding facts this handoff staged for approval. A retry after a failed session.create reuses the
+// staged request instead of staging the same facts a second time.
+export function stagedOnboardingFacts(key: string): null | string {
+  return readKey(`${key}.memory-pending`)
+}
+
+export function saveStagedOnboardingFacts(key: string, pendingId: string): void {
+  writeKey(`${key}.memory-pending`, pendingId)
+}
+
 export function quarantineHandoffReceipt(key: string): void {
   writeKey(`${key}.unreadable`, readKey(key))
   writeKey(key, null)

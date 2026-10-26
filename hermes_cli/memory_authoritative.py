@@ -134,11 +134,10 @@ def _reset_prompt(approval: Any) -> bool:
 
 def _report_unknown(payload: Mapping[str, Any]) -> None:
     pid = payload.get("pending_id")
-    kept = (f" The approved request is kept as {pid}: approve it again with '/memory approve {pid}' in a Hermes "
-            "session, or from the desktop's pending memory approvals, to retry it unchanged. Re-running this reset "
-            "is also safe." if pid else
+    kept = (f" The approved request is kept as {pid}: type '/memory approve {pid}' in a Hermes chat to retry it "
+            "unchanged. Re-running this reset is also safe." if pid else
             " Nothing was kept for an identical retry; check the memory, then re-run the reset if it is still needed.")
-    print(f"\n  {payload['message']}{kept}\n")
+    print(f"\n  The memory provider did not confirm whether this reset was saved.{kept}\n")
 
 
 def reset_command(config: Mapping[str, Any], args: Any) -> int:
@@ -198,5 +197,8 @@ def reset_command(config: Mapping[str, Any], args: Any) -> int:
     if outcome.status is MutationStatus.OUTCOME_UNKNOWN:
         _report_unknown(payload)
         return 1
-    print(f"\n  {payload.get('message', 'Nothing was reset.')}\n")
+    chainless = context == AdminContext() and any(not s.startswith("global:") for s in payload.get("scopes", ()))
+    hint = (" To reset an organization, project or repository scope, name its chain with --organization, "
+            "--project and --repository." if payload.get("code") == "unauthorized_scope" and chainless else "")
+    print(f"\n  {payload.get('message', 'Nothing was reset.')}{hint}\n")
     return 2 if outcome.status is MutationStatus.SHORT_CIRCUIT else 1

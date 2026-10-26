@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from tools import write_approval as wa
+
+#: ``memory_principal`` not given: the caller never said whose provider-managed approvals it may touch.
+_UNNAMED: Any = object()
 
 
 def _fmt_state(subsystem: str) -> str:
@@ -32,7 +35,7 @@ def _fmt_pending_list(subsystem: str) -> str:
 
 def handle_pending_subcommand(
     subsystem: str, args: List[str], *, memory_store=None, set_mode_fn=None,
-    memory_principal: Optional[str] = None, memory_bodies: bool = True) -> Optional[str]:
+    memory_principal: Optional[str] = _UNNAMED, memory_bodies: bool = True) -> Optional[str]:
     """Dispatch a /memory or /skills write-approval subcommand.
 
     ``memory_store`` applies approved memory writes (CLI passes its live store; gateway a freshly
@@ -43,9 +46,13 @@ def handle_pending_subcommand(
     In a home whose config requests authoritative memory, /memory works only on handle-only
     approval records (R39) and never uses ``memory_store``. There a gateway passes the caller's
     ``memory_principal``, so only that principal's records are touched, and ``memory_bodies=False``
-    where the chat may hold other principals' users; owner surfaces keep the defaults.
+    where the chat may hold other principals' users; an owner surface passes ``memory_principal=None``.
+    A caller that names neither is refused rather than treated as the owner.
     """
     if subsystem == wa.MEMORY and _memory_is_provider_managed():
+        if memory_principal is _UNNAMED:
+            return ("This home's memory is provider-managed, and pending memory changes cannot be reviewed "
+                    "from here. Nothing was changed.")
         from hermes_cli.write_approval_commands_curated import handle_curated_memory_subcommand
         return handle_curated_memory_subcommand(args, principal=memory_principal, bodies=memory_bodies,
                                                 set_mode_fn=set_mode_fn)

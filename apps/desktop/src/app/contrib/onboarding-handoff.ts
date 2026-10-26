@@ -41,7 +41,7 @@ import {
 import { patchSessionTile } from '@/store/session-states'
 
 import { BUILD_PROFILE, type HandoffDeps, type HandoffReceipt, paintHandoffBrief, startHandoff } from './handoff-leg'
-import { saveHandoffReceipt } from './handoff-receipt'
+import { saveHandoffReceipt, saveStagedOnboardingFacts, stagedOnboardingFacts } from './handoff-receipt'
 import type { AmbientGatewayRequest } from './session-rpc-dispatcher'
 
 export interface OnboardingHandoffOptions extends Pick<
@@ -53,6 +53,18 @@ export interface OnboardingHandoffOptions extends Pick<
   /** Pins session creation to the target profile while the guide chat is still selected.
    * The caller's own requestGateway reads the pin. */
   runCreatePinnedTo: <T>(profile: string, create: () => Promise<T>) => Promise<T>
+}
+
+// Sticky: the staged request expires, and nothing else in the app shows it.
+function noticeOnboardingFactsPending(pendingId: string): void {
+  notify({
+    id: 'onboarding-memory-pending',
+    kind: 'warning',
+    title: 'Your onboarding preferences need approval',
+    message:
+      `Hermes remembers them only after you approve them: type /memory approve ${pendingId} in any chat. ` +
+      'The request expires if it is not approved in time.'
+  })
 }
 
 export function useOnboardingHandoff({
@@ -159,6 +171,14 @@ export function useOnboardingHandoff({
               saveHandoffReceipt(receiptKey, value)
             },
             personalize: async () => {
+              const staged = stagedOnboardingFacts(receiptKey)
+
+              if (staged) {
+                noticeOnboardingFactsPending(staged)
+
+                return
+              }
+
               const answers = $onboardingAnswers.get()
 
               const result = await request<{ pending_id?: string; profile?: string; saved?: boolean; target?: string }>(
@@ -167,12 +187,15 @@ export function useOnboardingHandoff({
                 { answers: { ...answers, connectors: answers.connectors.map(connectorTitle) } }
               )
 
-              // Provider-managed memory keeps the facts in the pending memory approvals instead (`pending_id`):
-              // they are recorded, and a retry would only stage them a second time.
-              const recorded = result.saved || Boolean(result.pending_id)
-
-              if (!recorded || result.profile !== BUILD_PROFILE || result.target !== 'user') {
+              if (!(result.saved || result.pending_id) || result.profile !== BUILD_PROFILE || result.target !== 'user') {
                 throw new Error('Could not save your onboarding preferences. Retry before starting the first build.')
+              }
+
+              // Provider-managed memory stages the facts (`pending_id`) until someone approves them. The build
+              // still starts, so the user must hear that the facts are waiting, and where to approve them.
+              if (!result.saved && result.pending_id) {
+                saveStagedOnboardingFacts(receiptKey, result.pending_id)
+                noticeOnboardingFactsPending(result.pending_id)
               }
             },
             create: async () => {

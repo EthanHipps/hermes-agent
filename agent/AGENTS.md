@@ -272,14 +272,16 @@ commits on a yes; a declined or interrupted prompt changes nothing, and an unkno
 approved request under its pending id for an identical retry. Onboarding personalization in an
 authoritative default profile stages its `target:user` add under the principal-global administrative
 identity, where it waits for approval (`saved: false` with a `pending_id`); it never writes `USER.md`.
+The desktop handoff tells the user where to approve it, and a retried handoff reuses that stage.
 Gateway users map explicitly through `memory.gateway_principals` (`"<platform>:<user_id>":
 <principal>`); an unknown or ambiguous user gets `principal.UnmappedPrincipalMemoryService` — no
 memory and no provider call. A mapped user reviews, approves and rejects only the pending writes
 their principal staged (`approval_replay`'s required `principal=`; `None` is an owner surface: CLI,
 TUI, dashboard), and on a gateway that maps users to more than one principal only a private chat
-(`gateway.session.is_paired_dm`) shows the text of a pending change. Doctor, the home skeleton and
-archives read the requested mode through `hermes_cli/backup_memory.py::home_memory_section`, which
-falls back to the last-known-good
+(`gateway.session.is_paired_dm`) shows the text of a pending change. `handle_pending_subcommand`
+refuses provider-managed records to a caller that passes no `memory_principal`. Doctor, the home
+skeleton and archives read the requested mode through
+`hermes_cli/backup_memory.py::home_memory_section`, which falls back to the last-known-good
 `backups/config/` copy when config.yaml does not parse, and deleting a session deletes its
 host-state record.
 

@@ -1884,7 +1884,7 @@ class CLICommandsMixin:
             from tools.memory_tool import load_on_disk_store
             store = load_on_disk_store()
         out = handle_pending_subcommand(
-            wa.MEMORY, args, memory_store=store,
+            wa.MEMORY, args, memory_store=store, memory_principal=None,   # the terminal is the home's owner
             set_mode_fn=lambda enabled: self._save_write_approval("memory", enabled))
         print(out if out is not None else
               "Unknown /memory subcommand. Use: pending, approve <id>, reject <id>, approval <on|off>.")
