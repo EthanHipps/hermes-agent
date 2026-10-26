@@ -13,6 +13,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from rich.panel import Panel
 
 from hermes_constants import display_hermes_home, is_termux as _is_termux_environment
 from agent.turn_context import extract_api_content_sidecar
+from hermes_cli._subprocess_compat import split_command_line
 from hermes_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL, discover_local_cdp_url, find_free_debug_port, is_browser_debug_ready,
     launch_chrome_debug, local_port_in_use, manual_chrome_debug_command)
@@ -2399,7 +2401,10 @@ class CLICommandsMixin:
                 if initial_text:
                     fh.write(initial_text)
             try:
-                subprocess.call([*shlex.split(editor), path])
+                # split_command_line keeps Windows backslash paths (POSIX shlex eats them); which()
+                # resolves a bare name to its .cmd shim (``code --wait``), which argv alone cannot start.
+                argv = split_command_line(editor)
+                subprocess.call([shutil.which(argv[0]) or argv[0], *argv[1:], path])
             except Exception:
                 # POSIX: fall back to /bin/sh, which expands what argv cannot (~, $VARS). Not on
                 # Windows: shlex.quote is /bin/sh quoting, and cmd.exe hands a non-executable editor
