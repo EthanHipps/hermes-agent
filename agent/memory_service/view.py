@@ -54,6 +54,14 @@ class UnboundMemoryService(StatelessMemoryService):
                 "identity, so nothing is loaded and nothing can be saved.")
 
 
+class AgentSpawnedMemoryService(UnboundMemoryService):
+    """A process an agent started: a kanban worker, or anything run from a worker's or a delegate's terminal."""
+
+    def degraded_warning(self) -> Optional[str]:
+        return ("Curated memory is off: this Hermes process was started by an agent (a kanban worker, or a "
+                "command run from an agent's terminal), so nothing is loaded and nothing can be saved.")
+
+
 class LimitedMemoryView(MemoryService):
     """A capability-limited view over a parent's persisted frozen identity (ruling R43-3).
 

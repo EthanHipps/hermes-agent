@@ -60,8 +60,10 @@ zero outside a kanban task (footprint ladder rung 3).
   (`kanban.dispatch_in_gateway: true`). Standalone: `plugins/kanban/systemd/hermes-kanban-dispatcher.service`.
 - **Memory:** in additive mode a worker loads native memory like any session. In authoritative mode
   it has no curated memory: `agent/memory_service/bootstrap.py::init_memory_service` gives the worker,
-  and anything run from its terminal, `UnboundMemoryService` before any provider contact, because
-  whoever creates a task chooses its workspace and a worker binds as the home owner.
+  and anything run from its terminal, an `UnboundMemoryService` before any provider contact, and
+  `admin.admin_service` refuses them the administrative identity (`hermes journey`, `hermes memory
+  migrate`). Whoever creates a task chooses its workspace, and a worker would otherwise bind as the
+  home owner.
 - **Plugin assets:** `plugins/kanban/dashboard/` (web UI) + systemd unit. `kanban_db.connect` is its
   own connection helper — do not alias it to `projects_db.connect` (a path-proximity generator did).
 

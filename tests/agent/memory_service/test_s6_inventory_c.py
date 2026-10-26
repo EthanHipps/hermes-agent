@@ -375,16 +375,27 @@ def test_a_skip_memory_worker_agent_has_no_service(tmp_path, monkeypatch):
 @pytest.mark.parametrize("spawn_env", [{"HERMES_KANBAN_TASK": "t_0123abcd"},          # dispatcher-spawned worker
                                        {"HERMES_DELEGATED_CHILD_CONTEXT": "1"}],      # started from its terminal
                          ids=["kanban_worker", "worker_descendant"])
-def test_an_agent_spawned_process_never_binds_from_its_workspace(tmp_path, monkeypatch, spawn_env):
-    """No human started it, so even in a directory the registry resolves it gets no curated memory."""
+def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, monkeypatch, spawn_env):
+    """No human started it: it neither binds from a directory the registry resolves, nor resumes the owner's
+    session, nor opens the owner's administrative identity, and nothing contacts the provider."""
+    from agent.memory_service.admin import AdminContext, admin_service
+    from agent.memory_service.errors import MemoryBlockedError
+    from agent.memory_service.host_state import load_host_state
     env = Env(tmp_path, monkeypatch)
+    env.agent("owner-1")                                        # a person's session, with its persisted identity
+    owner_records, calls = _records(), env.factory_calls
     for key, value in spawn_env.items():
         monkeypatch.setenv(key, value)
     with native_memory_sentinel(_native_dir()) as sentinel:
-        agent = env.agent("kanban-worker-1")
+        fresh, resumed = env.agent("kanban-worker-1"), env.agent("owner-1")
+        with pytest.raises(MemoryBlockedError), admin_service({"memory": env.memory}, context=AdminContext()):
+            pass
     sentinel.assert_untouched()
-    assert isinstance(agent._memory_service, UnboundMemoryService)
-    assert env.factory_calls == 0 and _records() == {}
+    assert isinstance(fresh._memory_service, UnboundMemoryService)
+    assert isinstance(resumed._memory_service, UnboundMemoryService)
+    assert env.factory_calls == calls
+    assert {name: entry for name, entry in _records().items() if name in owner_records} == owner_records
+    assert load_host_state("kanban-worker-1").disposition == "stateless"     # a later resume stays memory-less
 
 
 def test_an_additive_kanban_worker_keeps_native_memory(tmp_path, monkeypatch):

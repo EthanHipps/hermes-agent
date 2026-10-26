@@ -133,11 +133,12 @@ run from the operator's `memory.cron_scope` IDs (`resolution_source: explicit_id
 principal-global only). With no scope configured it gets `UnboundMemoryService`, which rejects every
 read and write, and `init_memory_service` gives a `cron` or `subagent` agent built without an
 explicit service the same rejection before any provider contact. It does the same for any process an
-agent started: a kanban dispatcher worker (`HERMES_KANBAN_TASK` with
-`delegation_context.is_dispatcher_owned_worker_context`) and anything run from a worker's or a
-delegate's terminal (`is_delegated_child_process_context`). No human started these, and whoever
-creates a kanban task chooses its workspace, so they never bind from their directory; a gateway or
-shell started from such a terminal therefore has no curated memory either. Delegated children stay
+agent started (`bootstrap.agent_spawned_surface`): a kanban dispatcher worker (`HERMES_KANBAN_TASK`)
+and anything run from a worker's or a delegate's terminal (`is_delegated_child_process_context`). No
+human started these, and whoever creates a kanban task chooses its workspace, so they never bind or
+resume an identity (a new session keeps a stateless record, so resuming it later stays memory-less),
+and `admin.admin_service` refuses them the administrative identity too. A gateway or Hermes session
+started from such a terminal therefore has no curated memory either. Delegated children stay
 memory-less (`DELEGATE_BLOCKED_TOOLS`, `skip_memory=True`); a child that ever needs memory must receive
 `open_fork_view` of its parent, never discover one. Gateway hygiene and manual-compression agents are
 compression surfaces and resume the live session's record.
