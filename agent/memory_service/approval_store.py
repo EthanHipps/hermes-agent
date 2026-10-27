@@ -19,7 +19,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from agent.memory_service import wire as w
 from agent.memory_service.errors import BindingInvalidError, MemoryServiceError
@@ -44,7 +44,7 @@ class ApprovalStoreError(MemoryServiceError):
 @dataclass(frozen=True)
 class PendingApproval:
     pending_id: str
-    session_id: str                     # the Hermes session whose host-state record (C2) holds the identity
+    session_id: str                     # the record key within identity_kind's namespace
     logical_session_id: str
     provider_epoch: str
     target: str
@@ -61,10 +61,12 @@ class PendingApproval:
     outcome: Optional[str] = None       # None | "unknown"
     origin: str = "foreground"
     created_at: str = ""
+    identity_kind: Literal["session", "admin"] = "session"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "schema": APPROVAL_SCHEMA, "pending_id": self.pending_id, "session_id": self.session_id,
+            "identity_kind": self.identity_kind,
             "logical_session_id": self.logical_session_id, "provider_epoch": self.provider_epoch,
             "target": self.target, "intent_kind": self.intent_kind, "request_id": self.request_id,
             "stage_handle_b64url": self.stage_handle_b64url,
@@ -85,14 +87,16 @@ class PendingApproval:
                 raise ValueError("schema or id mismatch")
             if not all(isinstance(data.get(key), str) and data[key] for key in _STRINGS):
                 raise ValueError("missing member")
+            identity_kind = data.get("identity_kind", "session")  # records before administrative approvals are sessions
             raw_auth, requirements = data["authorization"], data["approval_requirements"]
             if (data["target"] not in _TARGETS or data["intent_kind"] not in _INTENTS
+                    or identity_kind not in ("session", "admin")
                     or data["decision"] not in _DECISIONS or data["outcome"] not in (None, "unknown")
                     or (raw_auth is None) != (data["decision"] == "pending")
                     or not isinstance(requirements, list) or not all(isinstance(r, str) for r in requirements)):
                 raise ValueError("invalid member")
             return cls(
-                pending_id=pending_id, session_id=data["session_id"],
+                pending_id=pending_id, session_id=data["session_id"], identity_kind=identity_kind,
                 logical_session_id=data["logical_session_id"], provider_epoch=data["provider_epoch"],
                 target=data["target"], intent_kind=data["intent_kind"], request_id=data["request_id"],
                 stage_handle_b64url=data["stage_handle_b64url"],
@@ -109,15 +113,18 @@ class PendingApproval:
             raise ApprovalStoreError("approval record is malformed") from exc
 
 
-def load_staging_identity(session_id: str, *, hermes_home: Optional[Path] = None) -> Optional[HostStateRecord]:
+def load_staging_identity(session_id: str, *, identity_kind: Literal["session", "admin"] = "session",
+                          hermes_home: Optional[Path] = None) -> Optional[HostStateRecord]:
     """The persisted identity an approval's ``session_id`` names; None when it is missing or unreadable.
 
     The one resolver deferral and replay share: a Hermes session's host-state record, or (contract C6b-9)
-    an administrative identity's record for an ``admin:<sha256>`` key.
+    an explicitly administrative identity's record. Session IDs may have any spelling, including admin keys.
     """
     from agent.memory_service.admin import is_admin_key, load_admin_state   # late: admin -> mutation -> here
-    if is_admin_key(session_id):
-        return load_admin_state(session_id, hermes_home)
+    if identity_kind == "admin":
+        return load_admin_state(session_id, hermes_home) if is_admin_key(session_id) else None
+    if identity_kind != "session":
+        return None
     try:
         return load_host_state(session_id, hermes_home=hermes_home)
     except BindingInvalidError:

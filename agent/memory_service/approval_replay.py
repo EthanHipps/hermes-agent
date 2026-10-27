@@ -111,7 +111,7 @@ def _open_view(record: PendingApproval, raw_config: Any, backend_factory) -> Tup
         return None, ReplayStatus.UNAVAILABLE, "not_authoritative"
     if not config.target_enabled(record.target):  # D-R39-9 (§9.1 L945)
         return None, ReplayStatus.VOID, "target_disabled"
-    host = load_staging_identity(record.session_id)   # a session's record, or an administrative one (C6b-9)
+    host = load_staging_identity(record.session_id, identity_kind=record.identity_kind)
     state = host.state if host is not None else None
     if (state is None or state.provider_epoch != record.provider_epoch
             or state.identity.logical_session_id != record.logical_session_id):

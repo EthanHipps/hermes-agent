@@ -250,9 +250,10 @@ plus the origin scope, and edit or delete addresses that id through `run_curated
 `POST /api/memory/reset` takes one target and explicit scopes. A reset, and a journey edit or delete
 that needs approval, is staged under the administrative identity and answered 202 `approval_pending`
 with its pending id: `admin.admin_approval_channel` names that identity's record key (`admin:<sha256>`)
-as the approval's `session_id`, and `approval_store.load_staging_identity` resolves it for deferral and
-replay alike. `hermes_cli/web_routers/memory_approvals.py` lists pending approvals with their live
-inspection (`GET /api/memory/approvals`) and approves or denies one
+as the approval's `session_id` with `identity_kind: admin`, and `approval_store.load_staging_identity`
+resolves that namespace for deferral and replay alike. Session IDs can match an admin key without
+selecting its identity; legacy approvals without a kind remain session approvals.
+`hermes_cli/web_routers/memory_approvals.py` lists pending approvals with their live inspection (`GET /api/memory/approvals`) and approves or denies one
 (`POST /api/memory/approvals/{pending_id}`); it is an owner surface. Journey REST errors keep their
 typed payload as `detail`, and an unknown outcome is a 503, never a client error. A REST
 chat continuation that carries history but has no persisted identity fails `binding_invalid` (or
