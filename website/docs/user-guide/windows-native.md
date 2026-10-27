@@ -132,22 +132,27 @@ Idempotent. No-op on non-Windows.
 
 **Opt out:** `HERMES_DISABLE_WINDOWS_UTF8=1` in the environment falls back to the legacy cp1252 stdio path. Useful for bisecting an encoding bug; unlikely to be the right setting in normal operation.
 
-## The editor (`Ctrl-X Ctrl-E`, `/edit`)
+## The editor (`/prompt`, `hermes config edit`, `hermes journey edit`)
 
-Pre-#21561, pressing `Ctrl-X Ctrl-E` or typing `/edit` silently did nothing on Windows. prompt_toolkit has a hardcoded POSIX-absolute fallback list (`/usr/bin/nano`, `/usr/bin/pico`, `/usr/bin/vi`, …) that never resolves on Windows — even with full Git for Windows installed.
+These commands use `VISUAL` first, then `EDITOR`. They support editor arguments and
+Windows paths; quote executable paths with spaces using double quotes inside the value.
+Hermes's Windows stdio shim defaults to `EDITOR=notepad` if neither variable is set.
 
-Hermes's Windows stdio shim now sets `EDITOR=notepad` as a default. Notepad ships with every Windows install and works as a blocking editor — `subprocess.call(["notepad", file])` blocks until the window closes.
-
-**User overrides still win** (they're checked before the setdefault):
+Set your preferred editor in PowerShell:
 
 | Editor | PowerShell command |
 |---|---|
 | VS Code | `$env:EDITOR = "code --wait"` |
-| Notepad++ | `$env:EDITOR = "'C:\Program Files\Notepad++\notepad++.exe' -multiInst -nosession"` |
+| Notepad++ | `$env:EDITOR = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst -nosession'` |
 | Neovim | `$env:EDITOR = "nvim"` |
 | Helix | `$env:EDITOR = "hx"` |
 
 The `--wait` flag on VS Code is critical — without it the editor returns immediately and Hermes gets a blank buffer back.
+
+`Ctrl+G`, `Ctrl+X Ctrl+E`, and `/edit` still use prompt_toolkit's POSIX command parser,
+which can misread Windows backslashes and does not resolve `.cmd` launchers. Use
+`/prompt` for the commands above; the interactive shortcuts work with a bare editor
+executable such as `notepad`.
 
 Set it permanently in your PowerShell profile:
 
@@ -252,7 +257,7 @@ These only affect native Windows installs:
 |---|---|
 | `HERMES_GIT_BASH_PATH` | Override bash.exe discovery. Point at any bash — full Git-for-Windows, WSL bash via symlink, MSYS2, Cygwin. The installer sets this automatically. |
 | `HERMES_DISABLE_WINDOWS_UTF8` | Set to `1` to disable the UTF-8 stdio shim and fall back to the locale code page. Useful for bisecting an encoding bug. |
-| `EDITOR` / `VISUAL` | Your editor for `/edit` and `Ctrl-X Ctrl-E`. Hermes defaults to `notepad` if both are unset. |
+| `VISUAL` / `EDITOR` | Preferred editor, in that order. Hermes defaults to `notepad` if both are unset; see the editor section for interactive-shortcut limitations. |
 
 ## Uninstall
 
