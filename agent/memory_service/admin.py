@@ -51,9 +51,7 @@ logger = logging.getLogger(__name__)
 
 ADMIN_PLATFORM = "admin"
 ADMIN_STATE_DIRNAME = "admin"
-#: An approval record's ``session_id`` of exactly this shape names an administrative identity (contract C6b-9).
-#: The full match matters: Hermes session ids can be client-chosen (API server), so a mere prefix would
-#: misroute a session called ``admin:…`` away from its own record.
+#: Administrative record keys have this shape; approval channels select their namespace explicitly (C6b-9).
 ADMIN_KEY_PREFIX = "admin:"
 _ADMIN_KEY = re.compile(r"admin:[0-9a-f]{64}")
 
@@ -223,7 +221,7 @@ def admin_approval_channel(raw_config: Any, context: AdminContext, *, origin: st
     service bound (``mutation._deferrable``); a concurrent re-bind fails closed instead.
     """
     return ApprovalChannel(prompt=prompt, session_id=context.record_key(resolve_memory_service_config(raw_config)),
-                           origin=origin)
+                           origin=origin, identity_kind="admin")
 
 
 def plan_reset(snapshot: w.CuratedSnapshot, scopes: Sequence[w.ScopeRef]) -> Union[PlannedMutation, PlanShortCircuit]:

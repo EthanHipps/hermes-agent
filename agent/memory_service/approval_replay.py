@@ -102,7 +102,7 @@ def _drop(pending_id: str) -> None:
 
 def _staging_state(record: PendingApproval) -> Optional[HostSessionState]:
     """The identity *record* was staged under, or None once it is gone or no longer the one that staged it."""
-    host = load_staging_identity(record.session_id)   # a session's record, or an administrative one (C6b-9)
+    host = load_staging_identity(record.session_id, identity_kind=record.identity_kind)
     state = host.state if host is not None else None
     if (state is None or state.provider_epoch != record.provider_epoch
             or state.identity.logical_session_id != record.logical_session_id):

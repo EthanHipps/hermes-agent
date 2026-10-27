@@ -195,7 +195,7 @@ def _deferrable(approval: Optional[ApprovalChannel], service: MemoryService) -> 
     """Ruling X6b-2 (§4.1 L250): persist an approval record only when replay can resume the staging identity."""
     if approval is None or not approval.session_id:
         return False
-    record = load_staging_identity(approval.session_id)   # a session's record, or an administrative one (C6b-9)
+    record = load_staging_identity(approval.session_id, identity_kind=approval.identity_kind)
     state = getattr(service, "session_state", None)
     return record is not None and record.state is not None and state is not None and record.state == state
 
@@ -204,7 +204,7 @@ def _approval_record(service: MemoryService, request: MutationRequest, stage: w.
                      required: Tuple[str, ...], approval: ApprovalChannel, *, decision: str,
                      authorization: Optional[w.ApprovalAuthorization] = None) -> PendingApproval:
     return PendingApproval(
-        pending_id=new_pending_id(), session_id=approval.session_id,
+        pending_id=new_pending_id(), session_id=approval.session_id, identity_kind=approval.identity_kind,
         logical_session_id=service.identity.logical_session_id,
         provider_epoch=stage.expected_revision.provider_epoch, target=request.target,
         intent_kind=request.intent.kind, request_id=request.request_id,

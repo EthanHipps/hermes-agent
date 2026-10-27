@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Literal, Optional, Sequence, Tuple
 
 from agent.memory_service import wire as w
 
@@ -48,6 +48,7 @@ class ApprovalChannel:
     session_id: Optional[str] = None
     origin: str = "foreground"
     clock: Callable[[], datetime] = utcnow
+    identity_kind: Literal["session", "admin"] = "session"
 
     @property
     def available(self) -> bool:
