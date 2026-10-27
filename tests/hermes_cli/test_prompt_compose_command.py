@@ -7,6 +7,7 @@ uses). These drive a fake editor subprocess to verify read-back, header
 stripping, seeding, and the empty-buffer cancel path.
 """
 
+import json
 import os
 import sys
 
@@ -67,18 +68,41 @@ def test_empty_buffer_does_not_seed(monkeypatch, tmp_path):
 
 
 @pytest.mark.windows_only
-@pytest.mark.parametrize("shape", ["unquoted_path", "cmd_shim_on_path"])
+@pytest.mark.parametrize("shape", ["unquoted_path", "quoted_path", "cmd_shim_on_path"])
 def test_windows_editor_values_start_as_written(monkeypatch, tmp_path, shape):
     """A backslash path needs no quoting, and a ``.cmd`` shim found on PATH (``code --wait``) starts too."""
     script = _fake_editor_script(tmp_path, "Ship it.\n")
     if shape == "unquoted_path":
-        editor = f'{sys.executable} "{script}"'     # this interpreter's path has no spaces
+        if any(char.isspace() for char in sys.executable):
+            pytest.skip("An unquoted executable path requires a space-free interpreter path")
+        editor = f'{sys.executable} "{script}"'
+    elif shape == "quoted_path":
+        editor = f'"{sys.executable}" "{script}"'
     else:
         (tmp_path / "fake-editor.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
         monkeypatch.setenv("PATH", f"{tmp_path};{os.environ['PATH']}")
         editor = "fake-editor"
     monkeypatch.setenv("EDITOR", editor)
     assert _Stub()._compose_in_editor("") == "Ship it."
+
+
+@pytest.mark.windows_only
+def test_windows_editor_preserves_quoted_option_values(monkeypatch, tmp_path):
+    script = tmp_path / "record_argv.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[-1]).write_text(json.dumps(sys.argv[1:-1]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "EDITOR",
+        f'"{sys.executable}" "{script}" '
+        r'--profile="Work Profile" --user-data-dir="C:\Users\someone\Code Profile"',
+    )
+    assert json.loads(_Stub()._compose_in_editor("")) == [
+        "--profile=Work Profile", r"--user-data-dir=C:\Users\someone\Code Profile",
+    ]
 
 
 @pytest.mark.windows_only
