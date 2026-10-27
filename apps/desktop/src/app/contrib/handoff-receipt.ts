@@ -5,6 +5,7 @@ import type { HandoffReceipt } from './handoff-leg'
 // Holds the receipt in memory when the disk write fails, so this window still has the session identity.
 // saveHandoffReceipt throws when the write does not read back, so nothing is submitted without a saved receipt.
 const unsavedReceipts = new Map<string, HandoffReceipt>()
+const unsavedOnboardingFacts = new Map<string, string>()
 
 export function markFirstBuildSession(storedId: string): void {
   writeKey('hermes.onboarding.first-build.v1', storedId)
@@ -72,6 +73,25 @@ export function readHandoffReceipt(key: string): HandoffReceipt | null {
   }
 
   return value
+}
+
+// The onboarding facts this handoff staged for approval. A retry after a failed session.create reuses the
+// staged request instead of staging the same facts a second time.
+export function stagedOnboardingFacts(key: string): null | string {
+  return unsavedOnboardingFacts.get(key) ?? readKey(`${key}.memory-pending`)
+}
+
+export function saveStagedOnboardingFacts(key: string, pendingId: string): void {
+  unsavedOnboardingFacts.set(key, pendingId)
+  writeKey(`${key}.memory-pending`, pendingId)
+
+  if (readKey(`${key}.memory-pending`) !== pendingId) {
+    throw new Error(
+      `Could not save pending memory approval ${pendingId} for recovery. Retry before starting the first build.`
+    )
+  }
+
+  unsavedOnboardingFacts.delete(key)
 }
 
 export function quarantineHandoffReceipt(key: string): void {

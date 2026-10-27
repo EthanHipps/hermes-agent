@@ -853,8 +853,9 @@ class GatewaySlashCommandsMixin(
         )
 
     async def _provider_memory_reply(self, event: MessageEvent, args, set_mode_fn):
-        """/memory for provider-managed memory (§9.7 L1606; rulings R41-4, R41-5, R41-20, R41-22), or None."""
+        """/memory for provider-managed memory (§9.7 L1606; rulings R41-4, R41-5, R41-22), or None."""
         from gateway.run import _gateway_config_home
+        from gateway.session import is_paired_dm
         from hermes_cli.memory_command import provider_memory_command, requests_provider_memory
         home = _gateway_config_home()
         if not requests_provider_memory(home):
@@ -863,11 +864,13 @@ class GatewaySlashCommandsMixin(
         source = getattr(event, "source", None)
         agent = self._cached_agent_for(self._session_key_for_source(source)) if source is not None else None
         identity = gateway_identity_from_source(source)
+        private_chat = source is not None and is_paired_dm(source)
         # Ruling R41-22: provider calls (the live service's loads, R39's replay transport) never run on the event
         # loop; the per-session command guard (gateway/platforms/base.py) keeps a turn from starting meanwhile.
         return await self._run_in_executor_with_context(
             lambda: provider_memory_command(args, agent=agent, set_mode_fn=set_mode_fn, home=home,
-                                            gateway_identity=identity, require_gateway_principal=True))
+                                            gateway_identity=identity, require_gateway_principal=True,
+                                            private_chat=private_chat))
 
     async def _handle_skills_command(self, event: MessageEvent) -> str:
         """Handle /skills on the gateway — pending skill-write review only (hub stays CLI-only). Gated

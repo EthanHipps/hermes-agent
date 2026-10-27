@@ -134,8 +134,8 @@ def test_pending_review_then_approve_replays_the_byte_free_commit(env, native_di
     pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
     record = load_pending_approval(pid)
     with native_memory_sentinel(native_dir) as sentinel:
-        listing = handle_pending_subcommand(wa.MEMORY, ["pending"])
-        result = handle_pending_subcommand(wa.MEMORY, ["approve", pid])
+        listing = handle_pending_subcommand(wa.MEMORY, ["pending"], memory_principal=None)
+        result = handle_pending_subcommand(wa.MEMORY, ["approve", pid], memory_principal=None)
     sentinel.assert_untouched()
     assert pid in listing and "prefers terse replies" in listing and "target_user" in listing
     assert result == f"{pid}: approved and saved."
@@ -156,7 +156,7 @@ def test_native_pending_records_stay_dormant(env, native_dir):
                             summary="native", origin="foreground")
     before = _tree(_home() / "pending")
     with native_memory_sentinel(native_dir) as sentinel:
-        outputs = [handle_pending_subcommand(wa.MEMORY, args, memory_store=None) for args in
+        outputs = [handle_pending_subcommand(wa.MEMORY, args, memory_store=None, memory_principal=None) for args in
                    ([], ["pending"], ["approve", "all"], ["reject", "all"], ["approve", native["id"]], ["reject", native["id"]])]
     sentinel.assert_untouched()
     assert _tree(_home() / "pending") == before and [r["id"] for r in wa.list_pending(wa.MEMORY)] == [native["id"]]
@@ -212,9 +212,9 @@ def test_an_unknown_outcome_is_reported_until_a_typed_outcome(env, native_dir):
     agent = _agent(env.memory)
     pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
     env.store.fail_transport("commit_curated", phase="after_publish", times=2)
-    first = handle_pending_subcommand(wa.MEMORY, ["approve", pid])
+    first = handle_pending_subcommand(wa.MEMORY, ["approve", pid], memory_principal=None)
     assert "did not confirm" in first and load_pending_approval(pid).outcome == "unknown"
-    assert handle_pending_subcommand(wa.MEMORY, ["approve", pid]) == f"{pid}: approved and saved."
+    assert handle_pending_subcommand(wa.MEMORY, ["approve", pid], memory_principal=None) == f"{pid}: approved and saved."
     commits = [w.canonical_json(c.to_wire()) for c in _calls(env, "commit_curated")]
     assert len(commits) == 3 and len(set(commits)) == 1            # §9.5 L1562: only the identical request
     assert list_pending_approvals() == []
@@ -224,7 +224,7 @@ def test_an_expired_stage_is_reported_and_dropped_on_review(env, native_dir):
     agent = _agent(env.memory)
     json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))
     env.store.clock.advance(3601)
-    listing = handle_pending_subcommand(wa.MEMORY, ["pending"])
+    listing = handle_pending_subcommand(wa.MEMORY, ["pending"], memory_principal=None)
     assert "expired before approval; nothing was saved" in listing and list_pending_approvals() == []
 
 
@@ -233,13 +233,25 @@ def test_reject_persists_nothing_and_calls_no_provider(env, native_dir):
     pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
     before, views = _sinks(), len(env.backends)
     with native_memory_sentinel(native_dir) as sentinel:
-        out = handle_pending_subcommand(wa.MEMORY, ["reject", pid])
+        out = handle_pending_subcommand(wa.MEMORY, ["reject", pid], memory_principal=None)
     sentinel.assert_untouched()
     after = _sinks()
     assert out == f"Rejected pending memory write '{pid}'. Nothing was saved."
     assert after["pending"] == before["pending"] and after["memories"] == before["memories"]
     assert after["memory_service/approvals"] == {}
     assert len(env.backends) == views and list_pending_approvals() == [] and _calls(env, "commit_curated") == []
+
+
+def test_a_caller_that_names_no_principal_is_refused_not_treated_as_the_owner(env, native_dir):
+    """A /memory path that never says whose approvals it may touch (a gateway's additive fallback reached in a
+    provider-managed home) must not list, settle or drop anyone's record."""
+    agent = _agent(env.memory)
+    pid = json.loads(agent._invoke_tool("memory", USER_ADD, "task-1"))["pending_id"]
+    views = len(env.backends)
+    outputs = [handle_pending_subcommand(wa.MEMORY, args) for args in (["pending"], ["approve", pid], ["reject", pid])]
+    assert all("Nothing was changed" in out and pid not in out for out in outputs)
+    assert [p for p, _ in list_pending_approvals()] == [pid]
+    assert len(env.backends) == views and _calls(env, "commit_curated") == []
 
 
 def test_a_mandatory_approval_fails_closed_without_any_channel(env, native_dir):
@@ -269,8 +281,8 @@ def test_no_provider_token_reaches_the_model_or_the_ui(env, native_dir, answer):
     tool_out = agent._invoke_tool("memory", USER_ADD, "task-1")
     pid = json.loads(tool_out)["pending_id"]
     record = load_pending_approval(pid)
-    listing = handle_pending_subcommand(wa.MEMORY, ["pending"])
-    approved = handle_pending_subcommand(wa.MEMORY, ["approve", pid])
+    listing = handle_pending_subcommand(wa.MEMORY, ["pending"], memory_principal=None)
+    approved = handle_pending_subcommand(wa.MEMORY, ["approve", pid], memory_principal=None)
     seen = answer("once")
     inline_out = agent._invoke_tool("memory", {"action": "add", "target": "user", "content": "likes tea"}, "task-2")
     handle = agent._memory_service.identity.opaque_binding_b64url

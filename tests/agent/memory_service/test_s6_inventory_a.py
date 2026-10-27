@@ -1,10 +1,9 @@
 """S6 inventory suite A for R41 (§13.1 L2211; §14.1 row 41 L2311).
 
-The non-agent memory command path, CLI/TUI/Gateway /memory, setup/status/off, doctor and CLI reset
-route through MemoryService, or fail closed before any provider contact where the approval flow is
-not yet available (ruling R41-1); nothing touches the native directory; gateway principals map
-explicitly (I3, §13.1 L2191). Helpers are local (reconciliation rule 10: shared test support is
-frozen)."""
+The non-agent memory command path, CLI/TUI/Gateway /memory, setup/status/off, doctor, CLI reset and
+onboarding personalization route through MemoryService; nothing touches the native directory; gateway
+principals map explicitly and review only their own pending writes (I3, §13.1 L2191). Helpers are local
+(reconciliation rule 10: shared test support is frozen)."""
 
 import asyncio
 import json
@@ -188,7 +187,7 @@ def _cli(agent, running=False):
 
 
 def test_cli_memory_status_uses_the_live_service(authoritative_env, native_dir, capsys):
-    from agent.memory_service.status import format_scope_ref
+    from agent.memory_service.admin import format_scope
     agent = _agent(authoritative_env.memory, session_id="cli-status")
     loads = authoritative_env.backends[-1].count("load_curated")
     with native_memory_sentinel(native_dir) as sentinel:
@@ -196,7 +195,7 @@ def test_cli_memory_status_uses_the_live_service(authoritative_env, native_dir, 
     sentinel.assert_untouched()
     out = capsys.readouterr().out
     snapshot = agent._memory_service.load_curated("memory")
-    assert format_scope_ref(snapshot.default_write_scope) in out and agent._memory_service.identity.binding_revision in out
+    assert format_scope(snapshot.default_write_scope) in out and agent._memory_service.identity.binding_revision in out
     assert authoritative_env.backends[-1].count("load_curated") > loads and authoritative_env.backends[-1].count("bind_session") == 1
     _no_opaque(out, agent._memory_service)
 
@@ -276,8 +275,9 @@ class _Gateway(GatewaySlashCommandsMixin):
         pass
 
 
-def _event(args, user_id="111", alt=None):
-    source = SimpleNamespace(platform=SimpleNamespace(value="telegram"), user_id=user_id, user_id_alt=alt)
+def _event(args, user_id="111", alt=None, chat_type=None, chat_id=None):
+    source = SimpleNamespace(platform=SimpleNamespace(value="telegram"), user_id=user_id, user_id_alt=alt,
+                             chat_type=chat_type, chat_id=chat_id)
     return SimpleNamespace(source=source, get_command_args=lambda: args)
 
 
@@ -350,18 +350,70 @@ def test_additive_gateway_memory_stays_on_the_base_path(tmp_path, monkeypatch, g
     assert hops == [] and out.startswith("memory.write_approval")
 
 
-def test_a_multi_principal_gateway_never_reviews_pending_writes(authoritative_env, gateway_home, monkeypatch):
-    """Ruling R41-20: R39's review renders every principal's staged diff; a multi-principal gateway never calls it."""
-    from hermes_cli.memory_command import GATEWAY_REVIEW_UNAVAILABLE
-    agent = _agent({**authoritative_env.memory, "gateway_principals": {**GATEWAY, "telegram:222": "other"}},
-                   platform="telegram", user_id="111", session_id="gw-multi")
-    calls = []
-    monkeypatch.setattr("hermes_cli.write_approval_commands.handle_pending_subcommand",
-                        lambda *a, **k: calls.append(a) or "listed")
+MULTI = {**GATEWAY, "telegram:222": "other"}
+
+
+def _defer_for(agent, text):
+    from agent.memory_service.approval import ApprovalChannel
+    from agent.memory_service.mutation import MutationStatus, PlannedMutation, run_curated_mutation
+
+    def planner(snapshot):
+        cand = w.CandidateEntry(client_ref="c1", text=text, destination_scope=snapshot.default_write_scope,
+                                target="user", proposed_policy_key=None, import_source_identity=None,
+                                memory_admission=None)
+        return PlannedMutation(intent=w.MutationIntent(kind="add"), mutation_delta=(w.MutationDeltaItem(
+            action="add", client_ref="c1"),), candidate_entries=(cand,),
+            requested_write_scopes=(snapshot.default_write_scope,), projected_texts=(text,), message="Entry added.")
+    outcome = run_curated_mutation(agent._memory_service, "user", planner,
+                                   approval=ApprovalChannel(session_id=agent.session_id))
+    assert outcome.status is MutationStatus.PENDING_APPROVAL
+    return outcome.pending_id
+
+
+def _staged_by(pid, principal):
+    """A copy of record *pid* staged under another principal's session. The fake provider binds one principal,
+    so the other identity exists only as host state: enough for the filter, which never contacts the provider."""
+    import dataclasses
+    from agent.memory_service.approval_store import load_pending_approval, save_pending_approval
+    from agent.memory_service.host_state import HostStateRecord, load_host_state, save_host_state
+    record = load_pending_approval(pid)
+    state = load_host_state(record.session_id).state
+    lsid = f"lsid-{principal}"
+    save_host_state(HostStateRecord(f"gw-{principal}", "provider_authoritative", dataclasses.replace(
+        state, identity=dataclasses.replace(state.identity, principal_id=principal, logical_session_id=lsid))))
+    save_pending_approval(dataclasses.replace(record, pending_id="fedcba987654", session_id=f"gw-{principal}",
+                                              logical_session_id=lsid))
+    return "fedcba987654"
+
+
+def test_a_multi_principal_gateway_reviews_only_the_callers_own_pending_writes(authoritative_env, gateway_home):
+    """Each mapped user reviews, approves and rejects only what their own principal staged."""
+    from agent.memory_service.approval_store import list_pending_approvals
+    agent = _agent({**authoritative_env.memory, "gateway_principals": MULTI}, platform="telegram", user_id="111",
+                   session_id="gw-mine")
+    mine = _defer_for(agent, "prefers terse replies")
+    theirs = _staged_by(mine, "other")
     runner = _Gateway(agent)
-    for args in ("", "pending", "approve all", "reject abc"):
-        assert GATEWAY_REVIEW_UNAVAILABLE in asyncio.run(runner._handle_memory_command(_event(args)))
-    assert calls == []
+    listed = asyncio.run(runner._handle_memory_command(_event("pending", chat_type="dm", chat_id="c1")))
+    assert mine in listed and "prefers terse replies" in listed and theirs not in listed
+    for args in (f"approve {theirs}", f"reject {theirs}"):
+        assert "No pending memory write" in asyncio.run(runner._handle_memory_command(_event(args)))
+    asyncio.run(runner._handle_memory_command(_event("approve all")))
+    assert [pid for pid, _ in list_pending_approvals()] == [theirs]          # only the caller's own was settled
+    assert [r.text for r in authoritative_env.store.records_for(w.ScopeRef(kind="principal_global", id="ethan"),
+                                                                  "user")] == ["prefers terse replies"]
+
+
+def test_a_multi_principal_gateway_shows_pending_bodies_only_in_a_private_chat(authoritative_env, gateway_home):
+    """A group chat holds other principals' users, so review there names the change but never its text."""
+    agent = _agent({**authoritative_env.memory, "gateway_principals": MULTI}, platform="telegram", user_id="111",
+                   session_id="gw-group-review")
+    pid = _defer_for(agent, "prefers terse replies")
+    runner = _Gateway(agent)
+    group = asyncio.run(runner._handle_memory_command(_event("pending", chat_type="group", chat_id="g1")))
+    private = asyncio.run(runner._handle_memory_command(_event("pending", chat_type="dm", chat_id="c1")))
+    assert pid in group and "prefers terse replies" not in group
+    assert pid in private and "prefers terse replies" in private
 
 
 def test_a_single_principal_gateway_reaches_the_shared_handler(authoritative_env, gateway_home, monkeypatch):
@@ -383,9 +435,11 @@ def test_load_on_disk_store_refuses_in_authoritative_mode(authoritative_env, nat
     assert refused.value.code == "native_dormant"
 
 
-def test_onboarding_personalization_never_writes_user_md(authoritative_env, tmp_path, monkeypatch):
-    """§9.7 L1605 (R41-19): fails closed before any provider contact; the target:user mutation is the R41 follow-up's."""
+def test_onboarding_personalization_waits_for_approval_and_never_writes_user_md(authoritative_env, tmp_path, monkeypatch):
+    """§9.7 L1605: the onboarding facts are a target:user add through MemoryService, waiting for its approval."""
+    from agent.memory_service.approval_replay import ReplayStatus, replay_pending_approval
     from hermes_cli.profiles import get_profile_dir
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tui_gateway.onboarding_personalization import remember_onboarding
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     default = get_profile_dir("default")
@@ -394,11 +448,21 @@ def test_onboarding_personalization_never_writes_user_md(authoritative_env, tmp_
     native.mkdir(parents=True, exist_ok=True)
     (native / "USER.md").write_text("dormant profile\n", encoding="utf-8")
     before = (native / "USER.md").stat()
-    with native_memory_sentinel(native) as sentinel, pytest.raises(ValueError, match="approval"):
-        remember_onboarding({"name": "Ethan"})
+    with native_memory_sentinel(native) as sentinel:
+        result = remember_onboarding({"name": "Ethan"})
     sentinel.assert_untouched()
     assert (native / "USER.md").stat().st_mtime_ns == before.st_mtime_ns
-    assert authoritative_env.backends == []   # C67-10b: no provider contact
+    assert (result["saved"], result["profile"], result["target"]) == (False, "default", "user") and result["pending_id"]
+    assert authoritative_env.store.records == {}                           # nothing committed before approval
+    token = set_hermes_home_override(default)
+    try:
+        replayed = replay_pending_approval(result["pending_id"], raw_config={"memory": authoritative_env.memory},
+                                           principal=None)
+    finally:
+        reset_hermes_home_override(token)
+    assert replayed.status is ReplayStatus.COMMITTED
+    [record] = authoritative_env.store.records.values()
+    assert record.target == "user" and "User prefers to be called: Ethan" in record.text
 
 
 def _create_clone():
@@ -452,9 +516,11 @@ def _poison(native_dir):
     return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()}
 
 
-@pytest.mark.parametrize("over,code", [({}, 1), ({"yes": True}, 2), ({"scope": None}, 2), ({"target": "all"}, 2),
+@pytest.mark.parametrize("over,code", [({}, 2), ({"yes": True}, 2), ({"scope": None}, 2), ({"target": "all"}, 2),
                                        ({"scope": ["repo:x"]}, 2)])
 def test_cli_reset_requires_scope_and_approval_and_deletes_nothing(authoritative_env, native_dir, over, code, capsys):
+    """Every refusal comes before any provider contact; with valid arguments the refusal is a stdin that cannot
+    answer the approval (pytest's), and nothing native is touched either way."""
     from hermes_cli.main_agent_cmds import cmd_memory
     _write_config(authoritative_env.memory)
     before = _poison(native_dir)
@@ -463,10 +529,9 @@ def test_cli_reset_requires_scope_and_approval_and_deletes_nothing(authoritative
     sentinel.assert_untouched()
     assert exited.value.code == code
     assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
-    assert authoritative_env.backends == []          # no case contacts the provider (R41-1)
+    assert authoritative_env.backends == []
     if not over:
-        out = capsys.readouterr().out
-        assert "reset" in out and "repository:repo-1" in out
+        assert "interactive terminal" in capsys.readouterr().out
 
 
 def test_invalid_authoritative_config_reset_deletes_nothing(authoritative_env, native_dir):

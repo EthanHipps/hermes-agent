@@ -115,26 +115,56 @@ def off_command(config: Mapping[str, Any]) -> int:
     return 2
 
 
+_AUTHORITATIVE_ONLY_FLAGS = (("scope", "--scope"), ("organization", "--organization"), ("project", "--project"),
+                             ("repository", "--repository"))
+
+
 def authoritative_only_flags(args: Any) -> Tuple[str, ...]:
     """Flags that mean something only to authoritative memory; additive refuses them (ruling R41-8)."""
-    return ("--scope",) if getattr(args, "scope", None) else ()
+    return tuple(flag for attr, flag in _AUTHORITATIVE_ONLY_FLAGS if getattr(args, attr, None))
+
+
+def _reset_prompt(approval: Any) -> bool:
+    """Only ever True or False: EOF or Ctrl-C at the question denies, so a reset never waits in the pending
+    approvals for someone else to decide."""
+    from hermes_cli.memory_migrate import _ask
+    print("\n" + approval.text)
+    return _ask("\n  Approve this reset? [y/N] ")
+
+
+def _report_unknown(payload: Mapping[str, Any]) -> None:
+    pid = payload.get("pending_id")
+    kept = (f" The approved request is kept as {pid}: type '/memory approve {pid}' in a Hermes chat to retry it "
+            "unchanged. Re-running this reset is also safe." if pid else
+            " Nothing was kept for an identical retry; check the memory, then re-run the reset if it is still needed.")
+    print(f"\n  The memory provider did not confirm whether this reset was saved.{kept}\n")
 
 
 def reset_command(config: Mapping[str, Any], args: Any) -> int:
-    """§9.7 L1620 in wave 6b: an explicit target and scope, then the mandatory approval (§9.5 L1535), which this
-    version cannot request, so the reset fails closed before any provider contact (rulings R41-1, R41-8; §9.5 L1538).
-    Never a native delete (§9.1 L950). The approved scoped commit is the R41 follow-up's (C6b-5, C6b-2)."""
-    from agent.memory_service.status import format_scope_ref, parse_scope_ref
+    """§9.7 L1620: one target, explicit scopes and an explicit administrative chain, approved at this terminal
+    (§9.5 L1535), then one scoped commit under the administrative identity. Never a native delete (§9.1 L950).
+
+    The approval is written ahead of the commit (R39-7), so when the provider does not confirm the result the
+    identical request is kept and can be approved again. Exit codes: 0 = committed, or declined at the prompt;
+    1 = not changed for another reason, or the outcome is unknown; 2 = refused before anything was staged.
+    """
+    from agent.memory_service.admin import (ADMIN_FAILURES, AdminContext, AdminIdentityError, admin_approval_channel,
+                                            admin_service, outcome_payload, parse_scope_selector, plan_reset,
+                                            unavailable_payload)
+    from agent.memory_service.mutation import MutationStatus, run_curated_mutation
+    from hermes_cli.memory_migrate import _interactive
     target = getattr(args, "target", "all")
     if target not in ("memory", "user"):
         print("\n  Authoritative reset names one target: --target memory or --target user. Nothing was reset.\n")
         return 2
     if getattr(args, "yes", False):
-        print("\n  --yes cannot waive the mandatory reset approval (§9.5). Nothing was reset.\n")
+        print("\n  --yes cannot waive a reset's approval. Nothing was reset.\n")
         return 2
     try:
-        scopes = tuple(parse_scope_ref(s) for s in (getattr(args, "scope", None) or ()))
-    except ValueError as exc:
+        scopes = tuple(parse_scope_selector(s) for s in (getattr(args, "scope", None) or ()))
+        context = AdminContext.from_fields(getattr(args, "organization", None), getattr(args, "project", None),
+                                           getattr(args, "repository", None))
+    except AdminIdentityError as exc:
         print(f"\n  {exc}. Nothing was reset.\n")
         return 2
     if not scopes or len(set(scopes)) != len(scopes):
@@ -145,7 +175,30 @@ def reset_command(config: Mapping[str, Any], args: Any) -> int:
     except MemoryConfigurationError as exc:
         print(f"\n  Invalid authoritative memory configuration: {exc}. Nothing was reset.\n")
         return 1
-    needs = (("target_user",) if target == "user" else ()) + ("reset",)   # §9.3 L1336 order; §9.5 L1532, L1535
-    print(f"\n  Resetting {target} in {', '.join(format_scope_ref(s) for s in scopes)} needs approval "
-          f"({', '.join(needs)}), which this version of Hermes cannot request yet; nothing was staged or changed.\n")
-    return 1
+    if not _interactive():
+        print("\n  'hermes memory reset' needs an interactive terminal: a reset always needs your approval, and it "
+              "cannot be waived. Nothing was sent.\n")
+        return 2
+    try:
+        approval = admin_approval_channel(config, context, origin="cli_reset", prompt=_reset_prompt)
+        with admin_service(config, context=context) as service:
+            outcome = run_curated_mutation(service, target, lambda snapshot: plan_reset(snapshot, scopes),
+                                           actor_kind="human", initiating_surface="cli_reset", approval=approval)
+    except ADMIN_FAILURES as exc:
+        print(f"\n  {unavailable_payload(exc)['message']} Nothing was reset.\n")
+        return 1
+    payload = outcome_payload(outcome)
+    if outcome.status is MutationStatus.COMMITTED:
+        print(f"\n  {payload['message']}" + (f"\n  Warning: {payload['warning']}" if payload.get("warning") else "") + "\n")
+        return 0
+    if outcome.status is MutationStatus.DENIED:
+        print("\n  Reset not approved. Nothing was changed.\n")
+        return 0
+    if outcome.status is MutationStatus.OUTCOME_UNKNOWN:
+        _report_unknown(payload)
+        return 1
+    chainless = context == AdminContext() and any(not s.startswith("global:") for s in payload.get("scopes", ()))
+    hint = (" To reset an organization, project or repository scope, name its chain with --organization, "
+            "--project and --repository." if payload.get("code") == "unauthorized_scope" and chainless else "")
+    print(f"\n  {payload.get('message', 'Nothing was reset.')}{hint}\n")
+    return 2 if outcome.status is MutationStatus.SHORT_CIRCUIT else 1

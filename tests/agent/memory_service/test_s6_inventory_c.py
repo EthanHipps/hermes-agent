@@ -386,7 +386,7 @@ def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, 
     from agent.memory_service.errors import MemoryBlockedError
     from agent.memory_service.host_state import load_host_state
     from agent.memory_service.approval_replay import (
-        RejectStatus, ReplayStatus, reject_pending_approval, replay_pending_approval, review_pending_approvals)
+        RejectStatus, ReplayStatus, pending_ids, reject_pending_approval, replay_pending_approval, review_pending_approvals)
     from agent.memory_service.approval_store import load_pending_approval
     from agent.memory_service.mutation import MutationStatus, run_curated_mutation
     from hermes_cli.memory_command import provider_memory_command
@@ -418,9 +418,10 @@ def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, 
             reply = provider_memory_command(args, agent=fresh, set_mode_fn=None)
             assert "owner's private preference" not in reply and "approved and saved" not in reply
             assert load_pending_approval(pid) == saved
-        assert review_pending_approvals(raw_config={"memory": env.memory}) == []
-        assert replay_pending_approval(pid, raw_config={"memory": env.memory}).status is ReplayStatus.UNAVAILABLE
-        assert reject_pending_approval(pid) is RejectStatus.UNAVAILABLE
+        assert pending_ids(principal=None) == []
+        assert review_pending_approvals(raw_config={"memory": env.memory}, principal=None) == []
+        assert replay_pending_approval(pid, raw_config={"memory": env.memory}, principal=None).status is ReplayStatus.UNAVAILABLE
+        assert reject_pending_approval(pid, principal=None) is RejectStatus.UNAVAILABLE
         assert load_pending_approval(pid) == saved
     sentinel.assert_untouched()
     assert isinstance(fresh._memory_service, UnboundMemoryService)

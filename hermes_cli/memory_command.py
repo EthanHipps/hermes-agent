@@ -5,9 +5,11 @@ session and slash worker) and the gateway (§9.7 L1605, L1606; the goal_command.
 request authoritative mode: each surface then runs its pre-R41 code unchanged (§9.10 L1674).
 Otherwise nothing here builds, stats or reads a native store (§9.1 L950). The live session's service
 answers (ruling R41-4), or the command says there is no live session. A gateway caller must also name
-a mapped principal (§4.1 L252; I3; ruling R41-5), and a gateway that maps users to more than one
-principal never reviews pending memory writes (ruling R41-20). Status is content-free:
-``binding_revision`` is the only revision shown (§9.3 L987, L1167; ruling R41-3; contract C6b-13).
+a mapped principal (§4.1 L252; I3; ruling R41-5), and reviews, approves and rejects only the pending
+memory writes that principal staged. On a gateway that maps users to more than one principal, a chat
+other than a private one may hold other principals' users, so its review names each change but never
+shows its text. Status is content-free: ``binding_revision`` is the only revision shown (§9.3 L987,
+L1167; ruling R41-3; contract C6b-13).
 """
 
 from __future__ import annotations
@@ -20,10 +22,7 @@ logger = logging.getLogger(__name__)
 
 UNKNOWN_SUBCOMMAND = "Unknown /memory subcommand. Use: status, pending, approve <id>, reject <id>, approval <on|off>."
 NOT_AVAILABLE = "Curated memory is not available in this chat."
-GATEWAY_REVIEW_UNAVAILABLE = ("Pending memory writes are reviewed from the CLI while this gateway maps its users "
-                              "to more than one memory principal.")
 _SERVICE_SUBCOMMANDS = frozenset({"", "status", "approve", "apply"})
-_REVIEW_SUBCOMMANDS = frozenset({"", "pending", "approve", "apply", "reject", "deny", "drop"})
 
 
 def _memory_section(home: Optional[Path]) -> Mapping[str, Any]:
@@ -41,33 +40,36 @@ def requests_provider_memory(home: Optional[Path] = None) -> bool:
     return requests_authoritative_mode({"memory": dict(_memory_section(home))})
 
 
-def _pending_subcommand(args: Sequence[str], set_mode_fn) -> Optional[str]:
+def _pending_subcommand(args: Sequence[str], set_mode_fn, *, principal: Optional[str],
+                        bodies: bool) -> Optional[str]:
     """The single call into the shared write-approval handler. `memory_store=None`: nothing here applies a
     native-shaped record (§9.1 L950). In a home that requests authoritative mode, R39's branch of
-    `handle_pending_subcommand` answers from handle-only approval records (contract C6b-4); before R39 the
-    base handler answers and applies nothing."""
+    `handle_pending_subcommand` answers from handle-only approval records (contract C6b-4), limited to
+    *principal*'s records unless it is None (an owner surface)."""
     from hermes_cli.write_approval_commands import handle_pending_subcommand
     from tools import write_approval as wa
-    return handle_pending_subcommand(wa.MEMORY, list(args), memory_store=None, set_mode_fn=set_mode_fn)
+    return handle_pending_subcommand(wa.MEMORY, list(args), memory_store=None, set_mode_fn=set_mode_fn,
+                                     memory_principal=principal, memory_bodies=bodies)
 
 
-def _gateway_principal_matches(section: Mapping[str, Any], identity: Any, service: Any) -> bool:
-    """I3 for /memory: the caller maps to exactly one principal, and it is the live session's (R41-5)."""
+def _gateway_principal(section: Mapping[str, Any], identity: Any, service: Any) -> Optional[str]:
+    """I3 for /memory: the one principal the caller maps to, provided it is the live session's (R41-5)."""
     from agent.memory_service.config import MemoryConfigurationError
     from agent.memory_service.principal import UnmappedPrincipalMemoryService, map_gateway_principal
     if identity is None or isinstance(service, UnmappedPrincipalMemoryService):
-        return False
+        return None
     try:
         principal = map_gateway_principal({"memory": dict(section)}, identity)
     except MemoryConfigurationError:
         logger.warning("memory.gateway_principals is invalid; /memory answers no gateway user")
-        return False
+        return None
     live = getattr(service, "identity", None)
-    return principal is not None and (live is None or live.principal_id == principal)
+    return principal if principal is not None and (live is None or live.principal_id == principal) else None
 
 
 def _serves_several_principals(section: Mapping[str, Any]) -> bool:
-    """Ruling R41-20: one home has one approval store; a gateway reviews it only for a single principal."""
+    """One home has one approval store; when its gateway users map to more than one principal, a shared chat
+    may hold users of a principal other than the one whose pending writes are being reviewed."""
     from agent.memory_service.principal import gateway_principals
     configured = str(section.get("principal_id") or "").strip()
     named = set(gateway_principals({"memory": dict(section)}).values()) | ({configured} if configured else set())
@@ -116,8 +118,13 @@ def render_memory_status(status: Any) -> str:
 
 def provider_memory_command(args: Sequence[str], *, agent: Any, set_mode_fn: Optional[Callable[[bool], Any]],
                             busy: bool = False, home: Optional[Path] = None, gateway_identity: Any = None,
-                            require_gateway_principal: bool = False) -> Optional[str]:
-    """``/memory`` text for provider-managed memory, or ``None`` for "additive: use the existing path"."""
+                            require_gateway_principal: bool = False, private_chat: bool = False) -> Optional[str]:
+    """``/memory`` text for provider-managed memory, or ``None`` for "additive: use the existing path".
+
+    A gateway caller (``require_gateway_principal``) acts only on its own principal's pending writes;
+    ``private_chat`` says the reply reaches that user alone, the only place a multi-principal gateway shows
+    the text of a pending change.
+    """
     from agent.memory_service.bootstrap import requests_authoritative_mode
     from agent.memory_service.service import is_provider_managed
 
@@ -128,25 +135,26 @@ def provider_memory_command(args: Sequence[str], *, agent: Any, set_mode_fn: Opt
         return None
     args = list(args)
     sub = args[0].lower() if args else ""
-    if require_gateway_principal and not _gateway_principal_matches(section, gateway_identity,
-                                                                    service if managed else None):
-        return NOT_AVAILABLE
-    review_blocked = (require_gateway_principal and sub in _REVIEW_SUBCOMMANDS
-                      and _serves_several_principals(section))
+    principal = None
+    if require_gateway_principal:
+        principal = _gateway_principal(section, gateway_identity, service if managed else None)
+        if principal is None:
+            return NOT_AVAILABLE
+    bodies = not (require_gateway_principal and not private_chat and _serves_several_principals(section))
 
-    def pending() -> str:
-        return GATEWAY_REVIEW_UNAVAILABLE if review_blocked else (_pending_subcommand(args, set_mode_fn) or "")
+    def pending() -> Optional[str]:
+        return _pending_subcommand(args, set_mode_fn, principal=principal, bodies=bodies)
 
     if not managed:
         if sub == "status":
             return _no_session_status(section)
         if not args:
-            return _no_session_status(section) + "\n\n" + pending()
-        return pending() if review_blocked else (_pending_subcommand(args, set_mode_fn) or UNKNOWN_SUBCOMMAND)
+            return _no_session_status(section) + "\n\n" + (pending() or "")
+        return pending() or UNKNOWN_SUBCOMMAND
     if busy and sub in _SERVICE_SUBCOMMANDS:
         return f"A turn is running; /memory {sub or 'status'} is available between turns."
     if sub == "status" or not args:
         from agent.memory_service.status import collect_memory_status
         text = render_memory_status(collect_memory_status(service))
-        return text if sub else text + "\n\n" + pending()
-    return pending() if review_blocked else (_pending_subcommand(args, set_mode_fn) or UNKNOWN_SUBCOMMAND)
+        return text if sub else text + "\n\n" + (pending() or "")
+    return pending() or UNKNOWN_SUBCOMMAND

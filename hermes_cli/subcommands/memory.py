@@ -36,7 +36,9 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     _reset_parser.add_argument(
         "--scope", action="append", metavar="SCOPE", default=None,
         help="authoritative only: a scope to reset — global:<principal>, organization:<id>, project:<id> "
-             "or repository:<id>; repeatable")
+             "or repository:<id>; repeatable. A non-global scope needs its chain (--organization, --project, "
+             "--repository)")
+    _add_context_flags(_reset_parser, note="authoritative only: ")
     _migrate_parser = memory_sub.add_parser(
         "migrate", help="Move native MEMORY.md/USER.md into the authoritative memory provider (§9.9)",
         description="Exit codes: 0 = your decision was carried out; 1 = stopped or rejected (state may remain); "
@@ -66,8 +68,8 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     memory_parser.set_defaults(func=cmd_memory)
 
 
-def _add_context_flags(parser) -> None:
+def _add_context_flags(parser, *, note: str = "") -> None:
     """Contract C7F-4: the explicit administrative chain (C6b-5 ``AdminContext.from_fields``); reset reuses it."""
-    parser.add_argument("--organization", default=None, help="Registry organization id of the destination chain")
-    parser.add_argument("--project", default=None, help="Registry project id of the destination chain")
-    parser.add_argument("--repository", default=None, help="Registry repository id of the destination chain")
+    parser.add_argument("--organization", default=None, help=f"{note}Registry organization id of the destination chain")
+    parser.add_argument("--project", default=None, help=f"{note}Registry project id of the destination chain")
+    parser.add_argument("--repository", default=None, help=f"{note}Registry repository id of the destination chain")

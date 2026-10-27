@@ -27,6 +27,7 @@ from agent.memory_service.approval_store import (
     load_staging_identity, save_pending_approval, valid_pending_id)
 from agent.memory_service.errors import (
     MemoryBlockedError, MemoryServiceError, ProviderError, ProviderTransportError, TargetDisabledError)
+from agent.memory_service.identity import HostSessionState
 from agent.memory_service.mutation import _OutcomeUnknown, _with_exact_retry
 from agent.memory_service.service import CommitIntent, InspectRequest
 
@@ -100,7 +101,24 @@ def _drop(pending_id: str) -> None:
         logger.warning("could not remove a settled memory approval record")
 
 
-def _open_view(record: PendingApproval, raw_config: Any, backend_factory) -> Tuple[Any, Optional[ReplayStatus], Optional[str]]:
+def _staging_state(record: PendingApproval) -> Optional[HostSessionState]:
+    """The identity *record* was staged under, or None once it is gone or no longer the one that staged it."""
+    host = load_staging_identity(record.session_id, identity_kind=record.identity_kind)
+    state = host.state if host is not None else None
+    if (state is None or state.provider_epoch != record.provider_epoch
+            or state.identity.logical_session_id != record.logical_session_id):
+        return None  # §4.1 L250
+    return state
+
+
+def _visible_to(principal: Optional[str], state: Optional[HostSessionState]) -> bool:
+    """``principal=None`` is an owner surface. Anyone else sees only what their own principal staged; a record
+    whose staging identity cannot be read is shown to nobody but the owner (I3)."""
+    return principal is None or (state is not None and state.identity.principal_id == principal)
+
+
+def _open_view(record: PendingApproval, state: Optional[HostSessionState], raw_config: Any,
+               backend_factory) -> Tuple[Any, Optional[ReplayStatus], Optional[str]]:
     from agent.memory_service.bootstrap import open_session_view
     from agent.memory_service.config import MemoryConfigurationError, MemoryMode, resolve_memory_service_config
 
@@ -112,10 +130,7 @@ def _open_view(record: PendingApproval, raw_config: Any, backend_factory) -> Tup
         return None, ReplayStatus.UNAVAILABLE, "not_authoritative"
     if not config.target_enabled(record.target):  # D-R39-9 (§9.1 L945)
         return None, ReplayStatus.VOID, "target_disabled"
-    host = load_staging_identity(record.session_id, identity_kind=record.identity_kind)
-    state = host.state if host is not None else None
-    if (state is None or state.provider_epoch != record.provider_epoch
-            or state.identity.logical_session_id != record.logical_session_id):
+    if state is None:
         return None, ReplayStatus.VOID, "binding_invalid"  # §4.1 L250
     try:
         return open_session_view(config, state, backend_factory=backend_factory), None, None
@@ -144,10 +159,11 @@ def _settled_review(exc: ProviderError) -> Optional[ReviewState]:
     return None
 
 
-def _review_one(record: PendingApproval, raw_config: Any, backend_factory) -> PendingReview:
+def _review_one(record: PendingApproval, state: Optional[HostSessionState], raw_config: Any,
+                backend_factory) -> PendingReview:
     pid = record.pending_id
     void = ReviewState.VOID_UNCONFIRMED if record.decision == "approved" else ReviewState.VOID  # §9.5 L1562
-    view, status, _ = _open_view(record, raw_config, backend_factory)
+    view, status, _ = _open_view(record, state, raw_config, backend_factory)
     if view is None:
         if status is ReplayStatus.VOID:
             _drop(pid)
@@ -178,12 +194,32 @@ def _review_one(record: PendingApproval, raw_config: Any, backend_factory) -> Pe
                          record, text)
 
 
-def review_pending_approvals(*, raw_config: Any, backend_factory=None) -> List[PendingReview]:
-    """Ruling R39-14: one live inspection per record; terminal proofs are settled here."""
+def review_pending_approvals(*, raw_config: Any, principal: Optional[str], backend_factory=None) -> List[PendingReview]:
+    """Ruling R39-14: one live inspection per record; terminal proofs are settled here.
+
+    ``principal`` is required: ``None`` for an owner surface, which sees every record, or the caller's principal,
+    which sees, settles and drops only records its own principal staged (I3).
+    """
     if agent_spawned_surface() is not None:
         return []
-    return [PendingReview(pid, ReviewState.UNREADABLE) if record is None else _review_one(record, raw_config, backend_factory)
-            for pid, record in list_pending_approvals()]
+    reviews: List[PendingReview] = []
+    for pid, record in list_pending_approvals():
+        if record is None:
+            if principal is None:
+                reviews.append(PendingReview(pid, ReviewState.UNREADABLE))
+            continue
+        state = _staging_state(record)
+        if _visible_to(principal, state):
+            reviews.append(_review_one(record, state, raw_config, backend_factory))
+    return reviews
+
+
+def pending_ids(*, principal: Optional[str]) -> List[str]:
+    """The ids ``approve all`` / ``reject all`` act on: every record for an owner surface, else the caller's own."""
+    if agent_spawned_surface() is not None:
+        return []
+    return [pid for pid, record in list_pending_approvals()
+            if principal is None or (record is not None and _visible_to(principal, _staging_state(record)))]
 
 
 def _keep_unknown(record: PendingApproval) -> None:
@@ -258,10 +294,13 @@ def _replay_on(view, record: PendingApproval, clock: Callable[[], datetime]) -> 
                         audit_pending=commit.outcome == "committed_audit_pending")
 
 
-def replay_pending_approval(pending_id: str, *, raw_config: Any, backend_factory=None,
+def replay_pending_approval(pending_id: str, *, raw_config: Any, principal: Optional[str], backend_factory=None,
                             clock: Callable[[], datetime] = utcnow) -> ReplayReport:
     """Approve one record: the byte-free ``commit_curated`` with the identical handle, binding hash,
-    request ID, scopes and authorization (§9.7 L1604; §9.5 L1562)."""
+    request ID, scopes and authorization (§9.7 L1604; §9.5 L1562).
+
+    A record the caller's ``principal`` did not stage is ``NOT_FOUND``, before any provider call or drop.
+    """
     if agent_spawned_surface() is not None:
         return ReplayReport(pending_id, ReplayStatus.UNAVAILABLE, "agent_spawned")
     if not valid_pending_id(pending_id):
@@ -269,10 +308,15 @@ def replay_pending_approval(pending_id: str, *, raw_config: Any, backend_factory
     try:
         record = load_pending_approval(pending_id)
     except ApprovalStoreError:
+        if principal is not None:
+            return ReplayReport(pending_id, ReplayStatus.NOT_FOUND)
         return ReplayReport(pending_id, ReplayStatus.UNAVAILABLE, "unreadable")
     if record is None:
         return ReplayReport(pending_id, ReplayStatus.NOT_FOUND)
-    view, status, code = _open_view(record, raw_config, backend_factory)
+    state = _staging_state(record)
+    if not _visible_to(principal, state):
+        return ReplayReport(pending_id, ReplayStatus.NOT_FOUND)
+    view, status, code = _open_view(record, state, raw_config, backend_factory)
     if view is None:
         if status is ReplayStatus.VOID:
             _drop(pending_id)
@@ -285,8 +329,12 @@ def replay_pending_approval(pending_id: str, *, raw_config: Any, backend_factory
         view.shutdown()
 
 
-def reject_pending_approval(pending_id: str) -> RejectStatus:
-    """§9.5 L1542: a host denial persists nothing and drops the handle. v1 has no discard, so no provider call."""
+def reject_pending_approval(pending_id: str, *, principal: Optional[str]) -> RejectStatus:
+    """§9.5 L1542: a host denial persists nothing and drops the handle. v1 has no discard, so no provider call.
+
+    A record the caller's ``principal`` did not stage, an unreadable one included, is ``NOT_FOUND`` and kept;
+    only an owner surface (``principal=None``) removes an unreadable record.
+    """
     if agent_spawned_surface() is not None:
         return RejectStatus.UNAVAILABLE
     if not valid_pending_id(pending_id):
@@ -294,9 +342,11 @@ def reject_pending_approval(pending_id: str) -> RejectStatus:
     try:
         record = load_pending_approval(pending_id)
     except ApprovalStoreError:
+        if principal is not None:
+            return RejectStatus.NOT_FOUND
         record = None  # unreadable: removing it is the only cleanup
     else:
-        if record is None:
+        if record is None or not _visible_to(principal, _staging_state(record)):
             return RejectStatus.NOT_FOUND
         if record.decision == "approved":  # its commit may have landed; /memory pending settles it
             return RejectStatus.REFUSED

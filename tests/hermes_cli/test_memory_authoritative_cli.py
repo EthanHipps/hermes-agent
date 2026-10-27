@@ -131,17 +131,85 @@ def test_dashboard_provider_switch_refuses_in_authoritative_mode(authoritative_e
     assert response.status_code == 409 and (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
-def test_reset_of_the_user_target_names_both_approvals_and_refuses(authoritative_env, capsys):
-    """Ruling R41-1/R41-8: the mandatory approvals are named, and nothing contacts the provider."""
+REPO = {"organization": None, "project": "proj-1", "repository": "repo-1"}
+
+
+def _reset_args(**overrides):
+    return Namespace(**{"target": "memory", "yes": False, "scope": ["repository:repo-1"], **REPO, **overrides})
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """An interactive stdin whose answers the test scripts; an exception stands for EOF or Ctrl-C."""
+    answers = []
+
+    def answer(_question):
+        reply = answers.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", answer)
+    return answers
+
+
+def _seed(authoritative_env):
+    from agent.memory_service import wire as w
+    gone = authoritative_env.store.seed_record(w.ScopeRef(kind="repository", id="repo-1"), "memory", "reset me")
+    kept = authoritative_env.store.seed_record(w.ScopeRef(kind="project", id="proj-1"), "memory", "keep me")
+    return gone, kept
+
+
+def test_an_approved_cli_reset_retires_exactly_its_scopes(authoritative_env, terminal, capsys):
     from hermes_cli.memory_authoritative import reset_command
-    code = reset_command({"memory": authoritative_env.memory},
-                         Namespace(target="user", yes=False, scope=["global:ethan"]))
-    out = capsys.readouterr().out
-    assert code == 1 and "target_user" in out and "reset" in out and "global:ethan" in out
-    assert authoritative_env.backends == []
+    gone, kept = _seed(authoritative_env)
+    terminal.append("y")
+    assert reset_command({"memory": authoritative_env.memory}, _reset_args()) == 0
+    assert "reset me" in capsys.readouterr().out                 # the inspection was shown before deciding
+    records = authoritative_env.store.records
+    assert records[gone.id].lifecycle == "retired" and records[kept.id].lifecycle == "active"
+
+
+@pytest.mark.parametrize("reply", ["n", EOFError(), KeyboardInterrupt()])
+def test_a_declined_or_interrupted_reset_changes_nothing_and_never_waits_for_approval(authoritative_env, terminal, reply):
+    from agent.memory_service.approval_store import list_pending_approvals
+    from hermes_cli.memory_authoritative import reset_command
+    gone, _ = _seed(authoritative_env)
+    terminal.append(reply)
+    assert reset_command({"memory": authoritative_env.memory}, _reset_args()) == 0
+    assert authoritative_env.store.records[gone.id].lifecycle == "active" and list_pending_approvals() == []
+
+
+def test_an_unknown_cli_reset_outcome_keeps_the_approved_request_for_the_identical_retry(authoritative_env, terminal,
+                                                                                         capsys):
+    from agent.memory_service.approval_replay import ReplayStatus, replay_pending_approval
+    from agent.memory_service.approval_store import list_pending_approvals, load_pending_approval
+    from hermes_cli.memory_authoritative import reset_command
+    gone, _ = _seed(authoritative_env)
+    authoritative_env.store.fail_transport("commit_curated", times=2)
+    terminal.append("y")
+    assert reset_command({"memory": authoritative_env.memory}, _reset_args()) == 1
+    [(pid, record)] = list_pending_approvals()
+    assert record.decision == "approved" and record.outcome == "unknown" and pid in capsys.readouterr().out
+    assert replay_pending_approval(pid, raw_config={"memory": authoritative_env.memory},
+                                   principal=None).status is ReplayStatus.COMMITTED
+    assert authoritative_env.store.records[gone.id].lifecycle == "retired" and load_pending_approval(pid) is None
+
+
+def test_a_non_interactive_reset_is_refused_before_any_provider_contact(authoritative_env, monkeypatch, capsys):
+    from hermes_cli.memory_authoritative import reset_command
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
+    assert reset_command({"memory": authoritative_env.memory}, _reset_args(target="user", scope=["global:ethan"])) == 2
+    assert "interactive terminal" in capsys.readouterr().out and authoritative_env.backends == []
 
 
 def test_reset_refuses_a_malformed_scope_with_the_encoding_hint(authoritative_env, capsys):
     from hermes_cli.memory_authoritative import reset_command
-    code = reset_command({"memory": authoritative_env.memory}, Namespace(target="memory", yes=False, scope=["repo:x"]))
+    code = reset_command({"memory": authoritative_env.memory}, _reset_args(scope=["repo:x"]))
     assert code == 2 and "repository:<id>" in capsys.readouterr().out
+
+
+def test_a_repository_reset_without_its_chain_says_how_to_name_the_chain(authoritative_env, terminal, capsys):
+    from hermes_cli.memory_authoritative import reset_command
+    code = reset_command({"memory": authoritative_env.memory}, _reset_args(project=None, repository=None))
+    assert code == 2 and "--repository" in capsys.readouterr().out
