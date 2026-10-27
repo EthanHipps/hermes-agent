@@ -381,8 +381,17 @@ def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, 
     from agent.memory_service.admin import AdminContext, admin_service
     from agent.memory_service.errors import MemoryBlockedError
     from agent.memory_service.host_state import load_host_state
+    from agent.memory_service.approval_replay import (
+        RejectStatus, ReplayStatus, reject_pending_approval, replay_pending_approval, review_pending_approvals)
+    from agent.memory_service.approval_store import load_pending_approval
+    from hermes_cli.memory_command import provider_memory_command
+    from tools.memory_tool_curated import curated_memory_tool
     env = Env(tmp_path, monkeypatch)
-    env.agent("owner-1")                                        # a person's session, with its persisted identity
+    owner = env.agent("owner-1")
+    pending = json.loads(curated_memory_tool(owner._memory_service, action="add", target="user",
+                                             content="owner's private preference", approval_session_id="owner-1"))
+    pid = pending["pending_id"]
+    saved = load_pending_approval(pid)
     owner_records, calls = _records(), env.factory_calls
     for key, value in spawn_env.items():
         monkeypatch.setenv(key, value)
@@ -390,6 +399,14 @@ def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, 
         fresh, resumed = env.agent("kanban-worker-1"), env.agent("owner-1")
         with pytest.raises(MemoryBlockedError), admin_service({"memory": env.memory}, context=AdminContext()):
             pass
+        for args in (["pending"], ["approve", pid], ["approve", "all"], ["reject", pid], ["reject", "all"]):
+            reply = provider_memory_command(args, agent=fresh, set_mode_fn=None)
+            assert "owner's private preference" not in reply and "approved and saved" not in reply
+            assert load_pending_approval(pid) == saved
+        assert review_pending_approvals(raw_config={"memory": env.memory}) == []
+        assert replay_pending_approval(pid, raw_config={"memory": env.memory}).status is ReplayStatus.UNAVAILABLE
+        assert reject_pending_approval(pid) is RejectStatus.UNAVAILABLE
+        assert load_pending_approval(pid) == saved
     sentinel.assert_untouched()
     assert isinstance(fresh._memory_service, UnboundMemoryService)
     assert isinstance(resumed._memory_service, UnboundMemoryService)

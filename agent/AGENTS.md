@@ -137,7 +137,10 @@ agent started (`bootstrap.agent_spawned_surface`): a kanban dispatcher worker (`
 and anything run from a worker's or a delegate's terminal (`is_delegated_child_process_context`). No
 human started these, and whoever creates a kanban task chooses its workspace, so they never bind or
 resume an identity (a new session keeps a stateless record, so resuming it later stays memory-less),
-and `admin.admin_service` refuses them the administrative identity too. A gateway or Hermes session
+and `admin.admin_service` refuses them the administrative identity too. Deferred approval review,
+replay and rejection refuse them before opening a provider or changing pending records. Terminal
+commands carry the descendant marker explicitly across remote/container boundaries, without depending
+on SSH environment forwarding or retaining it in a shared shell snapshot. A gateway or Hermes session
 started from such a terminal therefore has no curated memory either. Delegated children stay
 memory-less (`DELEGATE_BLOCKED_TOOLS`, `skip_memory=True`); a child that ever needs memory must receive
 `open_fork_view` of its parent, never discover one. Gateway hygiene and manual-compression agents are

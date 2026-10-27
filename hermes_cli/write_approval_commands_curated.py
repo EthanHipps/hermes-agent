@@ -121,7 +121,10 @@ _HANDLERS: Dict[str, Callable[[List[str], Any, Any], str]] = {
 
 def handle_curated_memory_subcommand(args: List[str], *, set_mode_fn=None) -> Optional[str]:
     """``None`` for an unknown subcommand, so the caller prints its own usage (as the native path does)."""
+    from agent.memory_service.bootstrap import agent_spawned_surface
     from hermes_cli.config import load_config
+    if agent_spawned_surface() is not None:
+        return "Curated memory approvals are unavailable in agent-started processes."
     raw = load_config()
     if not args:
         return f"{_state_line()}\n\n{_review(raw)}"

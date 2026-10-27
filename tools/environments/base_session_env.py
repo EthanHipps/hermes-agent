@@ -71,7 +71,8 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
         # AI_AGENT / HERMES_AGENT are per-command attribution markers re-exported
         # by every wrapper with ${VAR:-default} semantics; persisting them would
         # let the FIRST command's value override a later outer-harness value.
-        "AI_AGENT HERMES_AGENT "
+        # Descendant scope is also per command, never shared shell state.
+        "AI_AGENT HERMES_AGENT HERMES_DELEGATED_CHILD_CONTEXT "
         f"HERMES_UI_SESSION_ID{extra_unset} 2>/dev/null; "
         "export -p; ) || true; } "
         f"> {tmp_path}")

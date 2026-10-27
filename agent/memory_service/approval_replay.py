@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any, Callable, List, Optional, Tuple
 
 from agent.memory_service import wire as w
+from agent.memory_service.bootstrap import agent_spawned_surface
 from agent.memory_service.approval import build_authorization, render_stage_inspection, utcnow
 from agent.memory_service.approval_store import (
     ApprovalStoreError, PendingApproval, drop_pending_approval, list_pending_approvals, load_pending_approval,
@@ -183,6 +184,8 @@ def _review_one(record: PendingApproval, raw_config: Any, backend_factory) -> Pe
 
 def review_pending_approvals(*, raw_config: Any, backend_factory=None) -> List[PendingReview]:
     """Ruling R39-14: one live inspection per record; terminal proofs are settled here."""
+    if agent_spawned_surface() is not None:
+        return []
     return [PendingReview(pid, ReviewState.UNREADABLE) if record is None else _review_one(record, raw_config, backend_factory)
             for pid, record in list_pending_approvals()]
 
@@ -263,6 +266,8 @@ def replay_pending_approval(pending_id: str, *, raw_config: Any, backend_factory
                             clock: Callable[[], datetime] = utcnow) -> ReplayReport:
     """Approve one record: the byte-free ``commit_curated`` with the identical handle, binding hash,
     request ID, scopes and authorization (§9.7 L1604; §9.5 L1562)."""
+    if agent_spawned_surface() is not None:
+        return ReplayReport(pending_id, ReplayStatus.UNAVAILABLE, "agent_spawned")
     if not valid_pending_id(pending_id):
         return ReplayReport(pending_id, ReplayStatus.NOT_FOUND)
     try:
@@ -286,6 +291,8 @@ def replay_pending_approval(pending_id: str, *, raw_config: Any, backend_factory
 
 def reject_pending_approval(pending_id: str) -> RejectStatus:
     """§9.5 L1542: a host denial persists nothing and drops the handle. v1 has no discard, so no provider call."""
+    if agent_spawned_surface() is not None:
+        return RejectStatus.UNAVAILABLE
     if not valid_pending_id(pending_id):
         return RejectStatus.NOT_FOUND
     try:
