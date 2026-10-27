@@ -3,7 +3,11 @@ import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 import type { Translations } from './types'
 
 export const en: Translations = {
-  memoryAdmission: { label: 'Use this memory as', declarative: 'Facts and observations', promptLike: 'Instructions or prompts' },
+  memoryAdmission: {
+    label: 'Use this memory as',
+    declarative: 'Facts and observations',
+    promptLike: 'Instructions or prompts'
+  },
   connectors: {
     title: 'Connect your apps',
     connect: 'Connect',

@@ -188,7 +188,11 @@ export function useOnboardingHandoff({
                 { answers: { ...answers, connectors: answers.connectors.map(connectorTitle) } }
               )
 
-              if (!(result.saved || result.pending_id) || result.profile !== BUILD_PROFILE || result.target !== 'user') {
+              if (
+                !(result.saved || result.pending_id) ||
+                result.profile !== BUILD_PROFILE ||
+                result.target !== 'user'
+              ) {
                 throw new Error('Could not save your onboarding preferences. Retry before starting the first build.')
               }
 

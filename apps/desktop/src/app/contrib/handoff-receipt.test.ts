@@ -30,6 +30,7 @@ it.each(['throws', 'drops'] as const)('keeps the staged approval for retry when 
   const pendingId = `approval-${failure}`
   const storage = window.localStorage
   const storageOwner = Object.hasOwn(storage, 'setItem') ? storage : Object.getPrototypeOf(storage)
+
   const write = vi.spyOn(storageOwner, 'setItem').mockImplementation(() => {
     if (failure === 'throws') {
       throw new DOMException('Storage full', 'QuotaExceededError')

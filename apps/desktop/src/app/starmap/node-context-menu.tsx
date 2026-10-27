@@ -1,14 +1,13 @@
 import { useRef, useState } from 'react'
 
 import type { MemoryAdmission } from '@/api/skills'
-import { useI18n } from '@/i18n/context'
-
 import { ArchiveSkillConfirmDialog, fireOptimistic } from '@/app/learning/archive-skill-confirm-dialog'
 import { CodeEditor } from '@/components/chat/code-editor'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { deleteLearningNode, editLearningNode, getLearningNode } from '@/hermes'
+import { useI18n } from '@/i18n/context'
 import { notifyError } from '@/store/notifications'
 import { evictStarmapNode, loadStarmapGraph } from '@/store/starmap'
 
@@ -172,7 +171,7 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
                 <Button
                   aria-pressed={editing.memoryAdmission === 'declarative'}
                   disabled={saving}
-                  onClick={() => setEditing(prev => prev ? { ...prev, memoryAdmission: 'declarative' } : prev)}
+                  onClick={() => setEditing(prev => (prev ? { ...prev, memoryAdmission: 'declarative' } : prev))}
                   size="sm"
                   variant={editing.memoryAdmission === 'declarative' ? 'default' : 'outline'}
                 >
@@ -181,7 +180,7 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
                 <Button
                   aria-pressed={editing.memoryAdmission === 'prompt_like'}
                   disabled={saving}
-                  onClick={() => setEditing(prev => prev ? { ...prev, memoryAdmission: 'prompt_like' } : prev)}
+                  onClick={() => setEditing(prev => (prev ? { ...prev, memoryAdmission: 'prompt_like' } : prev))}
                   size="sm"
                   variant={editing.memoryAdmission === 'prompt_like' ? 'default' : 'outline'}
                 >
@@ -195,7 +194,10 @@ export function NodeContextMenu({ onClose, onNodeRemoved, target }: NodeContextM
             <Button disabled={saving} onClick={() => setEditing(null)} type="button" variant="ghost">
               Cancel
             </Button>
-            <Button disabled={saving || (needsMemoryChoice && editing?.memoryAdmission === null)} onClick={() => void save()}>
+            <Button
+              disabled={saving || (needsMemoryChoice && editing?.memoryAdmission === null)}
+              onClick={() => void save()}
+            >
               {saving ? 'Saving…' : 'Save'}
             </Button>
           </DialogFooter>
