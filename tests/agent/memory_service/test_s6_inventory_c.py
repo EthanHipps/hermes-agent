@@ -375,23 +375,38 @@ def test_a_skip_memory_worker_agent_has_no_service(tmp_path, monkeypatch):
 @pytest.mark.parametrize("spawn_env", [{"HERMES_KANBAN_TASK": "t_0123abcd"},          # dispatcher-spawned worker
                                        {"HERMES_DELEGATED_CHILD_CONTEXT": "1"}],      # started from its terminal
                          ids=["kanban_worker", "worker_descendant"])
-def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, monkeypatch, spawn_env):
+@pytest.mark.parametrize("identity_kind", ["session", "admin"])
+def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, monkeypatch, spawn_env, identity_kind):
     """No human started it: it neither binds from a directory the registry resolves, nor resumes the owner's
     session, nor opens the owner's administrative identity, and nothing contacts the provider."""
-    from agent.memory_service.admin import AdminContext, admin_service
+    from contextlib import nullcontext
+
+    from agent.memory_service.admin import AdminContext, admin_approval_channel, admin_service
+    from agent.memory_service.approval import ApprovalChannel
     from agent.memory_service.errors import MemoryBlockedError
     from agent.memory_service.host_state import load_host_state
     from agent.memory_service.approval_replay import (
         RejectStatus, ReplayStatus, reject_pending_approval, replay_pending_approval, review_pending_approvals)
     from agent.memory_service.approval_store import load_pending_approval
+    from agent.memory_service.mutation import MutationStatus, run_curated_mutation
     from hermes_cli.memory_command import provider_memory_command
-    from tools.memory_tool_curated import curated_memory_tool
+    from tools.memory_tool_curated import ConsolidationBudget, NativeCall, plan_native_call
     env = Env(tmp_path, monkeypatch)
     owner = env.agent("owner-1")
-    pending = json.loads(curated_memory_tool(owner._memory_service, action="add", target="user",
-                                             content="owner's private preference", approval_session_id="owner-1"))
-    pid = pending["pending_id"]
+    raw = {"memory": env.memory}
+    context = AdminContext()
+    channel = (admin_approval_channel(raw, context, origin="test") if identity_kind == "admin"
+               else ApprovalChannel(session_id="owner-1"))
+    staging = admin_service(raw, context=context) if identity_kind == "admin" else nullcontext(owner._memory_service)
+    with staging as service:
+        pending = run_curated_mutation(service, "user", lambda snapshot: plan_native_call(
+            snapshot, NativeCall(action="add", content="owner's private preference", old_text=None, operations=None),
+            ConsolidationBudget()),
+            approval=channel)
+    assert pending.status is MutationStatus.PENDING_APPROVAL
+    pid = pending.pending_id
     saved = load_pending_approval(pid)
+    assert saved.identity_kind == identity_kind
     owner_records, calls = _records(), env.factory_calls
     for key, value in spawn_env.items():
         monkeypatch.setenv(key, value)
