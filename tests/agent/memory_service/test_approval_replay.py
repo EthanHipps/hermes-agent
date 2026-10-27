@@ -1,6 +1,8 @@
 """R39: deferred approvals — review, byte-free replay and reject (§9.4 steps 7–9; §9.5 L1542, L1562; §4.1 L250;
 contract C6b-4)."""
 
+import dataclasses
+import json
 import os
 import shutil
 from datetime import datetime, timezone
@@ -13,7 +15,7 @@ from agent.memory_service.approval import ApprovalChannel
 from agent.memory_service.approval_replay import (
     RejectStatus, ReplayStatus, ReviewState, reject_pending_approval, replay_pending_approval,
     review_pending_approvals)
-from agent.memory_service.approval_store import list_pending_approvals, load_pending_approval
+from agent.memory_service.approval_store import approvals_dir, list_pending_approvals, load_pending_approval
 from agent.memory_service.bootstrap import init_memory_service
 from agent.memory_service.host_state import host_state_dir
 from agent.memory_service.mutation import MutationStatus, PlannedMutation, run_curated_mutation
@@ -219,3 +221,54 @@ def test_a_void_approved_record_is_dropped_without_claiming_nothing_was_saved(en
     assert list_pending_approvals() == []
     assert "nothing was saved" not in _REVIEW_LINE[ReviewState.VOID_UNCONFIRMED].format(id=pids[0])
     assert "nothing was saved" not in _REPLAY_TEXT[ReplayStatus.VOID_UNCONFIRMED].format(id=pids[1], code=replayed.code)
+
+
+@pytest.mark.parametrize("unknown_outcome", [False, True])
+def test_an_approval_deferred_under_an_administrative_identity_survives_review_and_replays(env, unknown_outcome):
+    """Non-session surfaces stage under their persisted administrative identity, not a Hermes session."""
+    from agent.memory_service.admin import AdminContext, admin_approval_channel, admin_service
+    context = AdminContext()
+    channel = dataclasses.replace(admin_approval_channel(env.raw, context, origin="test"),
+                                  clock=env.store.clock.now)
+    with admin_service(env.raw, context=context, backend_factory=env.factory) as service:
+        outcome = run_curated_mutation(service, "user", lambda s: _add(s, "prefers terse replies"),
+                                       approval=channel)
+    assert outcome.status is MutationStatus.PENDING_APPROVAL
+    [review] = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
+    assert review.state is ReviewState.AWAITING and review.pending_id == outcome.pending_id
+    if unknown_outcome:
+        env.store.fail_transport("commit_curated", phase="after_publish", times=2)
+        assert _replay(env, outcome.pending_id).status is ReplayStatus.UNKNOWN
+        assert load_pending_approval(outcome.pending_id).identity_kind == "admin"
+    report = _replay(env, outcome.pending_id)
+    assert report.status is ReplayStatus.COMMITTED and _user_texts(env) == ["prefers terse replies"]
+    assert list_pending_approvals() == []
+
+
+@pytest.mark.parametrize("session_shape", ["prefix", "admin_key"])
+@pytest.mark.parametrize("legacy_record", [False, True], ids=["explicit_kind", "legacy_session"])
+def test_session_and_administrative_identity_namespaces_do_not_overlap(env, tmp_path, session_shape, legacy_record):
+    """A client-chosen session id cannot select another identity, including in pre-admin approval records."""
+    from agent.memory_service.admin import AdminContext, admin_service
+    from agent.memory_service.config import resolve_memory_service_config
+
+    context = AdminContext()
+    session_id = (context.record_key(resolve_memory_service_config(env.raw))
+                  if session_shape == "admin_key" else "admin:my-chat")
+    with admin_service(env.raw, context=context, backend_factory=env.factory):
+        pass  # Both namespaces hold records when the client chooses the exact administrative key.
+    service, _ = init_memory_service(env.raw, logical_session_id=session_id, platform="cli",
+                                     store_factory=_never_built, profile_id="default",
+                                     working_directory=str(tmp_path / "repo"), backend_factory=env.factory)
+    outcome = run_curated_mutation(service, "user", lambda s: _add(s, "likes tea"),
+                                   approval=ApprovalChannel(session_id=session_id, clock=env.store.clock.now))
+    assert outcome.status is MutationStatus.PENDING_APPROVAL
+    if legacy_record:
+        path = approvals_dir() / f"{outcome.pending_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("identity_kind", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    [review] = review_pending_approvals(raw_config=env.raw, backend_factory=env.factory)
+    assert review.state is ReviewState.AWAITING and review.pending_id == outcome.pending_id
+    assert _replay(env, outcome.pending_id).status is ReplayStatus.COMMITTED
+    assert _view_calls(env, "commit_curated")[-1].frozen_identity == service.identity.to_wire()

@@ -66,8 +66,18 @@ export function getLearningNode(id: string, profile?: ProfileScope): Promise<Lea
   })
 }
 
-export function deleteLearningNode(id: string, profile?: ProfileScope): Promise<{ message: string; ok: boolean }> {
-  return window.hermesDesktop.api<{ message: string; ok: boolean }>({
+/** A journey edit or delete result. Provider-managed memory adds a `code`; a change that needs approval
+ *  answers 202 with `ok: false`, `code: 'approval_pending'` and the `pending_id` it waits under. */
+export interface LearningMutationResult {
+  approval_required?: string[]
+  code?: string
+  message: string
+  ok: boolean
+  pending_id?: string
+}
+
+export function deleteLearningNode(id: string, profile?: ProfileScope): Promise<LearningMutationResult> {
+  return window.hermesDesktop.api<LearningMutationResult>({
     ...capabilityScoped(profile),
     path: '/api/learning/node',
     method: 'DELETE',
@@ -82,8 +92,8 @@ export function editLearningNode(
   content: string,
   profile?: ProfileScope,
   memoryAdmission: MemoryAdmission | null = null
-): Promise<{ message: string; ok: boolean }> {
-  return window.hermesDesktop.api<{ message: string; ok: boolean }>({
+): Promise<LearningMutationResult> {
+  return window.hermesDesktop.api<LearningMutationResult>({
     ...capabilityScoped(profile),
     path: '/api/learning/node',
     method: 'PUT',

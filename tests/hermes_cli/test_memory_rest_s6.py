@@ -93,19 +93,76 @@ def test_reset_input_errors_are_400_and_touch_nothing(env, body):
     assert _native_state(env.native) == before and _count(env, "bind_session") == 0
 
 
+REPO, PROJ = w.ScopeRef(kind="repository", id="repo-1"), w.ScopeRef(kind="project", id="proj-1")
+REPO_CTX = {"repo_id": "repo-1", "project_id": "proj-1"}
+
+
 @pytest.mark.parametrize("body,need", [
-    ({"target": "memory", "scopes": ["repository:repo-1"], "repo_id": "repo-1", "project_id": "proj-1"}, ["reset"]),
+    ({"target": "memory", "scopes": ["repository:repo-1"], **REPO_CTX}, ["reset"]),
     ({"target": "user", "scopes": ["global:ethan"]}, ["target_user", "reset"])])
-def test_reset_fails_closed_until_approval_and_never_deletes_native(env, body, need):
-    r = env.store.seed_record(w.ScopeRef(kind="repository", id="repo-1"), "memory", "keep me")
+def test_reset_waits_for_approval_and_never_deletes_native(env, body, need):
+    r = env.store.seed_record(REPO, "memory", "keep me")
     before = _native_state(env.native)
     with native_memory_sentinel(env.native) as sentinel:
         resp = _client().post("/api/memory/reset", json=body)
     sentinel.assert_untouched()
-    detail = resp.json()["detail"]
-    assert resp.status_code == 409 and detail["error"] == "approval_unavailable" and detail["approval_required"] == need
-    assert _count(env, "stage_curated") == 0 and env.store.records[r.id].lifecycle == "active"
+    data = resp.json()
+    assert resp.status_code == 202 and data["code"] == "approval_pending" and data["approval_required"] == need
+    assert data["pending_id"] and _count(env, "commit_curated") == 0 and env.store.records[r.id].lifecycle == "active"
     assert _native_state(env.native) == before
+
+
+def _pending_reset(env, client, scope="repository:repo-1"):
+    resp = client.post("/api/memory/reset", json={"target": "memory", "scopes": [scope], **REPO_CTX})
+    assert resp.status_code == 202, resp.text
+    return resp.json()["pending_id"]
+
+
+def test_an_approved_reset_retires_exactly_the_approved_scope(env):
+    gone = env.store.seed_record(REPO, "memory", "reset me")
+    kept = env.store.seed_record(PROJ, "memory", "keep me")
+    client = _client()
+    pid = _pending_reset(env, client)
+    [row] = client.get("/api/memory/approvals").json()["approvals"]
+    assert (row["pending_id"], row["state"], row["approval_required"]) == (pid, "awaiting", ["reset"])
+    assert "reset me" in row["inspection"]                      # the human sees what is retired before deciding
+    resp = client.post(f"/api/memory/approvals/{pid}", json={"decision": "approve"})
+    assert resp.status_code == 200 and resp.json()["status"] == "committed"
+    assert env.store.records[gone.id].lifecycle == "retired" and env.store.records[kept.id].lifecycle == "active"
+    assert client.get("/api/memory/approvals").json()["approvals"] == []
+
+
+def test_a_denied_reset_changes_nothing(env):
+    r = env.store.seed_record(REPO, "memory", "keep me")
+    client = _client()
+    pid = _pending_reset(env, client)
+    resp = client.post(f"/api/memory/approvals/{pid}", json={"decision": "deny"})
+    assert resp.status_code == 200 and resp.json()["status"] == "dropped"
+    assert env.store.records[r.id].lifecycle == "active" and _count(env, "commit_curated") == 0
+    assert client.get("/api/memory/approvals").json()["approvals"] == []
+
+
+def test_an_approval_whose_outcome_is_unknown_is_503_and_kept_for_the_identical_retry(env):
+    from agent.memory_service.approval_store import load_pending_approval
+    env.store.seed_record(REPO, "memory", "reset me")
+    client = _client()
+    pid = _pending_reset(env, client)
+    env.store.fail_transport("commit_curated", times=2)
+    resp = client.post(f"/api/memory/approvals/{pid}", json={"decision": "approve"})
+    assert resp.status_code == 503 and resp.json()["detail"]["status"] == "unknown"
+    assert load_pending_approval(pid).outcome == "unknown"
+    denied = client.post(f"/api/memory/approvals/{pid}", json={"decision": "deny"})   # it may have been saved
+    assert denied.status_code == 409 and denied.json()["detail"]["status"] == "refused"
+    assert client.post(f"/api/memory/approvals/{pid}", json={"decision": "approve"}).json()["status"] == "committed"
+
+
+def test_the_approvals_router_refuses_what_it_cannot_decide(env):
+    client = _client()
+    for pid, decision in (("not-an-id", "approve"), ("0123456789ab", "deny")):
+        assert client.post(f"/api/memory/approvals/{pid}", json={"decision": decision}).status_code == 404
+    (get_hermes_home() / "config.yaml").write_text("model: test\n", encoding="utf-8")       # additive now
+    assert client.get("/api/memory/approvals").json() == {"provider_managed": False, "approvals": []}
+    assert client.post("/api/memory/approvals/0123456789ab", json={"decision": "approve"}).status_code == 409
 
 
 def test_reset_of_an_ineligible_scope_is_400(env):
@@ -129,13 +186,48 @@ def test_journey_rest_routes_by_stable_id(env):
     with native_memory_sentinel(env.native) as sentinel:
         graph = client.get("/api/learning/graph", params=ctx).json()
         detail = client.get("/api/learning/node", params={"id": node, **ctx}).json()
-        edited = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 9", **ctx})
+        edited = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 9",
+                                                        "memory_admission": "declarative", **ctx})
     sentinel.assert_untouched()
     assert node in {n["id"] for n in graph["nodes"]} and detail["content"] == "uses pnpm"
     assert edited.status_code == 200 and env.store.records[r.id].lifecycle == "superseded"
     assert client.get("/api/learning/graph", params={"repo_id": "a\nb"}).status_code == 400
     new_id = next(x.id for x in env.store.records_for(w.ScopeRef(kind="repository", id="repo-1"), "memory"))
     assert client.request("DELETE", "/api/learning/node", json={"id": f"memory:memory:{new_id}", **ctx}).status_code == 200
+
+
+def test_a_journey_edit_that_needs_approval_answers_202_with_its_pending_id(env):
+    r = env.store.seed_record(w.ScopeRef(kind="principal_global", id="ethan"), "user", "prefers terse replies",
+                              lane="trusted_instruction")
+    resp = _client().put("/api/learning/node", json={"id": f"memory:profile:{r.id}", "content": "prefers short replies"})
+    assert resp.status_code == 202 and resp.json()["code"] == "approval_pending" and resp.json()["pending_id"]
+    assert env.store.records[r.id].lifecycle == "active" and _count(env, "commit_curated") == 0
+
+
+def test_journey_rest_failures_keep_their_code_and_an_unknown_outcome_is_not_a_4xx(env):
+    r = env.store.seed_record(REPO, "memory", "uses pnpm")
+    node, client = f"memory:memory:{r.id}", _client()
+    env.store.fail_transport("commit_curated", times=2)
+    edited = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 9",
+                                                    "memory_admission": "declarative", **REPO_CTX})
+    assert edited.status_code == 503 and edited.json()["detail"]["code"] == "outcome_unknown"
+    env.store.fail_typed("stage_curated", "secret_rejected", outcome="not_committed",
+                         details={"event_id": "e-1", "detector_code": "aws_access_key"})
+    refused = client.put("/api/learning/node", json={"id": node, "content": "uses pnpm 10",
+                                                     "memory_admission": "declarative", **REPO_CTX})
+    assert refused.status_code == 400 and refused.json()["detail"]["code"] == "secret_rejected"   # refused, not down
+    env.store.fail_transport("negotiate")
+    down = client.get("/api/learning/node", params={"id": node, **REPO_CTX})
+    assert down.status_code == 503 and down.json()["detail"]["code"]
+
+
+def test_additive_journey_errors_are_unchanged(tmp_path):
+    from tools.memory_tool import get_memory_dir
+    native = get_memory_dir()
+    native.mkdir(parents=True, exist_ok=True)
+    (native / "MEMORY.md").write_text("alpha", encoding="utf-8")
+    resp = _client().put("/api/learning/node", json={"id": "memory:memory:0", "content": "   "})
+    assert resp.status_code == 400 and resp.json()["detail"] == "empty memory — use delete to remove it"
 
 
 # -- typed disposition fields on REST archive routes (ruling R42-10; ledger R44-11) -----------------------

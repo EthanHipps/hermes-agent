@@ -7,9 +7,9 @@ uses). These drive a fake editor subprocess to verify read-back, header
 stripping, seeding, and the empty-buffer cancel path.
 """
 
+import json
 import os
-import stat
-import tempfile
+import sys
 
 import pytest
 
@@ -22,17 +22,23 @@ class _Stub(CLICommandsMixin):
         self._pending_agent_seed = None
 
 
-def _fake_editor(body: str, mode: str = "append") -> str:
-    """Write a tiny shell 'editor' that mutates the file it is handed."""
-    f = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
-    if mode == "append":
-        f.write("#!/usr/bin/env bash\n")
-        f.write(f"cat >> \"$1\" <<'EOF'\n{body}\nEOF\n")
-    else:  # clear
-        f.write("#!/usr/bin/env bash\n: > \"$1\"\n")
-    f.close()
-    os.chmod(f.name, os.stat(f.name).st_mode | stat.S_IEXEC)
-    return f.name
+def _fake_editor_script(tmp_path, body: str, mode: str = "append"):
+    """A tiny Python 'editor' that mutates the file it is handed, run through this interpreter
+    so it starts on every OS (a bare script is not an executable on Windows)."""
+    script = tmp_path / "fake_editor.py"
+    file_mode = "a" if mode == "append" else "w"  # "w" clears the buffer
+    script.write_text(
+        "import sys\n"
+        f"with open(sys.argv[1], {file_mode!r}, encoding='utf-8') as fh:\n"
+        f"    fh.write({body!r})\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _fake_editor(tmp_path, body: str, mode: str = "append") -> str:
+    """An EDITOR value for :func:`_fake_editor_script`."""
+    return f'"{sys.executable}" "{_fake_editor_script(tmp_path, body, mode)}"'
 
 
 @pytest.fixture(autouse=True)
@@ -46,16 +52,63 @@ def test_command_registered():
     assert resolve_command("compose").name == "prompt"
 
 
-def test_compose_reads_and_strips_header(monkeypatch):
-    monkeypatch.setenv("EDITOR", _fake_editor("Refactor the auth module.\nUse pytest."))
+def test_compose_reads_and_strips_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("EDITOR", _fake_editor(tmp_path, "Refactor the auth module.\nUse pytest.\n"))
     out = _Stub()._compose_in_editor("")
     assert "Refactor the auth module." in out
     assert "Use pytest." in out
     assert "#!" not in out  # the instructional header is stripped
 
 
-def test_empty_buffer_does_not_seed(monkeypatch):
-    monkeypatch.setenv("EDITOR", _fake_editor("", mode="clear"))
+def test_empty_buffer_does_not_seed(monkeypatch, tmp_path):
+    monkeypatch.setenv("EDITOR", _fake_editor(tmp_path, "", mode="clear"))
     s = _Stub()
     s._handle_prompt_compose_command("/prompt")
     assert s._pending_agent_seed is None
+
+
+@pytest.mark.windows_only
+@pytest.mark.parametrize("shape", ["unquoted_path", "quoted_path", "cmd_shim_on_path"])
+def test_windows_editor_values_start_as_written(monkeypatch, tmp_path, shape):
+    """A backslash path needs no quoting, and a ``.cmd`` shim found on PATH (``code --wait``) starts too."""
+    script = _fake_editor_script(tmp_path, "Ship it.\n")
+    if shape == "unquoted_path":
+        if any(char.isspace() for char in sys.executable):
+            pytest.skip("An unquoted executable path requires a space-free interpreter path")
+        editor = f'{sys.executable} "{script}"'
+    elif shape == "quoted_path":
+        editor = f'"{sys.executable}" "{script}"'
+    else:
+        (tmp_path / "fake-editor.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        monkeypatch.setenv("PATH", f"{tmp_path};{os.environ['PATH']}")
+        editor = "fake-editor"
+    monkeypatch.setenv("EDITOR", editor)
+    assert _Stub()._compose_in_editor("") == "Ship it."
+
+
+@pytest.mark.windows_only
+def test_windows_editor_preserves_quoted_option_values(monkeypatch, tmp_path):
+    script = tmp_path / "record_argv.py"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[-1]).write_text(json.dumps(sys.argv[1:-1]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "EDITOR",
+        f'"{sys.executable}" "{script}" '
+        r'--profile="Work Profile" --user-data-dir="C:\Users\someone\Code Profile"',
+    )
+    assert json.loads(_Stub()._compose_in_editor("")) == [
+        "--profile=Work Profile", r"--user-data-dir=C:\Users\someone\Code Profile",
+    ]
+
+
+@pytest.mark.windows_only
+def test_unlaunchable_editor_is_reported_not_handed_to_cmd(monkeypatch, tmp_path):
+    """cmd.exe would open a non-executable editor through its file association (an "Open With"
+    dialog), so the failure to start it is raised instead; ``/prompt`` reports it."""
+    monkeypatch.setenv("EDITOR", f'"{tmp_path / "no-such-editor.exe"}"')
+    with pytest.raises(OSError):
+        _Stub()._compose_in_editor("")
