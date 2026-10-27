@@ -50,6 +50,21 @@ hermes config set OPENROUTER_API_KEY sk-or-...  # Saves to .env
 The `hermes config set` command automatically routes values to the right file — API keys are saved to `.env`, everything else to `config.yaml`.
 :::
 
+### Choosing an editor
+
+`hermes config edit`, `hermes journey edit`, and `/prompt` use `VISUAL` first, then
+`EDITOR`, then their default editor. Set these in your shell environment. Editor arguments
+are supported, for example `code --wait`; quote executable paths that contain spaces.
+On Windows, use double quotes inside the value, for example in PowerShell:
+
+```powershell
+$env:VISUAL = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst -nosession'
+```
+
+The interactive CLI's `Ctrl+G` / `Ctrl+X Ctrl+E` path is provided by prompt_toolkit;
+it still uses POSIX command parsing. On Windows, use `/prompt` for native paths or
+`.cmd` editor launchers such as `code --wait`.
+
 ## Configuration Precedence
 
 Settings are resolved in this order (highest priority first):

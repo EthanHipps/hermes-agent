@@ -2959,6 +2959,8 @@ def show_config():
 
 def edit_config():
     """Open config file in user's editor."""
+    from hermes_cli.editor import preferred_editor, run_editor
+
     if is_managed():
         managed_error("edit configuration")
         return
@@ -2971,15 +2973,14 @@ def edit_config():
     # servers are more likely to have.
     candidates = (['notepad', 'code', 'vim', 'vi', 'nano'] if sys.platform == "win32"
                   else ['nano', 'vim', 'vi', 'code', 'notepad'])
-    editor = os.getenv('EDITOR') or os.getenv('VISUAL') or next(
-        (cmd for cmd in candidates if shutil.which(cmd)), None)
+    editor = preferred_editor(next((cmd for cmd in candidates if shutil.which(cmd)), None))
     if not editor:
         print("No editor found. Config file is at:")
         print(f"  {config_path}")
         return
 
     print(f"Opening {config_path} in {editor}...")
-    subprocess.run([editor, str(config_path)])
+    run_editor(editor, config_path)
 
 
 # ---- Cron model-drift helpers: which unpinned jobs stay on their creation snapshot ----

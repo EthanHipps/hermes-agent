@@ -320,18 +320,19 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 def _open_in_editor(initial: str, *, suffix: str) -> Optional[str]:
     import os
-    import subprocess
     import tempfile
 
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+    from hermes_cli.editor import preferred_editor, run_editor
+
+    editor = preferred_editor("vi")
     with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False, encoding="utf-8") as fh:
         fh.write(initial)
         path = fh.name
     try:
-        subprocess.call([*editor.split(), path])
+        run_editor(editor, path)
         with open(path, encoding="utf-8") as fh:
             return fh.read()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"  editor failed: {exc}")
         return None
     finally:
