@@ -8,6 +8,7 @@ closed for them without mutating the process-global environment.
 from __future__ import annotations
 
 import os
+import shlex
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Iterator, Mapping, MutableMapping, overload
@@ -110,3 +111,14 @@ def delegated_child_subprocess_env(
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
         return None if env is None else dict(env)
     return scrub_kanban_env(os.environ if env is None else env)
+
+
+def delegated_child_shell_command(command: str) -> str:
+    """Carry descendant scope to remote shells without relying on environment forwarding.
+
+    The assignment is scoped to eval: shell state such as cwd still persists, but
+    a shared remote shell cannot retain this command's descendant marker.
+    """
+    if not delegated_child_subprocess_env({}):
+        return command
+    return f"{DELEGATED_CHILD_ENV_MARKER}=1 eval {shlex.quote(command)}"
