@@ -19,6 +19,7 @@ __all__ = [
     "IS_WINDOWS",
     "resolve_node_command",
     "split_command_line",
+    "split_windows_command_line",
     "suppress_platform_ver_console",
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
@@ -100,6 +101,33 @@ def split_command_line(line: str) -> list[str]:
             tok = tok[1:-1]
         out.append(tok)
     return out
+
+
+def split_windows_command_line(line: str) -> list[str]:
+    """Use native Windows quoting for commands passed to CreateProcessW."""
+    import ctypes
+    from ctypes import wintypes
+
+    line = line.strip()
+    if not line:
+        return []
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    parse = shell32.CommandLineToArgvW
+    parse.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    parse.restype = ctypes.POINTER(wintypes.LPWSTR)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    free = kernel32.LocalFree
+    free.argtypes = [wintypes.HLOCAL]
+    free.restype = wintypes.HLOCAL
+
+    argc = ctypes.c_int()
+    argv = parse(line, ctypes.byref(argc))
+    if not argv:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return argv[:argc.value]
+    finally:
+        free(argv)
 
 
 def resolve_node_command(name: str, argv: Sequence[str]) -> list[str]:

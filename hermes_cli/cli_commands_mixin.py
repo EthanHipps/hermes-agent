@@ -13,6 +13,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from rich.panel import Panel
 
 from hermes_constants import display_hermes_home, is_termux as _is_termux_environment
 from agent.turn_context import extract_api_content_sidecar
+from hermes_cli._subprocess_compat import split_windows_command_line
 from hermes_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL, discover_local_cdp_url, find_free_debug_port, is_browser_debug_ready,
     launch_chrome_debug, local_port_in_use, manual_chrome_debug_command)
@@ -2399,9 +2401,16 @@ class CLICommandsMixin:
                 if initial_text:
                     fh.write(initial_text)
             try:
-                subprocess.call([*shlex.split(editor), path])
+                # Native parsing preserves both backslashes and quotes inside option values.
+                # which() resolves a bare name to its .cmd shim (``code --wait``).
+                argv = split_windows_command_line(editor) if os.name == "nt" else shlex.split(editor)
+                subprocess.call([shutil.which(argv[0]) or argv[0], *argv[1:], path])
             except Exception:
-                # Fall back to a bare invocation (editor value may not be argv-splittable everywhere).
+                # POSIX: fall back to /bin/sh, which expands what argv cannot (~, $VARS). Not on
+                # Windows: shlex.quote is /bin/sh quoting, and cmd.exe hands a non-executable editor
+                # to its file association (an "Open With" dialog), so the error is reported instead.
+                if os.name == "nt":
+                    raise
                 subprocess.call(f"{editor} {shlex.quote(path)}", shell=True)
             with open(path, "r", encoding="utf-8") as fh:
                 raw = fh.read()
