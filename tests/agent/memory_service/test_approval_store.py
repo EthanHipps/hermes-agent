@@ -55,7 +55,7 @@ def test_a_record_holds_only_the_allowed_members(tmp_path):
     assert set(data) == {"schema", "pending_id", "session_id", "logical_session_id", "provider_epoch", "target",
                          "intent_kind", "request_id", "stage_handle_b64url", "approval_binding_sha256",
                          "expected_revision", "requested_write_scopes", "approval_requirements", "expires_at",
-                         "decision", "authorization", "outcome", "origin", "created_at"}
+                         "decision", "authorization", "outcome", "origin", "created_at", "identity_kind"}
 
 
 @pytest.mark.parametrize("bad", ["../x", "ABCDEF012345", "123", "", "0123456789abc", "0123456789a/"])
@@ -70,6 +70,8 @@ def test_malformed_ids_never_reach_the_filesystem(tmp_path, bad):
     lambda d: d.update(decision="approved"),                   # approved without its authorization
     lambda d: d.update(authorization=AUTH.to_wire()),          # pending with an authorization
     lambda d: d.update(target="native"),
+    lambda d: d.update(identity_kind="unknown"),
+    lambda d: d.update(identity_kind=None),
     lambda d: d.pop("stage_handle_b64url"),
     lambda d: d.update(schema="other/v1")])
 def test_a_malformed_record_is_reported_never_guessed(tmp_path, mutate):

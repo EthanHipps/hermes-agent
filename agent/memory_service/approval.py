@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Literal, Optional, Sequence, Tuple
 
 from agent.memory_service import wire as w
 
@@ -43,9 +43,12 @@ PromptFn = Callable[[ApprovalPrompt], Optional[bool]]  # True approve, False den
 @dataclass(frozen=True)
 class ApprovalChannel:
     prompt: Optional[PromptFn] = None
-    session_id: Optional[str] = None   # Hermes session id; deferral + write-ahead only when its C2 record matches (X6b-2)
+    # A Hermes session id, or an administrative identity's record key (C6b-9); deferral and write-ahead only
+    # when the identity record it names matches the staging service's (X6b-2).
+    session_id: Optional[str] = None
     origin: str = "foreground"
     clock: Callable[[], datetime] = utcnow
+    identity_kind: Literal["session", "admin"] = "session"
 
     @property
     def available(self) -> bool:

@@ -15,8 +15,8 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.memory_service import wire as w
-from agent.memory_service.admin import (ADMIN_FAILURES, AdminContext, admin_service, format_scope, outcome_payload,
-                                        unavailable_payload)
+from agent.memory_service.admin import (ADMIN_FAILURES, AdminContext, admin_approval_channel, admin_service,
+                                        format_scope, outcome_payload, unavailable_payload)
 from agent.memory_service.mutation import PlannedMutation, PlanShortCircuit, Planner, run_curated_mutation
 from tools.memory_tool_store import ENTRY_DELIMITER, MemoryStore, _scan_memory_content
 
@@ -77,12 +77,14 @@ def _find(snapshot: w.CuratedSnapshot, entry_id: str) -> Optional[w.StoredEntry]
 
 def _mutate(raw_config: Any, context: Optional[AdminContext], target: str, planner: Planner,
             backend_factory: Any) -> Dict[str, Any]:
-    """C5 under the explicit administrative identity. No ``extra_approval`` and no ``approval=``: mandatory
-    approvals fail closed with a typed ``approval_unavailable`` until the R42 follow-up (R42-7, X6b-4)."""
+    """C5 under the explicit administrative identity, with no ``extra_approval`` (R42-7). A change that needs
+    approval waits in the pending memory approvals under that identity (``approval_pending``; C6b-9)."""
+    context = context or AdminContext()
     try:
-        with admin_service(raw_config, context=context or AdminContext(), backend_factory=backend_factory) as service:
+        approval = admin_approval_channel(raw_config, context, origin=JOURNEY_SURFACE)
+        with admin_service(raw_config, context=context, backend_factory=backend_factory) as service:
             outcome = run_curated_mutation(service, target, planner, actor_kind="human",
-                                           initiating_surface=JOURNEY_SURFACE)
+                                           initiating_surface=JOURNEY_SURFACE, approval=approval)
     except ADMIN_FAILURES as exc:
         return unavailable_payload(exc)
     return outcome_payload(outcome)
