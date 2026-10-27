@@ -178,13 +178,18 @@ def admin_service(raw_config: Any, *, context: AdminContext, backend_factory: An
     opens may both bind and the last record wins, leaving one orphan handle (bounded; K-2, R28).
     """
     from agent.memory_service.authoritative import ProviderAuthoritativeMemoryService
-    from agent.memory_service.bootstrap import open_session_view
+    from agent.memory_service.bootstrap import agent_spawned_surface, open_session_view
     from agent.memory_service.service import _default_backend_factory
     from hermes_cli.profiles import get_active_profile_name
 
     config = resolve_memory_service_config(raw_config)
     if config.provider_mode is not MemoryMode.AUTHORITATIVE:
         raise MemoryConfigurationError("an administrative memory identity requires provider_mode: authoritative")
+    if agent_spawned_surface() is not None:
+        # This identity acts for the person who owns the home. A process an agent started (a kanban
+        # worker's task can be written by anyone allowed /kanban) never gets it, as it never binds a session.
+        raise MemoryBlockedError("memory administration is unavailable to a process an agent started",
+                                 code="agent_spawned")
     key = context.record_key(config)
     record = load_admin_state(key, hermes_home)   # unreadable: bind a new identity below
     service = None

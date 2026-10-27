@@ -370,3 +370,69 @@ def test_a_skip_memory_worker_agent_has_no_service(tmp_path, monkeypatch):
     env = Env(tmp_path, monkeypatch)
     worker = env.agent("worker-1", platform="curator", skip_memory=True, enabled_toolsets=["skills"], tools=("skills_list",))
     assert worker._memory_service is None and env.factory_calls == 0 and _records() == {}
+
+
+@pytest.mark.parametrize("spawn_env", [{"HERMES_KANBAN_TASK": "t_0123abcd"},          # dispatcher-spawned worker
+                                       {"HERMES_DELEGATED_CHILD_CONTEXT": "1"}],      # started from its terminal
+                         ids=["kanban_worker", "worker_descendant"])
+@pytest.mark.parametrize("identity_kind", ["session", "admin"])
+def test_an_agent_spawned_process_gets_no_memory_identity_of_any_kind(tmp_path, monkeypatch, spawn_env, identity_kind):
+    """No human started it: it neither binds from a directory the registry resolves, nor resumes the owner's
+    session, nor opens the owner's administrative identity, and nothing contacts the provider."""
+    from contextlib import nullcontext
+
+    from agent.memory_service.admin import AdminContext, admin_approval_channel, admin_service
+    from agent.memory_service.approval import ApprovalChannel
+    from agent.memory_service.errors import MemoryBlockedError
+    from agent.memory_service.host_state import load_host_state
+    from agent.memory_service.approval_replay import (
+        RejectStatus, ReplayStatus, pending_ids, reject_pending_approval, replay_pending_approval, review_pending_approvals)
+    from agent.memory_service.approval_store import load_pending_approval
+    from agent.memory_service.mutation import MutationStatus, run_curated_mutation
+    from hermes_cli.memory_command import provider_memory_command
+    from tools.memory_tool_curated import ConsolidationBudget, NativeCall, plan_native_call
+    env = Env(tmp_path, monkeypatch)
+    owner = env.agent("owner-1")
+    raw = {"memory": env.memory}
+    context = AdminContext()
+    channel = (admin_approval_channel(raw, context, origin="test") if identity_kind == "admin"
+               else ApprovalChannel(session_id="owner-1"))
+    staging = admin_service(raw, context=context) if identity_kind == "admin" else nullcontext(owner._memory_service)
+    with staging as service:
+        pending = run_curated_mutation(service, "user", lambda snapshot: plan_native_call(
+            snapshot, NativeCall(action="add", content="owner's private preference", old_text=None, operations=None),
+            ConsolidationBudget()),
+            approval=channel)
+    assert pending.status is MutationStatus.PENDING_APPROVAL
+    pid = pending.pending_id
+    saved = load_pending_approval(pid)
+    assert saved.identity_kind == identity_kind
+    owner_records, calls = _records(), env.factory_calls
+    for key, value in spawn_env.items():
+        monkeypatch.setenv(key, value)
+    with native_memory_sentinel(_native_dir()) as sentinel:
+        fresh, resumed = env.agent("kanban-worker-1"), env.agent("owner-1")
+        with pytest.raises(MemoryBlockedError), admin_service({"memory": env.memory}, context=AdminContext()):
+            pass
+        for args in (["pending"], ["approve", pid], ["approve", "all"], ["reject", pid], ["reject", "all"]):
+            reply = provider_memory_command(args, agent=fresh, set_mode_fn=None)
+            assert "owner's private preference" not in reply and "approved and saved" not in reply
+            assert load_pending_approval(pid) == saved
+        assert pending_ids(principal=None) == []
+        assert review_pending_approvals(raw_config={"memory": env.memory}, principal=None) == []
+        assert replay_pending_approval(pid, raw_config={"memory": env.memory}, principal=None).status is ReplayStatus.UNAVAILABLE
+        assert reject_pending_approval(pid, principal=None) is RejectStatus.UNAVAILABLE
+        assert load_pending_approval(pid) == saved
+    sentinel.assert_untouched()
+    assert isinstance(fresh._memory_service, UnboundMemoryService)
+    assert isinstance(resumed._memory_service, UnboundMemoryService)
+    assert env.factory_calls == calls
+    assert {name: entry for name, entry in _records().items() if name in owner_records} == owner_records
+    assert load_host_state("kanban-worker-1").disposition == "stateless"     # a later resume stays memory-less
+
+
+def test_an_additive_kanban_worker_keeps_native_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_0123abcd")
+    env = Env(tmp_path, monkeypatch, additive=True, memory_enabled=True, user_profile_enabled=True)
+    agent = env.agent("kanban-worker-2")
+    assert agent._memory_service.disposition is MemoryDisposition.BUILTIN and agent._memory_store is not None

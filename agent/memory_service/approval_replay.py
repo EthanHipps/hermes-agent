@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any, Callable, List, Optional, Tuple
 
 from agent.memory_service import wire as w
+from agent.memory_service.bootstrap import agent_spawned_surface
 from agent.memory_service.approval import build_authorization, render_stage_inspection, utcnow
 from agent.memory_service.approval_store import (
     ApprovalStoreError, PendingApproval, drop_pending_approval, list_pending_approvals, load_pending_approval,
@@ -199,6 +200,8 @@ def review_pending_approvals(*, raw_config: Any, principal: Optional[str], backe
     ``principal`` is required: ``None`` for an owner surface, which sees every record, or the caller's principal,
     which sees, settles and drops only records its own principal staged (I3).
     """
+    if agent_spawned_surface() is not None:
+        return []
     reviews: List[PendingReview] = []
     for pid, record in list_pending_approvals():
         if record is None:
@@ -213,6 +216,8 @@ def review_pending_approvals(*, raw_config: Any, principal: Optional[str], backe
 
 def pending_ids(*, principal: Optional[str]) -> List[str]:
     """The ids ``approve all`` / ``reject all`` act on: every record for an owner surface, else the caller's own."""
+    if agent_spawned_surface() is not None:
+        return []
     return [pid for pid, record in list_pending_approvals()
             if principal is None or (record is not None and _visible_to(principal, _staging_state(record)))]
 
@@ -296,6 +301,8 @@ def replay_pending_approval(pending_id: str, *, raw_config: Any, principal: Opti
 
     A record the caller's ``principal`` did not stage is ``NOT_FOUND``, before any provider call or drop.
     """
+    if agent_spawned_surface() is not None:
+        return ReplayReport(pending_id, ReplayStatus.UNAVAILABLE, "agent_spawned")
     if not valid_pending_id(pending_id):
         return ReplayReport(pending_id, ReplayStatus.NOT_FOUND)
     try:
@@ -328,6 +335,8 @@ def reject_pending_approval(pending_id: str, *, principal: Optional[str]) -> Rej
     A record the caller's ``principal`` did not stage, an unreadable one included, is ``NOT_FOUND`` and kept;
     only an owner surface (``principal=None``) removes an unreadable record.
     """
+    if agent_spawned_surface() is not None:
+        return RejectStatus.UNAVAILABLE
     if not valid_pending_id(pending_id):
         return RejectStatus.NOT_FOUND
     try:

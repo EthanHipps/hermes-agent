@@ -82,10 +82,12 @@ class ManagedModalEnvironment(BaseEnvironment):
         # payload, so streaming-time bounding does not apply (the terminal tool's final
         # truncation still caps it).
         del rewrite_compound_background, bounded_capture
+        from agent.delegation_context import delegated_child_shell_command
         exec_command, sudo_stdin = self._prepare_command(command)
         if sudo_stdin is not None:
             # Feed sudo via a shell pipe: the transport has no direct stdin piping.
             exec_command = f"printf '%s\\n' {shlex.quote(sudo_stdin.rstrip())} | {exec_command}"
+        exec_command = delegated_child_shell_command(exec_command)
         timeout = timeout or self.timeout
         exec_id = str(uuid.uuid4())
         payload: Dict[str, Any] = {"execId": exec_id, "command": exec_command, "cwd": cwd or self.cwd,

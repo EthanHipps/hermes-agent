@@ -138,7 +138,10 @@ def handle_curated_memory_subcommand(args: List[str], *, principal: Optional[str
 
     ``principal`` is required: ``None`` for an owner surface, or the gateway caller's mapped principal.
     """
+    from agent.memory_service.bootstrap import agent_spawned_surface
     from hermes_cli.config import load_config
+    if agent_spawned_surface() is not None:
+        return "Curated memory approvals are unavailable in agent-started processes."
     caller = _Caller(load_config(), set_mode_fn, principal, bodies)
     if not args:
         return f"{_state_line()}\n\n{_review(caller)}"

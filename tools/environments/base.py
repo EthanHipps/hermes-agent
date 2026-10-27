@@ -326,8 +326,9 @@ class BaseEnvironment(ABC):
 
     def _wrap_command(self, command: str, cwd: str) -> str:
         """Full bash script: source snapshot, cd, run, re-dump env, emit CWD markers."""
+        from agent.delegation_context import delegated_child_shell_command
         return _wrap_command_script(
-            command,
+            delegated_child_shell_command(command),
             passthrough_names=self._snapshot_excluded_passthrough_names(),
             snapshot_ready=self._snapshot_ready,
             **self._snapshot_script_kwargs(cwd))

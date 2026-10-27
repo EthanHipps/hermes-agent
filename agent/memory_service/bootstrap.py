@@ -153,6 +153,29 @@ def open_session_view(config: MemoryServiceConfig, state: "HostSessionState", *,
     return view
 
 
+def agent_spawned_surface() -> Optional[str]:
+    """``"kanban"`` or ``"delegated"`` when an agent, not a human, started this process; else ``None``.
+
+    Only the kanban dispatcher sets ``HERMES_KANBAN_TASK`` (on its worker), and every terminal spawn under a
+    worker or a delegate carries the delegated-child marker (``delegation_context.delegated_child_subprocess_env``).
+    Such a process never gets a curated-memory identity: not a session bind, and not an administrative one.
+    """
+    from agent.delegation_context import is_delegated_child_process_context
+
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return "kanban"
+    return "delegated" if is_delegated_child_process_context() else None
+
+
+def _has_host_state(session_id: str) -> bool:
+    from agent.memory_service.errors import BindingInvalidError
+    from agent.memory_service.host_state import load_host_state
+    try:
+        return load_host_state(session_id) is not None
+    except BindingInvalidError:
+        return True   # unreadable: never overwrite what cannot be read
+
+
 def init_memory_service(
     raw_config,
     *,
@@ -199,11 +222,21 @@ def init_memory_service(
     from agent.memory_service.errors import MemoryBlockedError
     from agent.memory_service.host_state import HostStateRecord, save_host_state
     from agent.memory_service.service import FailurePolicy, StatelessMemoryService
-    from agent.memory_service.view import UNBOUND_PLATFORMS, UnboundMemoryService
+    from agent.memory_service.view import UNBOUND_PLATFORMS, AgentSpawnedMemoryService, UnboundMemoryService
     if platform in UNBOUND_PLATFORMS:
         # Ruling R43-8 (§9.6 L1585, §9.3 L1229): a scheduled or delegated agent with no explicit
         # service never binds for itself — rejected before any provider contact, with no record.
         return UnboundMemoryService(config, surface=platform), None
+    spawned_by = agent_spawned_surface()
+    if spawned_by is not None:
+        # Same rule for a process an agent started, before any bind or resume: a directory bind is for
+        # human-initiated sessions only (§9.3 L1229, §9.7 L1625), and a kanban task's workspace is chosen by
+        # whoever created the task. Like an unmapped gateway user's session below, a new session keeps a
+        # stateless record, so resuming it later stays memory-less instead of failing binding_invalid (I1).
+        logger.warning("curated memory is off: an agent started this process (%s)", spawned_by)
+        if logical_session_id and not _has_host_state(logical_session_id):
+            save_host_state(HostStateRecord(logical_session_id, "stateless", None))
+        return AgentSpawnedMemoryService(config, surface=spawned_by), None
 
     binding = (
         resolve_session_binding(logical_session_id, session_db=session_db)
