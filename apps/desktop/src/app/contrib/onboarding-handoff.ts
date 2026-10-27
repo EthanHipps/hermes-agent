@@ -174,6 +174,7 @@ export function useOnboardingHandoff({
               const staged = stagedOnboardingFacts(receiptKey)
 
               if (staged) {
+                saveStagedOnboardingFacts(receiptKey, staged)
                 noticeOnboardingFactsPending(staged)
 
                 return
