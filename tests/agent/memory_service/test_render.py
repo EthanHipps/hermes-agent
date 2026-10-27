@@ -192,8 +192,8 @@ def test_generated_general_packet_preserves_sources_order_and_exclusions(tmp_pat
     import json
     from pathlib import Path
     vectors = json.loads((Path(__file__).parents[2] / "fixtures/provider-contract-v2/vectors.json").read_bytes())
-    by_id = {v["id"]: v["input"]["value"] for v in vectors}
-    registry, task = by_id["delivery-registry"], by_id["delivery-task"]
+    by_id = {v["id"]: v["input"] for v in vectors}
+    registry, task = by_id["delivery-registry"]["value"], by_id["delivery-task"]["value"]
     store = FakeProviderStore()
     from tests.agent.memory_service.fake_backend import set_key
     from agent.memory_service.service import RecallQuery
