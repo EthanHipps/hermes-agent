@@ -118,13 +118,20 @@ def _region(label: str, entries: Sequence[w.GeneralDeliveryItem]) -> List[str]:
         out.append(f"- {first}")
         out.extend(f"  {line}" for line in rest)
     for entry in (e for e in entries if e.lane == "scoped_evidence"):
-        ident = _label(entry.id)
-        scope = _label(f"{entry.origin_scope.kind}:{entry.origin_scope.id}")
-        out.append(EVIDENCE_OPEN.format(id=ident, scope=scope, source=_label(entry.provenance.surface)))
-        out.append(EVIDENCE_PREAMBLE)
-        out.extend(f"> {line}" for line in _body(entry))
-        out.append(EVIDENCE_CLOSE.format(id=ident))
+        out.extend(evidence_record_lines(entry))
     return out
+
+
+def evidence_record_lines(entry: w.DeliveredEntry) -> List[str]:
+    """One fenced scoped-evidence record: open fence, preamble, quoted body, close fence."""
+    ident = _label(entry.id)
+    scope = _label(f"{entry.origin_scope.kind}:{entry.origin_scope.id}")
+    return [
+        EVIDENCE_OPEN.format(id=ident, scope=scope, source=_label(entry.provenance.surface)),
+        EVIDENCE_PREAMBLE,
+        *(f"> {line}" for line in _body(entry)),
+        EVIDENCE_CLOSE.format(id=ident),
+    ]
 
 
 def render_curated_prompt(memory: Optional[w.CuratedSnapshot], user: Optional[w.CuratedSnapshot]) -> CuratedPromptRender:
