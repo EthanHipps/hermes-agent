@@ -41,7 +41,11 @@ BLOCKED_NOTE = "[BLOCKED: curated memory record {id} matched threat pattern(s): 
 _SEPARATOR_CHARS = 3  # len("\n\u00a7\n"): native-compatible accounting (§8.5 L874)
 _LABELS = {"general": "Standing context", "hermes_memory": "Memory", "hermes_user": "User profile"}
 _SENTINEL_RE = re.compile(r"\[(MEMORY_SCOPED_EVIDENCE_(?:BEGIN|END))")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# The shared fence class: every control character except TAB (LF is handled by line splitting),
+# plus the invisible format and bidi characters that can hide or reorder a quoted line.
+_CONTROL_RE = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]"
+)
 _LABEL_RE = re.compile(r"[^A-Za-z0-9_.:\-]")
 
 
@@ -61,7 +65,7 @@ def _label(value: str) -> str:
 
 
 def _escape(text: str) -> str:
-    text = _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    text = _CONTROL_RE.sub(lambda m: f"\\u{{{ord(m.group()):x}}}", text)
     return _SENTINEL_RE.sub(r"\\[\1", text)
 
 
