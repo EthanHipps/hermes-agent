@@ -131,6 +131,10 @@ def _migrate_args():
     "authoritative",            # malformed: the section is not a mapping
     ["provider_mode"],          # malformed: the section is not a mapping
     {"provider": "honcho", "provider_mode": ["authoritative"]},   # malformed mode
+    {"provider": "honcho", "provider_mode": "sidecar"},           # unknown mode is never additive
+    {"provider": "honcho", "provider_mode": "Authoritative"},     # the mode is case-sensitive
+    {"provider": "honcho", "provider_mode": "authoritativ"},      # a typo of the mode
+    {"provider": "honcho", "authoritative_failure_policy": "stateless"},   # stateless names no mode
 ])
 def test_migrate_refuses_in_an_authoritative_home_before_discovery(native_dir, migrate_spies, section):
     cli, calls = migrate_spies
@@ -143,7 +147,7 @@ def test_migrate_refuses_in_an_authoritative_home_before_discovery(native_dir, m
     assert calls == {"discover": [], "connect": [], "prompt": []}
 
 
-def test_migrate_refuses_on_a_malformed_memory_section(native_dir, migrate_spies):
+def test_migrate_refuses_on_an_unparseable_config_file(native_dir, migrate_spies):
     """An unparseable config.yaml cannot prove the home is additive, so it refuses too."""
     from hermes_constants import get_hermes_home
     cli, calls = migrate_spies
@@ -156,11 +160,16 @@ def test_migrate_refuses_on_a_malformed_memory_section(native_dir, migrate_spies
     assert calls == {"discover": [], "connect": [], "prompt": []}
 
 
-def test_additive_migrate_is_unchanged(migrate_spies):
+@pytest.mark.parametrize("section", [
+    {"provider": "honcho"},
+    {"provider": "honcho", "provider_mode": None},
+    {"provider": "honcho", "provider_mode": "additive"},
+])
+def test_additive_migrate_is_unchanged(migrate_spies, section):
     cli, calls = migrate_spies
     calls_seen = []
     cli._find_memory_files = lambda names: calls_seen.append(names) or []
-    _write_config({"provider": "honcho"})
+    _write_config(section)
     cli.cmd_migrate(_migrate_args())      # no SystemExit: the walkthrough runs to its end
     assert len(calls_seen) == 2           # user files, then agent files
     assert calls["connect"] == []

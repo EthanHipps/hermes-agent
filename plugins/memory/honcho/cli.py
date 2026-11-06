@@ -1153,21 +1153,16 @@ def _refuse_in_authoritative_home() -> None:
     """Exit before any file is looked at when the host runs authoritative memory.
 
     The walkthrough globs native memory files and uploads them, which an authoritative
-    home must never do. A config that cannot be read, or whose ``memory`` section is not
-    a mapping with a string ``provider_mode``, cannot prove the home is additive, so it
-    refuses as well (``requests_authoritative_mode`` alone reports False for those).
+    home must never do. Only a config that resolves to additive mode proves the home is
+    additive: an unreadable file, an unknown or malformed ``provider_mode`` and an invalid
+    memory section all fail to resolve, and refuse as well.
     """
-    from agent.memory_service.bootstrap import requests_authoritative_mode
+    from agent.memory_service.config import MemoryMode, resolve_memory_service_config
     from hermes_cli.config import require_readable_config_before_write
 
     try:
-        raw = require_readable_config_before_write()
-        section = raw.get("memory")
-        malformed = section is not None and (
-            not isinstance(section, dict)
-            or not isinstance(section.get("provider_mode", ""), str)
-        )
-        refuse = malformed or requests_authoritative_mode(raw)
+        refuse = resolve_memory_service_config(
+            require_readable_config_before_write()).provider_mode is not MemoryMode.ADDITIVE
     except Exception:
         refuse = True
     if refuse:
