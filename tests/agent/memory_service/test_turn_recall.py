@@ -5,6 +5,7 @@ IDs already delivered) and §9.6's two recall cells: unavailable recall warns an
 ambiguous recall blocks delivery. Everything runs the real service over the stateful fake.
 """
 
+import asyncio
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -70,8 +71,9 @@ class _World:
         self.service = select_memory_service(
             _config(tmp_path, authoritative_failure_policy=policy, **memory), store_factory=_never_built,
             requested_context=CONTEXT, backend_factory=factory)
-        self.statuses = []
-        self.agent = SimpleNamespace(_memory_service=self.service, _memory_manager=None, _emit_status=self.statuses.append)
+        self.statuses, self.warnings = [], []
+        self.agent = SimpleNamespace(_memory_service=self.service, _memory_manager=None,
+                                     _emit_status=self.statuses.append, _emit_warning=self.warnings.append)
         self.backend.calls.clear()
 
     @property
@@ -152,7 +154,7 @@ def test_one_revision_correct_call_per_enabled_target_in_order(tmp_path):
     assert (user.source_revision, user.include_channels) == (user_revision, ("hermes_user",))
     assert memory.query == user.query == "beacon"
     assert memory.budget == w.RecallBudget(trusted_chars=0, evidence_chars=3000, max_entries=20)
-    assert world.statuses == []
+    assert world.warnings == []
 
 
 def test_second_target_gets_remaining_budget_and_delivered_union(tmp_path):
@@ -205,11 +207,11 @@ def test_disabled_target_and_stateless_make_no_call(tmp_path):
     assert only_user.ops() == [("load_curated", "user"), ("recall_context", "user")]
 
     neither = _World(tmp_path, memory_enabled=False, user_profile_enabled=False)
-    assert neither.event() == "" and neither.ops() == [] and neither.statuses == []
+    assert neither.event() == "" and neither.ops() == [] and neither.warnings == []
 
     stateless = _World(tmp_path, policy="stateless", arm=lambda store: store.fail_transport("negotiate"))
     assert isinstance(stateless.service, StatelessMemoryService)
-    assert stateless.event() == "" and stateless.ops() == [] and stateless.statuses == []
+    assert stateless.event() == "" and stateless.ops() == [] and stateless.warnings == []
 
 
 def test_provider_without_recall_makes_no_call_no_warning_no_block(tmp_path):
@@ -217,7 +219,7 @@ def test_provider_without_recall_makes_no_call_no_warning_no_block(tmp_path):
     world = _World(tmp_path, backend_type=partial(FakeAuthoritativeBackend, recall=False))
     _seed_both_targets(world.store)
     assert world.service.capabilities.recall_context is False
-    assert world.event() == "" and world.ops() == [] and world.statuses == []
+    assert world.event() == "" and world.ops() == [] and world.warnings == []
 
 
 # --- failure semantics ----------------------------------------------------------
@@ -236,11 +238,49 @@ def test_unavailable_recall_warns_and_renders_nothing_after_required_load(tmp_pa
 
     assert world.ops() == LOAD_BOTH + RECALL_BOTH
     assert text == ""
-    assert world.statuses == [t.RECALL_UNAVAILABLE_WARNING]
+    assert world.warnings == [t.RECALL_UNAVAILABLE_WARNING] and world.statuses == []
     assert world.service.blocked is False and world.service.degraded_warning() is None
     state = world.service.session_state
     for token in (state.provider_epoch, state.identity.binding_revision, state.identity.opaque_binding_b64url, "beacon"):
-        assert token not in world.statuses[0]
+        assert token not in world.warnings[0]
+
+
+class _StatusAdapter:
+    """The Telegram and Slack shape: each status key owns one bubble, and the next status with that key edits it."""
+
+    def __init__(self):
+        self.bubbles = []
+
+    async def send_or_update_status(self, chat_id, status_key, content, *, metadata=None):
+        self.bubbles.append((status_key, content))
+
+
+def test_unavailable_warning_reaches_the_gateway_status_path(agent_env):
+    """§9.6 L1574 says show it: under the lifecycle key, the next lifecycle status would edit it away."""
+    from gateway.config import Platform
+    from gateway.run import _prepare_gateway_status_message
+    from gateway.run_turn_runner import TurnRunner
+
+    store, agent = agent_env.store, agent_env.agent
+    store.curated_limits = NOTHING_DELIVERED
+    _seed_both_targets(store)
+    store.fail_transport("recall_context", times=2)
+    adapter = _StatusAdapter()
+    ctx = SimpleNamespace(source=SimpleNamespace(platform=Platform.TELEGRAM), _status_adapter=adapter,
+                          _status_chat_id="chat-1", _status_thread_metadata=None, _cleanup_progress=False)
+    runner = SimpleNamespace(_ctx=ctx, _status_live=lambda: True, _schedule=lambda coro, message: asyncio.run(coro))
+    agent.status_callback = partial(TurnRunner._status_callback_sync, runner)     # as the gateway wires its agent
+    create = agent.client.chat.completions.create
+    create.return_value = _response("answer")
+
+    result = agent.run_conversation("beacon")
+
+    assert result.get("completed") is True and create.call_count == 1
+    assert adapter.bubbles.count(("warn", t.RECALL_UNAVAILABLE_WARNING)) == 1
+    assert ("lifecycle", t.RECALL_UNAVAILABLE_WARNING) not in adapter.bubbles
+    # The chat-surface noise filter is text-based: no surface may drop or rewrite this wording.
+    for platform in Platform:
+        assert _prepare_gateway_status_message(platform, "warn", t.RECALL_UNAVAILABLE_WARNING) == t.RECALL_UNAVAILABLE_WARNING
 
 
 def test_one_unavailable_target_renders_nothing_for_the_event_and_warns_once(tmp_path):
@@ -248,7 +288,7 @@ def test_one_unavailable_target_renders_nothing_for_the_event_and_warns_once(tmp
     _seed_both_targets(world.store)
     world.after_first_recall(lambda store: store.fail_transport("recall_context"))
     assert world.event() == ""
-    assert world.ops() == LOAD_BOTH + RECALL_BOTH and world.statuses == [t.RECALL_UNAVAILABLE_WARNING]
+    assert world.ops() == LOAD_BOTH + RECALL_BOTH and world.warnings == [t.RECALL_UNAVAILABLE_WARNING]
 
 
 def test_a_transport_failure_never_hides_the_other_targets_ambiguity(tmp_path):
@@ -257,7 +297,7 @@ def test_a_transport_failure_never_hides_the_other_targets_ambiguity(tmp_path):
     world.store.fail_typed("recall_context", "ambiguous_policy", details=AMBIGUITY)
     with pytest.raises(MemoryBlockedError) as exc:
         world.event()
-    assert exc.value.code == "ambiguous_policy" and world.statuses == []
+    assert exc.value.code == "ambiguous_policy" and world.warnings == []
     assert world.ops() == LOAD_BOTH + RECALL_BOTH
 
 
@@ -275,7 +315,7 @@ def test_a_failed_required_load_blocks_and_is_not_reported_as_unavailable_recall
     world.backend.load_curated = load_curated
     with pytest.raises(MemoryBlockedError):
         world.event()
-    assert world.ops() == LOAD_BOTH and world.statuses == []
+    assert world.ops() == LOAD_BOTH and world.warnings == []
     assert world.service.blocked is True                     # the gate's own latch, not an optional miss
 
 
@@ -290,7 +330,7 @@ def test_other_typed_recall_refusals_warn_and_render_nothing(tmp_path, code, det
     _seed_both_targets(world.store)
     world.store.fail_typed("recall_context", code, details=details)
     assert world.event() == ""
-    assert world.ops() == LOAD_BOTH + RECALL_BOTH and world.statuses == [t.RECALL_UNAVAILABLE_WARNING]
+    assert world.ops() == LOAD_BOTH + RECALL_BOTH and world.warnings == [t.RECALL_UNAVAILABLE_WARNING]
     assert world.service.blocked is False
 
 
@@ -303,7 +343,7 @@ def test_binding_or_epoch_failure_during_recall_blocks(tmp_path, code, details):
     world.store.fail_typed("recall_context", code, details=details)
     with pytest.raises(MemoryBlockedError) as exc:
         world.event()
-    assert exc.value.code == code and world.statuses == []
+    assert exc.value.code == code and world.warnings == []
     assert world.ops() == LOAD_BOTH + [("recall_context", "memory")]
 
 

@@ -788,7 +788,7 @@ def _memory_turn_start_and_prefetch(
 
         _recall = authoritative_turn_recall(_service, _query)
         if _recall.warning:
-            agent._emit_status(_recall.warning)
+            agent._emit_warning(_recall.warning)
         return _recall.text
     if not agent._memory_manager:
         return ""
