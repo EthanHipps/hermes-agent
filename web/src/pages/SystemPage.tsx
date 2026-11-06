@@ -1219,6 +1219,12 @@ export default function SystemPage() {
               </p>
             )}
 
+            {memory?.curated_memory ? (
+              <p className="border-t border-border pt-3 text-xs text-muted-foreground">
+                Curated memory is managed by the {memory.curated_memory.provider || "memory"} provider, so there
+                are no built-in files to show or reset here. Reset a scope from the desktop app, the CLI or the API.
+              </p>
+            ) : (
             <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
               <span className="text-xs text-muted-foreground">
                 Built-in files — MEMORY.md:{" "}
@@ -1237,6 +1243,7 @@ export default function SystemPage() {
                 </Button>
               </div>
             </div>
+            )}
           </CardContent>
         </Card>
       </section>

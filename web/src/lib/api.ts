@@ -1702,10 +1702,19 @@ export interface MemoryProviderInfo {
   setup?: MemoryProviderSetupInfo;
 }
 
+/** Present only when a memory provider owns curated memory (authoritative mode). */
+export interface CuratedMemoryStatus {
+  authority: string;
+  provider: string;
+  provider_mode: "authoritative";
+  configuration_error: string | null;
+}
+
 export interface MemoryStatus {
   active: string;
   providers: MemoryProviderInfo[];
   builtin_files: { memory: number; user: number };
+  curated_memory?: CuratedMemoryStatus;
 }
 
 export interface MemoryProviderExternalDependency {
