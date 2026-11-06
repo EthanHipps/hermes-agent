@@ -27,6 +27,8 @@ import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
 import type { ActionStatusResponse } from '@/types/hermes'
 
+import { runMemoryReset } from './memory-reset'
+
 const ACTION_POLL_MS = 1200
 const ACTION_POLL_LIMIT = 240 // ~5 minutes of polling before giving up.
 
@@ -177,8 +179,38 @@ export function MaintenancePanel() {
       setMemoryBusy(true)
 
       try {
-        const result = await resetMemory(target)
-        notify({ kind: 'success', title: mm.resetDone(result.deleted.join(', ') || label), message: '' })
+        const outcome = await runMemoryReset(() => resetMemory({ target }))
+
+        switch (outcome.kind) {
+          case 'deleted':
+            notify({ kind: 'success', title: mm.resetDone(outcome.deleted.join(', ') || label), message: '' })
+
+            break
+
+          case 'pending':
+            notify({ kind: 'info', title: mm.resetPending(outcome.pendingId), message: '' })
+
+            break
+
+          case 'refused':
+            notify({ kind: 'error', title: mm.resetFailed, message: mm.resetRefused(outcome.message) })
+
+            break
+
+          case 'unavailable':
+            notify({ kind: 'warning', title: mm.resetFailed, message: mm.resetUnknown(outcome.message) })
+
+            break
+
+          case 'unexpected':
+            notify({ kind: 'warning', title: mm.resetFailed, message: mm.resetUnexpected })
+
+            break
+
+          default:
+            notify({ kind: 'error', title: mm.resetFailed, message: outcome.message })
+        }
+
         setMemory(await getMemoryStatus())
       } catch (err) {
         notifyError(err, mm.resetFailed)
@@ -323,22 +355,36 @@ export function MaintenancePanel() {
               {' · '}
               {mm.memoryProvider(memory.active || mm.builtinMemory)}
             </div>
-            <MemoryFileRow
-              busy={memoryBusy}
-              label={mm.memoryFile}
-              onReset={() => void doResetMemory('memory', mm.memoryFile)}
-              resetLabel={mm.resetMemory}
-              size={memory.builtin_files.memory}
-              sizeLabel={memory.builtin_files.memory > 0 ? formatBytes(memory.builtin_files.memory) : mm.empty}
-            />
-            <MemoryFileRow
-              busy={memoryBusy}
-              label={mm.userFile}
-              onReset={() => void doResetMemory('user', mm.userFile)}
-              resetLabel={mm.resetUser}
-              size={memory.builtin_files.user}
-              sizeLabel={memory.builtin_files.user > 0 ? formatBytes(memory.builtin_files.user) : mm.empty}
-            />
+            {memory.curated_memory ? (
+              // Provider-managed: no native file exists to size or delete, and the status carries no
+              // scope to reset, so the actions stay off rather than offering a free-form scope.
+              <>
+                <div className="py-1 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                  {mm.authoritativeNotice}
+                </div>
+                <ProviderMemoryRow label={mm.providerMemoryLabel} resetLabel={mm.resetMemory} />
+                <ProviderMemoryRow label={mm.providerUserLabel} resetLabel={mm.resetUser} />
+              </>
+            ) : (
+              <>
+                <MemoryFileRow
+                  busy={memoryBusy}
+                  label={mm.memoryFile}
+                  onReset={() => void doResetMemory('memory', mm.memoryFile)}
+                  resetLabel={mm.resetMemory}
+                  size={memory.builtin_files.memory}
+                  sizeLabel={memory.builtin_files.memory > 0 ? formatBytes(memory.builtin_files.memory) : mm.empty}
+                />
+                <MemoryFileRow
+                  busy={memoryBusy}
+                  label={mm.userFile}
+                  onReset={() => void doResetMemory('user', mm.userFile)}
+                  resetLabel={mm.resetUser}
+                  size={memory.builtin_files.user}
+                  sizeLabel={memory.builtin_files.user > 0 ? formatBytes(memory.builtin_files.user) : mm.empty}
+                />
+              </>
+            )}
           </div>
         )}
       </section>
@@ -410,6 +456,17 @@ function MemoryFileRow({
         size="xs"
         variant="text"
       >
+        {resetLabel}
+      </Button>
+    </div>
+  )
+}
+
+function ProviderMemoryRow({ label, resetLabel }: { label: string; resetLabel: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2">
+      <span className="text-[length:var(--conversation-text-font-size)] font-medium">{label}</span>
+      <Button className="text-destructive hover:text-destructive" disabled size="xs" variant="text">
         {resetLabel}
       </Button>
     </div>

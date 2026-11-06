@@ -1772,6 +1772,13 @@ export interface Translations {
       resetConfirm: (target: string) => string
       resetDone: (files: string) => string
       resetFailed: string
+      resetPending: (id: string) => string
+      resetRefused: (message: string) => string
+      resetUnknown: (message: string) => string
+      resetUnexpected: string
+      authoritativeNotice: string
+      providerMemoryLabel: string
+      providerUserLabel: string
       actionStarted: (name: string) => string
       actionFailed: (name: string) => string
       running: string

@@ -97,12 +97,24 @@ describe('Hermes REST parity helpers (hub / mcp / maintenance)', () => {
 
   it('reads memory status and resets a specific target', async () => {
     await getMemoryStatus()
-    await resetMemory('user')
+    await resetMemory({ target: 'user' })
 
     expect(api).toHaveBeenNthCalledWith(1, expect.objectContaining({ path: '/api/memory' }))
     expect(api).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ path: '/api/memory/reset', method: 'POST', body: { target: 'user' } })
+    )
+  })
+
+  it('sends scopes and the administrative context only when the caller gives them', async () => {
+    await resetMemory({ target: 'memory', scopes: ['repository:repo-1'], repo_id: 'repo-1', project_id: 'proj-1' })
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/memory/reset',
+        method: 'POST',
+        body: { target: 'memory', scopes: ['repository:repo-1'], repo_id: 'repo-1', project_id: 'proj-1' }
+      })
     )
   })
 
