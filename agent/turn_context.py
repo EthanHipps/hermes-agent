@@ -767,10 +767,23 @@ def _memory_turn_start_and_prefetch(
 ) -> str:
     """Notify memory providers of the new turn, then prefetch external memory once
     before the tool loop (skipped on trivial prompts with no semantic signal).
-    Returns the prefetch text (``""`` when nothing was injected)."""
+    Returns the prefetch text (``""`` when nothing was injected).
+
+    A provider-managed session runs its recall event through MemoryService instead, outside
+    every ``suppress``: a MemoryBlockedError ends the turn with a typed result."""
+    from agent.memory_service.service import is_provider_managed
+
+    _query = original_user_message if isinstance(original_user_message, str) else ""
+    _service = getattr(agent, "_memory_service", None)
+    if is_provider_managed(_service):
+        from agent.memory_service.turn_recall import authoritative_turn_recall
+
+        _recall = authoritative_turn_recall(_service, _query)
+        if _recall.warning:
+            agent._emit_status(_recall.warning)
+        return _recall.text
     if not agent._memory_manager:
         return ""
-    _query = original_user_message if isinstance(original_user_message, str) else ""
     # The author rides along so a provider can attribute THIS turn, not whoever opened the session.
     _author = turn_author if isinstance(turn_author, dict) else {}
     with suppress(Exception):
