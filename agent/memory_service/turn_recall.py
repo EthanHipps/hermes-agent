@@ -19,6 +19,7 @@ from agent.memory_service import wire as w
 from agent.memory_service.errors import MemoryBlockedError, ProviderError, ProviderTransportError
 from agent.memory_service.render import OMISSION_NOTE, evidence_record_lines, render_curated_prompt
 from agent.memory_service.service import MemoryService, RecallQuery
+from agent.skill_commands import extract_user_instruction_from_skill_message
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +99,9 @@ def authoritative_turn_recall(service: MemoryService, query: str) -> RecallOutco
     """The recall event for one user turn; the caller delivers ``text`` and shows ``warning``.
 
     A stateless session or a provider that never negotiated recall has nothing to call, and a
-    trivial or empty query has nothing to ask. Neither is a warning, and neither touches the
-    provider: the request gate still makes its own fresh loads.
+    trivial or empty query has nothing to ask. A slash-skill turn asks only what the user typed
+    beside the skill, and a bare invocation asks nothing, as on the additive path. None of these
+    is a warning, and none touches the provider: the request gate still makes its own fresh loads.
 
     Otherwise every enabled target is loaded first, because each call must carry that target's
     own revision and exclude what both current snapshots already deliver (§9.3). A failed load
@@ -108,6 +110,7 @@ def authoritative_turn_recall(service: MemoryService, query: str) -> RecallOutco
     other target's call failed, so neither budget nor a transport fault can hide a policy conflict.
     An event with a failed call renders no recall and returns the warning (§9.6 L1574).
     """
+    query = extract_user_instruction_from_skill_message(query) or ""
     if not service.capabilities.recall_context or is_trivial_prompt(query):
         return RecallOutcome(text="", warning=None)
     snapshots = {target: service.load_curated(target) for target, _ in _RECALL_TARGETS if service.target_enabled(target)}

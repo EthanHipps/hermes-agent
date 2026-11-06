@@ -157,6 +157,25 @@ def test_one_revision_correct_call_per_enabled_target_in_order(tmp_path):
     assert world.warnings == []
 
 
+def test_skill_scaffolding_never_reaches_the_recall_query(tmp_path):
+    from tests.agent.test_memory_skill_scaffolding import _BUNDLE_TURN, _SINGLE_SKILL_TURN
+
+    for turn, words in ((_SINGLE_SKILL_TURN, "make a skill for release triage"),
+                        (_BUNDLE_TURN, "fix the failing retrieval test")):
+        world = _World(tmp_path)
+        world.event(turn)
+        assert [request.query for request in world.recalls()] == [words, words]
+
+
+def test_a_bare_skill_turn_makes_no_recall_call(tmp_path):
+    from tests.agent.test_memory_skill_scaffolding import _BARE_SKILL_TURN
+
+    world = _World(tmp_path)
+    outcome = world.event(_BARE_SKILL_TURN)
+    assert world.recalls() == [] and world.warnings == []
+    assert not outcome
+
+
 def test_second_target_gets_remaining_budget_and_delivered_union(tmp_path):
     limits = w.CuratedLimits(memory_chars=len("beacon snapshot memory"), user_chars=len("beacon snapshot user"),
                              initial_general_chars=3000, max_entry_chars=2200, max_entries=100)
