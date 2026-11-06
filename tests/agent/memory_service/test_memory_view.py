@@ -66,7 +66,7 @@ def test_unbound_service_rejects_every_read_and_write_without_a_provider(env):
 
 def test_view_pins_the_parent_identity_on_its_own_transport(env):
     parent = env.parent()
-    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
+    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent, _memory_session_key="s-1")),
                           surface="background_review", backend_factory=env.factory)
     assert isinstance(view, LimitedMemoryView) and view.identity == parent.identity
     own = env.backends[-1]
@@ -77,7 +77,7 @@ def test_view_pins_the_parent_identity_on_its_own_transport(env):
 
 def test_view_stamps_its_surface_on_every_stage(env):
     parent = env.parent()
-    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
+    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent, _memory_session_key="s-1")),
                           surface="background_review", backend_factory=env.factory)
     assert '"success": true' in curated_memory_tool(view, action="add", content="uses pnpm", memory_admission="declarative")
     stage = [req for op, req in env.backends[-1].calls if op == "stage_curated"][-1]
@@ -88,7 +88,7 @@ def test_view_stamps_its_surface_on_every_stage(env):
 
 def test_side_question_view_is_read_only(env):
     parent = env.parent()
-    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
+    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent, _memory_session_key="s-1")),
                           surface="side_question", backend_factory=env.factory)
     assert view.mutations is False
     with pytest.raises(CapabilityUnavailableError):
@@ -98,7 +98,7 @@ def test_side_question_view_is_read_only(env):
 
 def test_view_never_recalls_captures_or_commits_an_approval(env):
     parent = env.parent()
-    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
+    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent, _memory_session_key="s-1")),
                           surface="background_review", backend_factory=env.factory)
     assert view.capabilities.recall_context is False and view.capabilities.capture_continuity is False
     approved = w.ApprovalAuthorization(kind="approved", approval_id="a-1", approved_by_principal_id="ethan",
@@ -124,7 +124,7 @@ def test_view_open_failure_is_content_free(env):
     parent = env.parent()
     env.store.set_epoch("ep-9")
     with pytest.raises(MemoryBlockedError) as exc:
-        open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
+        open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent, _memory_session_key="s-1")),
                        surface="background_review", backend_factory=env.factory)
     assert "ep-" not in str(exc.value)
     assert exc.value.__cause__ is None and exc.value.__suppress_context__ is True
@@ -132,7 +132,7 @@ def test_view_open_failure_is_content_free(env):
 
 def test_view_shutdown_is_idempotent(env):
     parent = env.parent()
-    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent)),
+    view = open_fork_view(capture_parent_memory(SimpleNamespace(_memory_service=parent, _memory_session_key="s-1")),
                           surface="background_review", backend_factory=env.factory)
     view.shutdown()
     view.shutdown()

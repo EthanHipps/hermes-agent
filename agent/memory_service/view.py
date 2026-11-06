@@ -170,6 +170,8 @@ def open_fork_view(parent: ParentMemory, *, surface: str,
         return StatelessMemoryService(parent.config, reason="the parent session is stateless")
     if parent.state is None:
         raise MemoryBlockedError("the parent session has no frozen memory identity", code="binding_invalid")
+    if not parent.session_id:     # approvals key to the reviewed session; refuse before any provider contact
+        raise MemoryBlockedError("the parent's frozen memory identity names no session", code="binding_invalid")
     from agent.memory_service.bootstrap import open_session_view
 
     try:

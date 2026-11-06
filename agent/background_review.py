@@ -883,10 +883,6 @@ def build_cache_parity_fork(
     from agent.memory_service.view import capture_parent_memory, open_fork_view
     parent_memory = memory_parent if memory_parent is not None else capture_parent_memory(agent)
     view = open_fork_view(parent_memory, surface=write_origin) if parent_memory is not None else None
-    if view is not None and parent_memory.state is not None and not parent_memory.session_id:
-        view.shutdown()                  # a frozen identity with no session to key its approvals to
-        from agent.memory_service.errors import MemoryBlockedError
-        raise MemoryBlockedError("the parent's frozen memory identity names no session", code="binding_invalid")
     init_kwargs = _fork_init_kwargs(agent, _rt, _routed, max_iterations)
     if view is not None:
         init_kwargs["memory_service"] = view
@@ -925,10 +921,16 @@ def build_cache_parity_fork(
     # analysis + measured impact (~26% end-to-end cost reduction on Sonnet 4.5). When routed to a different
     # model the parent's cached prompt is for the wrong model/cache key and would miss anyway, so let the
     # routed fork build its own.
+    # The prompt carries the curated region of the identity the parent's service is bound to NOW. It is
+    # inherited only while that is still the reviewed identity (compression keeps the same state), so a
+    # review deferred across /new or /resume never reads another session's memory under the reviewed
+    # session's write authority; the fork then renders its own prompt from its frozen view, and keeps
+    # its own session_start so that prompt is not stamped with the other session's start time.
     if not _routed:
-        review_agent._cached_system_prompt = agent._cached_system_prompt
-        review_agent.session_start = agent.session_start
-        _inherit_parent_tool_surface(review_agent, agent)
+        if parent_memory is None or parent_memory.state == getattr(agent._memory_service, "session_state", None):
+            review_agent._cached_system_prompt = agent._cached_system_prompt
+            review_agent.session_start = agent.session_start
+        _inherit_parent_tool_surface(review_agent, agent)    # tools[] parity does not depend on the session
     _detach_fork_compression(review_agent)
     # Compaction bounds a single request; this bounds the WHOLE review (checked in
     # conversation_loop via _review_input_budget_exhausted).
