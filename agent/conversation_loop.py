@@ -1283,16 +1283,24 @@ def _curated_memory_blocked_result(agent, exc, conversation_history) -> Dict[str
 
     Same shape as ``_preflight_timeout_result``: no provider call was sent and the
     user row is deliberately NOT persisted. The text is content-free — no curated
-    text, no provider epoch, handle or binding revision (§8.6 L892, §9.3 L987)."""
-    logger.warning("Turn blocked: curated memory is unavailable — ending turn with a typed result")
+    text, no provider epoch, handle or binding revision (§8.6 L892, §9.3 L987). An ambiguous
+    policy is a conflict the operator must resolve, not an outage, so it says so."""
+    code = getattr(exc, "code", None)
+    logger.warning("Turn blocked: curated memory is unavailable (%s) — ending turn with a typed result", code)
     from agent.agent_runtime_helpers import note_turn_persisted
     note_turn_persisted(agent)
     _service = getattr(agent, "_memory_service", None)
     _warning = ""
     with suppress(Exception):
         _warning = _service.degraded_warning() or ""
+    if code == "ambiguous_policy":
+        text = ("The memory policy conflicts and must be resolved, so this request was not sent "
+                "to the model.")
+    else:
+        text = ("Curated memory is unavailable, so this request was not sent to the model. "
+                + _warning).strip()
     return _partial_turn_result(
-        "Curated memory is unavailable, so this request was not sent to the model. " + _warning,
+        text,
         list(conversation_history or []), 0,
         failed=True, turn_exit_reason="curated_memory_blocked",
     )

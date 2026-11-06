@@ -124,7 +124,7 @@ def test_unmapped_gateway_user_never_reaches_it(tmp_path, monkeypatch, gateway_h
     assert _commits(env) == commits and env.store.records_for(USER_SCOPE, "user") == []
 
 
-def test_multi_principal_gateway_refuses_review(tmp_path, monkeypatch, gateway_home):
+def test_multi_principal_gateway_reviews_only_the_callers_writes(tmp_path, monkeypatch, gateway_home):
     """With two mapped principals a shared chat sees the change named but never its text, and the other
     principal's user cannot reach the record at all."""
     from agent.memory_service.approval_store import list_pending_approvals

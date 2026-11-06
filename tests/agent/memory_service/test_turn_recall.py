@@ -6,6 +6,7 @@ ambiguous recall blocks delivery. Everything runs the real service over the stat
 """
 
 import asyncio
+import logging
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -366,7 +367,7 @@ def test_binding_or_epoch_failure_during_recall_blocks(tmp_path, code, details):
     assert world.ops() == LOAD_BOTH + [("recall_context", "memory")]
 
 
-def test_ambiguous_recall_blocks_delivery_and_is_not_swallowed(agent_env):
+def test_ambiguous_recall_blocks_delivery_and_is_not_swallowed(agent_env, caplog):
     store, agent = agent_env.store, agent_env.agent
     store.curated_limits = NOTHING_DELIVERED
     store.seed_record(REPO_SCOPE, "memory", "beacon SECRET-FACT")
@@ -380,6 +381,10 @@ def test_ambiguous_recall_blocks_delivery_and_is_not_swallowed(agent_env):
     create.assert_not_called()
     assert agent_env.count("recall_context") == 1            # the first blocker ends the event
     assert "SECRET-FACT" not in result["final_response"] and "k1" not in result["final_response"]
+    assert "policy conflicts and must be resolved" in result["final_response"]
+    assert "unavailable" not in result["final_response"] and not result["final_response"].endswith(" ")
+    assert any("ambiguous_policy" in record.getMessage() and record.levelno == logging.WARNING
+               for record in caplog.records)
 
     store.fail_typed("recall_context", "ambiguous_policy", details=AMBIGUITY)
     with pytest.raises(MemoryBlockedError) as exc:
