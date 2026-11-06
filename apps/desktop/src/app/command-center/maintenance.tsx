@@ -221,11 +221,25 @@ export function MaintenancePanel() {
 
   const doResetMemory = useCallback(
     async (target: 'all' | 'memory' | 'user', label: string) => {
-      if (await confirm({ destructive: true, title: mm.resetConfirm(label) })) {
-        await applyReset({ target }, label)
+      if (!(await confirm({ destructive: true, title: mm.resetConfirm(label) }))) {
+        return
+      }
+
+      setMemoryBusy(true)
+
+      try {
+        const result = await resetMemory({ target })
+        const deleted = 'deleted' in result ? result.deleted : []
+
+        notify({ kind: 'success', title: mm.resetDone(deleted.join(', ') || label), message: '' })
+        setMemory(await getMemoryStatus())
+      } catch (err) {
+        notifyError(err, mm.resetFailed)
+      } finally {
+        setMemoryBusy(false)
       }
     },
-    [applyReset, mm]
+    [mm]
   )
 
   const submitScopedReset = useCallback(
@@ -366,8 +380,12 @@ export function MaintenancePanel() {
         ) : (
           <div>
             <div className="py-1 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
-              {mm.memoryDataDesc}
-              {' · '}
+              {!memory.curated_memory && (
+                <>
+                  {mm.memoryDataDesc}
+                  {' · '}
+                </>
+              )}
               {mm.memoryProvider(memory.active || mm.builtinMemory)}
             </div>
             {memory.curated_memory ? (

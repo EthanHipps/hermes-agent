@@ -50,8 +50,11 @@ const AUTHORITATIVE: MemoryStatusResponse = {
   }
 }
 
+// What the renderer really receives: ipcRenderer.invoke keeps only the message, wrapped, with no statusCode.
 function httpError(statusCode: number, detail: unknown) {
-  return Object.assign(new Error(`${statusCode}: ${JSON.stringify({ detail })}`), { statusCode })
+  return new Error(
+    `Error invoking remote method 'hermes:api': Error: ${statusCode}: ${JSON.stringify({ detail })}`
+  )
 }
 
 beforeEach(() => {
@@ -146,14 +149,62 @@ describe('Maintenance memory reset', () => {
     expect(mocks.notify).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
   })
 
+  it('shows a 409 as a refusal that changed nothing', async () => {
+    mocks.resetMemory.mockRejectedValue(httpError(409, { error: 'approval_unavailable', message: 'nothing was changed' }))
+    await openForm('Reset memory')
+    type('Scope id', 'repo-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Request reset' }))
+
+    await waitFor(() =>
+      expect(mocks.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'error', title: 'Memory reset failed', message: expect.stringContaining('nothing was changed') })
+      )
+    )
+    expect(mocks.notify).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Error invoking') }))
+    expect(mocks.notify).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
+  })
+
+  it('shows a 503 as an unknown outcome, never as a plain failure or a deletion', async () => {
+    mocks.resetMemory.mockRejectedValue(httpError(503, { error: 'memory_unavailable', message: 'provider down' }))
+    await openForm('Reset memory')
+    type('Scope id', 'repo-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Request reset' }))
+
+    await waitFor(() =>
+      expect(mocks.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'warning', title: 'Memory reset failed', message: expect.stringContaining('provider down') })
+      )
+    )
+    expect(mocks.notify).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
+  })
+
   it('does not call the native files "deleted" in authoritative mode', async () => {
     mocks.getMemoryStatus.mockResolvedValue(AUTHORITATIVE)
     render(<MaintenancePanel />)
 
     await screen.findByRole('button', { name: 'Reset memory' })
 
+    expect(screen.queryByText(/injected into every session/)).toBeNull()
     expect(screen.queryByText(/MEMORY\.md/)).toBeNull()
     expect(screen.queryByText(/USER\.md/)).toBeNull()
+  })
+
+  it('keeps the additive failure toast on notifyError', async () => {
+    const failure = new Error("Error invoking remote method 'hermes:api': Error: 500: boom")
+
+    mocks.getMemoryStatus.mockResolvedValue(ADDITIVE)
+    mocks.resetMemory.mockRejectedValue(failure)
+    render(<MaintenancePanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Reset profile' }))
+
+    await waitFor(() => expect(mocks.notifyError).toHaveBeenCalledWith(failure, 'Memory reset failed'))
+  })
+
+  it('shows the additive description above the native files', async () => {
+    mocks.getMemoryStatus.mockResolvedValue(ADDITIVE)
+    render(<MaintenancePanel />)
+
+    expect(await screen.findByText(/injected into every session/)).toBeTruthy()
   })
 })
 

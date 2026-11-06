@@ -9,11 +9,16 @@ export type MemoryResetOutcome =
   | { kind: 'unavailable'; message: string }
   | { kind: 'unexpected' }
 
+/** A rejection reaches the renderer through `ipcRenderer.invoke`, which keeps only the message:
+ *  `Error invoking remote method 'hermes:api': Error: 409: {"detail":...}`, with no `statusCode`.
+ *  Unwrap that prefix and read the status from the leading `NNN:` of what remains. */
 function errorBody(err: unknown): { message: string; status: number } {
-  const text = err instanceof Error ? err.message : String(err)
+  const raw = err instanceof Error ? err.message : String(err)
+  const text = raw.match(/Error invoking remote method '[^']+': Error: (.+)$/s)?.[1] ?? raw
   const statusCode = (err as { statusCode?: unknown } | null)?.statusCode
-  const status = typeof statusCode === 'number' ? statusCode : NaN
-  const bodyText = text.replace(/^\d+:\s*/, '')
+  const prefixed = Number(text.match(/^(\d{3}):/)?.[1])
+  const status = typeof statusCode === 'number' ? statusCode : prefixed
+  const bodyText = text.replace(/^\d{3}:\s*/, '')
 
   try {
     const detail = (JSON.parse(bodyText) as { detail?: unknown }).detail
