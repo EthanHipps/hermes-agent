@@ -1779,6 +1779,14 @@ export interface Translations {
       authoritativeNotice: string
       providerMemoryLabel: string
       providerUserLabel: string
+      scopeHint: string
+      scopeKind: string
+      scopeId: string
+      orgIdField: string
+      projectIdField: string
+      repoIdField: string
+      requestReset: string
+      resetCancel: string
       actionStarted: (name: string) => string
       actionFailed: (name: string) => string
       running: string

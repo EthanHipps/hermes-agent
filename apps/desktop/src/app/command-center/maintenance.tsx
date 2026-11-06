@@ -25,9 +25,10 @@ import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
-import type { ActionStatusResponse } from '@/types/hermes'
+import type { ActionStatusResponse, MemoryResetRequest } from '@/types/hermes'
 
 import { runMemoryReset } from './memory-reset'
+import { ScopedResetForm } from './scoped-reset-form'
 
 const ACTION_POLL_MS = 1200
 const ACTION_POLL_LIMIT = 240 // ~5 minutes of polling before giving up.
@@ -62,6 +63,7 @@ export function MaintenancePanel() {
   const [curatorBusy, setCuratorBusy] = useState(false)
   const [memory, setMemory] = useState<MemoryStatusResponse | null>(null)
   const [memoryBusy, setMemoryBusy] = useState(false)
+  const [scopedTarget, setScopedTarget] = useState<'memory' | 'user' | null>(null)
   const [share, setShare] = useState<DebugShareResponse | null>(null)
   const [sharing, setSharing] = useState(false)
   const [error, setError] = useState('')
@@ -170,16 +172,12 @@ export function MaintenancePanel() {
     }
   }, [curator, mm])
 
-  const doResetMemory = useCallback(
-    async (target: 'all' | 'memory' | 'user', label: string) => {
-      if (!(await confirm({ destructive: true, title: mm.resetConfirm(label) }))) {
-        return
-      }
-
+  const applyReset = useCallback(
+    async (request: MemoryResetRequest, label: string) => {
       setMemoryBusy(true)
 
       try {
-        const outcome = await runMemoryReset(() => resetMemory({ target }))
+        const outcome = await runMemoryReset(() => resetMemory(request))
 
         switch (outcome.kind) {
           case 'deleted':
@@ -219,6 +217,23 @@ export function MaintenancePanel() {
       }
     },
     [mm]
+  )
+
+  const doResetMemory = useCallback(
+    async (target: 'all' | 'memory' | 'user', label: string) => {
+      if (await confirm({ destructive: true, title: mm.resetConfirm(label) })) {
+        await applyReset({ target }, label)
+      }
+    },
+    [applyReset, mm]
+  )
+
+  const submitScopedReset = useCallback(
+    async (request: MemoryResetRequest, label: string) => {
+      await applyReset(request, label)
+      setScopedTarget(null)
+    },
+    [applyReset]
   )
 
   return (
@@ -357,13 +372,37 @@ export function MaintenancePanel() {
             </div>
             {memory.curated_memory ? (
               // Provider-managed: no native file exists to size or delete, and the status carries no
-              // scope to reset, so the actions stay off rather than offering a free-form scope.
+              // scopes (it never probes the provider), so a reset asks for an explicit scope instead.
               <>
                 <div className="py-1 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
                   {mm.authoritativeNotice}
                 </div>
-                <ProviderMemoryRow label={mm.providerMemoryLabel} resetLabel={mm.resetMemory} />
-                <ProviderMemoryRow label={mm.providerUserLabel} resetLabel={mm.resetUser} />
+                <ProviderMemoryRow
+                  busy={memoryBusy}
+                  label={mm.providerMemoryLabel}
+                  onReset={() => setScopedTarget('memory')}
+                  resetLabel={mm.resetMemory}
+                />
+                <ProviderMemoryRow
+                  busy={memoryBusy}
+                  label={mm.providerUserLabel}
+                  onReset={() => setScopedTarget('user')}
+                  resetLabel={mm.resetUser}
+                />
+                {scopedTarget && (
+                  <ScopedResetForm
+                    busy={memoryBusy}
+                    key={scopedTarget}
+                    onCancel={() => setScopedTarget(null)}
+                    onSubmit={request =>
+                      void submitScopedReset(
+                        request,
+                        scopedTarget === 'memory' ? mm.providerMemoryLabel : mm.providerUserLabel
+                      )
+                    }
+                    target={scopedTarget}
+                  />
+                )}
               </>
             ) : (
               <>
@@ -462,11 +501,21 @@ function MemoryFileRow({
   )
 }
 
-function ProviderMemoryRow({ label, resetLabel }: { label: string; resetLabel: string }) {
+function ProviderMemoryRow({
+  busy,
+  label,
+  onReset,
+  resetLabel
+}: {
+  busy: boolean
+  label: string
+  onReset: () => void
+  resetLabel: string
+}) {
   return (
     <div className="flex items-center justify-between gap-3 py-2">
       <span className="text-[length:var(--conversation-text-font-size)] font-medium">{label}</span>
-      <Button className="text-destructive hover:text-destructive" disabled size="xs" variant="text">
+      <Button className="text-destructive hover:text-destructive" disabled={busy} onClick={onReset} size="xs" variant="text">
         {resetLabel}
       </Button>
     </div>

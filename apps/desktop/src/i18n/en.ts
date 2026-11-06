@@ -1999,7 +1999,16 @@ export const en: Translations = {
       providerMemoryLabel: 'Agent memory',
       providerUserLabel: 'User profile',
       authoritativeNotice:
-        'Memory is provider-managed. It is reset per scope with an approval, and this status offers no scope to reset, so reset is unavailable here.',
+        'Memory is provider-managed. A reset names one scope, is staged for approval, and deletes nothing until approved.',
+      scopeHint:
+        'Scope is kind:id (global takes the principal id). org_id, project_id and repo_id name the context the scope belongs to; fill the ones your scope needs.',
+      scopeKind: 'Scope kind',
+      scopeId: 'Scope id',
+      orgIdField: 'Organization id (org_id)',
+      projectIdField: 'Project id (project_id)',
+      repoIdField: 'Repository id (repo_id)',
+      requestReset: 'Request reset',
+      resetCancel: 'Cancel',
       actionStarted: name => `${name} started — tailing log...`,
       actionFailed: name => `${name} failed to start`,
       running: 'Running...',

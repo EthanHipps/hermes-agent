@@ -79,19 +79,71 @@ describe('Maintenance memory reset', () => {
     )
   })
 
-  it('never offers a reset in authoritative mode without a scope the status gave', async () => {
-    mocks.getMemoryStatus.mockResolvedValue({ ...AUTHORITATIVE, builtin_files: { memory: 4096, user: 4096 } })
+  async function openForm(button: string) {
+    mocks.getMemoryStatus.mockResolvedValue(AUTHORITATIVE)
     render(<MaintenancePanel />)
+    fireEvent.click(await screen.findByRole('button', { name: button }))
+  }
 
-    const memoryReset = await screen.findByRole('button', { name: 'Reset memory' })
-    const userReset = screen.getByRole('button', { name: 'Reset profile' })
+  const type = (label: string, value: string) =>
+    fireEvent.change(screen.getByLabelText(label), { target: { value } })
 
-    expect(memoryReset).toHaveProperty('disabled', true)
-    expect(userReset).toHaveProperty('disabled', true)
-    expect(screen.getByText(/provider-managed/i)).toBeTruthy()
-    fireEvent.click(memoryReset)
+  it('opens a scope form, not the additive confirm, and cannot submit without a scope id', async () => {
+    await openForm('Reset memory')
+
+    const submit = screen.getByRole('button', { name: 'Request reset' })
+
     expect(mocks.confirm).not.toHaveBeenCalled()
+    expect(submit).toHaveProperty('disabled', true)
+    fireEvent.click(submit)
     expect(mocks.resetMemory).not.toHaveBeenCalled()
+  })
+
+  it('sends the exact scoped body once the form is filled', async () => {
+    mocks.resetMemory.mockResolvedValue({ ok: false, code: 'approval_pending', pending_id: 'abc123def456' })
+    await openForm('Reset memory')
+    type('Scope kind', 'repository')
+    type('Scope id', 'repo-1')
+    type('Project id (project_id)', 'proj-1')
+    type('Repository id (repo_id)', 'repo-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Request reset' }))
+
+    await waitFor(() => expect(mocks.resetMemory).toHaveBeenCalledTimes(1))
+    expect(mocks.resetMemory).toHaveBeenCalledWith({
+      target: 'memory',
+      scopes: ['repository:repo-1'],
+      project_id: 'proj-1',
+      repo_id: 'repo-1'
+    })
+    await waitFor(() =>
+      expect(mocks.notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'info', title: expect.stringContaining('abc123def456') }))
+    )
+  })
+
+  it('offers only the four scope kinds and never the all target', async () => {
+    await openForm('Reset profile')
+
+    const kinds = Array.from(screen.getByLabelText('Scope kind').querySelectorAll('option')).map(o => o.value)
+
+    expect(kinds).toEqual(['global', 'organization', 'project', 'repository'])
+    expect(screen.queryByText(/reset both/i)).toBeNull()
+    type('Scope kind', 'global')
+    type('Scope id', 'ethan')
+    fireEvent.click(screen.getByRole('button', { name: 'Request reset' }))
+    await waitFor(() => expect(mocks.resetMemory).toHaveBeenCalledTimes(1))
+    expect(mocks.resetMemory).toHaveBeenCalledWith({ target: 'user', scopes: ['global:ethan'] })
+  })
+
+  it('shows the backend 400 as a refused outcome, not a crash or a deletion', async () => {
+    mocks.resetMemory.mockRejectedValue(httpError(400, { error: 'unauthorized_scope', message: 'scope not allowed' }))
+    await openForm('Reset memory')
+    type('Scope id', 'repo-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Request reset' }))
+
+    await waitFor(() =>
+      expect(mocks.notify).toHaveBeenCalledWith({ kind: 'error', title: 'Memory reset failed', message: 'scope not allowed' })
+    )
+    expect(mocks.notify).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' }))
   })
 
   it('does not call the native files "deleted" in authoritative mode', async () => {
