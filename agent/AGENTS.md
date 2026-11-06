@@ -250,9 +250,10 @@ that target's revision, the remaining event budget (3,000 rendered evidence scal
 entries) and the union of IDs already delivered by both snapshots and the earlier call. A trivial or
 non-string message, a stateless session or a provider that did not negotiate recall makes no call.
 `ambiguous_policy` and a binding or epoch failure end the turn as `curated_memory_blocked`; any other
-recall failure renders no recall that turn and shows a status warning. Only rendered fenced text
-reaches the `api_content` sidecar, `TypedRecall` is never stored, and the per-request gate still makes
-its own fresh loads.
+recall failure renders no recall that turn and shows a status warning. The rendered fenced text
+reaches the `api_content` sidecar byte for byte: `RenderedRecall` tells `compose_user_api_content` to
+skip the additive `<memory-context>` frame and its sanitizing, whose note would call the evidence
+authoritative. `TypedRecall` is never stored, and the per-request gate still makes its own fresh loads.
 
 Desktop/web, journey and REST memory surfaces route through `MemoryService` too, and none of them
 infers identity from the process directory. `agent/memory_service/admin.py::admin_service` binds an

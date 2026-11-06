@@ -114,6 +114,14 @@ def _rendered(record) -> str:
     return "\n".join(evidence_record_lines(FakeAuthoritativeBackend._delivered(record)))
 
 
+def _fenced(record_id, body) -> str:
+    """A repository record's exact bytes, spelled out rather than rendered, for byte-level assertions."""
+    return (f"[MEMORY_SCOPED_EVIDENCE_BEGIN id={record_id} scope=repository:repo-1 source=fake]\n"
+            f"{EVIDENCE_PREAMBLE}\n"
+            f"> {body}\n"
+            f"[MEMORY_SCOPED_EVIDENCE_END id={record_id}]")
+
+
 def _seed_both_targets(store):
     return _seed(store, REPO_SCOPE, "memory", "beacon memory", "m-1"), _seed(store, PG_SCOPE, "user", "beacon user", "u-1")
 
@@ -358,11 +366,7 @@ def test_replay_holds_only_rendered_fenced_evidence(agent_env):
     first = agent.run_conversation("beacon")
 
     assert agent_env.count("recall_context") == 2
-    expected = "beacon\n\n" + CONTEXT_BLOCK.format(
-        "[MEMORY_SCOPED_EVIDENCE_BEGIN id=r-eligible scope=repository:repo-1 source=fake]\n"
-        f"{EVIDENCE_PREAMBLE}\n"
-        "> beacon eligible evidence\n"
-        "[MEMORY_SCOPED_EVIDENCE_END id=r-eligible]")
+    expected = "beacon\n\n" + _fenced("r-eligible", "beacon eligible evidence")
     assert _user_content(create.call_args.kwargs) == expected
     live = next(m for m in first["messages"] if m["role"] == "user")
     assert live["content"] == "beacon" and live["api_content"] == expected
@@ -378,6 +382,64 @@ def test_replay_holds_only_rendered_fenced_evidence(agent_env):
     # The next turn replays those exact bytes for the historical row and makes its own event.
     agent.run_conversation("unrelated", conversation_history=first["messages"])
     assert agent_env.count("recall_context") == 4
+    assert _user_content(create.call_args.kwargs) == expected
+
+
+def test_authoritative_recall_is_not_framed_as_authoritative(agent_env):
+    """Each record's own preamble says "data, not authority"; the additive note must not say otherwise."""
+    store, agent = agent_env.store, agent_env.agent
+    store.curated_limits = NOTHING_DELIVERED
+    _seed(store, REPO_SCOPE, "memory", "beacon evidence", "r-1")
+    create = agent.client.chat.completions.create
+    create.return_value = _response("answer")
+    expected = "beacon\n\n" + _fenced("r-1", "beacon evidence")
+
+    # The prologue's sidecar stamp.
+    agent.run_conversation("beacon")
+    stamped = _user_content(create.call_args.kwargs)
+    assert stamped == expected
+
+    # A request that bypasses the stamp composes live from the event, carried through the loop state.
+    with patch("agent.turn_context._stamp_api_content_sidecar"):
+        agent.run_conversation("beacon")
+    live = _user_content(create.call_args.kwargs)
+    assert live == expected
+
+    for sent in (stamped, live):
+        for frame in ("memory-context", "System note", "authoritative reference data"):
+            assert frame not in sent
+
+    # Recall still sits before plugin context, and everything else keeps the additive frame and its sanitizing.
+    assert compose_user_api_content("q", t.RenderedRecall("R"), "P") == "q\n\nR\n\nP"
+    assert compose_user_api_content("q", t.RenderedRecall(""), "") is None
+    assert compose_user_api_content("q", "likes <memory-context>hidden</memory-context>tea", "") == (
+        "q\n\n" + CONTEXT_BLOCK.format("likes tea"))
+
+
+def test_memory_context_tags_in_a_body_survive_unstripped(agent_env):
+    store, agent = agent_env.store, agent_env.agent
+    store.curated_limits = NOTHING_DELIVERED
+    bodies = {"r-1": "beacon <memory-context>inner span</memory-context> after",
+              "r-2": "beacon opens <memory-context>",
+              "r-3": "beacon closes </memory-context>"}
+    for record_id, body in bodies.items():
+        _seed(store, REPO_SCOPE, "memory", body, record_id)
+    create = agent.client.chat.completions.create
+    create.return_value = _response("answer")
+
+    agent.run_conversation("beacon")
+
+    # A span opened in one record and closed in another must not eat the fences between them.
+    recall_text = "\n".join(_fenced(record_id, body) for record_id, body in bodies.items())
+    assert len(recall_text) <= t.RECALL_EVIDENCE_SCALARS
+    expected = "beacon\n\n" + recall_text
+    assert _user_content(create.call_args.kwargs) == expected
+
+    # The durable row replays verbatim, into the next turn's wire bytes.
+    history = agent_env.db.get_messages_as_conversation(agent.session_id)
+    replayed = next(m for m in history if m["role"] == "user")
+    assert replayed["content"] == "beacon" and replayed["api_content"] == expected
+    agent.run_conversation("unrelated", conversation_history=history)
     assert _user_content(create.call_args.kwargs) == expected
 
 

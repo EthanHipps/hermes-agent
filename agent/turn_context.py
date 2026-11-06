@@ -84,10 +84,18 @@ def compose_user_api_content(
     """Compose the API-bound content of the current turn's user message.
 
     Single source for the ``api_content`` sidecar and the wire bytes so they never drift
-    (what turn N sends is what turn N+1 replays). ``None`` when nothing is injected."""
+    (what turn N sends is what turn N+1 replays). ``None`` when nothing is injected.
+
+    Authoritative recall is appended as its renderer produced it; only an additive prefetch
+    takes the ``<memory-context>`` frame (see ``RenderedRecall``)."""
     if not isinstance(content, str):
         return None
-    fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
+    from agent.memory_service.turn_recall import RenderedRecall
+
+    if isinstance(ext_prefetch_cache, RenderedRecall):
+        fenced = ext_prefetch_cache
+    else:
+        fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
     injections = [part for part in (fenced, plugin_user_context) if part]
     if not injections:
         return None

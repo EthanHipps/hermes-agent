@@ -32,6 +32,18 @@ _TARGET_SEPARATOR = "\n"
 _RECALL_TARGETS = (("memory", ("general", "hermes_memory")), ("user", ("hermes_user",)))
 
 
+class RenderedRecall(str):
+    """The renderer's final output, which the host sends exactly as it is.
+
+    Every record already carries its own fence and "data, not authority" preamble (§5.5), so
+    ``compose_user_api_content`` adds neither the additive ``<memory-context>`` frame, whose note
+    calls its text authoritative, nor that frame's sanitizing, which would strip bytes after
+    budgeting and could remove fences between records. The type survives the turn's
+    ``ext_prefetch_cache`` plumbing because that plumbing only passes the object along; a transform
+    such as ``.strip()`` would return a plain ``str`` and bring the frame back.
+    """
+
+
 @dataclass(frozen=True)
 class TargetRecallRender:
     text: str
@@ -122,4 +134,4 @@ def authoritative_turn_recall(service: MemoryService, query: str) -> RecallOutco
         delivered.extend(rendered.delivered_ids)
     if unavailable:
         return RecallOutcome(text="", warning=RECALL_UNAVAILABLE_WARNING)
-    return RecallOutcome(text=_TARGET_SEPARATOR.join(texts), warning=None)
+    return RecallOutcome(text=RenderedRecall(_TARGET_SEPARATOR.join(texts)), warning=None)
