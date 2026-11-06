@@ -426,6 +426,7 @@ class MemoryManager:
             return ""
         parts = self._each_provider(
             "prefetch failed (non-fatal)", lambda p: self._prefetch_provider(p, clean_query, session_id=session_id),
+            level=logging.WARNING,
         )
         return "\n\n".join(p for p in parts if p and p.strip())
 
@@ -479,7 +480,8 @@ class MemoryManager:
         """Deterministic recall indicator line (e.g. ``"🧠 Provider — recalled 3 memories"``); ``""`` if none.
         Call right after :meth:`prefetch_all` so the user SEES memory was used even if the model is silent."""
         segments: List[str] = []
-        for status in self._each_provider("recall_status failed (non-fatal)", lambda p: p.recall_status()):
+        for status in self._each_provider("recall_status failed (non-fatal)", lambda p: p.recall_status(),
+                                               level=logging.WARNING):
             if status is None:
                 continue
             # count <= 0: content injected but no discrete count (reflect)
@@ -759,7 +761,7 @@ class MemoryManager:
                 provider.on_memory_write(action, target, content, metadata=dict(metadata or {}))
 
         external = [p for p in self._providers if p.name != "builtin"]
-        self._each_provider("on_memory_write failed", _notify, providers=external)
+        self._each_provider("on_memory_write failed", _notify, providers=external, level=logging.WARNING)
 
     # Actions mirrored to external providers; non-mutating results (errors, staged) are
     # filtered by ``notify_memory_tool_write`` first.

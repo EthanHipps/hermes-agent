@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from agent.memory_service.errors import MemoryBlockedError
 from agent.memory_service.service import MemoryDisposition
 from tests.agent.memory_service.fake_backend import FakeAuthoritativeBackend, FakeProviderStore, FakeRegistry
 from tests.agent.memory_service.native_sentinel import native_memory_sentinel
@@ -27,9 +28,13 @@ class AdditiveStarted(AssertionError):
 
 
 class SentinelManager:
-    """Any attribute access means the host drove an additive provider."""
+    """Any attribute access means the host drove an additive provider; it is recorded, then raised."""
+
+    def __init__(self, events):
+        object.__setattr__(self, "_events", events)
 
     def __getattr__(self, name):
+        self._events.append(("SentinelManager", name))
         raise AdditiveStarted(f"MemoryManager.{name} used in an authoritative session")
 
     def __bool__(self):
@@ -71,11 +76,12 @@ def authoritative_env(tmp_path, monkeypatch):
 
 def _agent(memory_section):
     from hermes_constants import get_hermes_home
-    from run_agent import AIAgent
 
     path = get_hermes_home() / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump({"memory": memory_section}), encoding="utf-8")
+    from run_agent import AIAgent  # imported after config.yaml exists: the import initializes the home
+
     tools = [{"type": "function", "function": {"name": "memory", "description": "memory tool",
                                                "parameters": {"type": "object", "properties": {}}}}]
     with patch("model_tools.get_tool_definitions", return_value=tools), \
@@ -99,14 +105,14 @@ def test_authoritative_selection_never_starts_an_additive_provider(authoritative
     stateless = policy == "stateless"
     if stateless:
         authoritative_env.store.fail_transport("negotiate")
-    agent = _agent({**authoritative_env.memory, "authoritative_failure_policy": policy})
-    expected = MemoryDisposition.STATELESS if stateless else MemoryDisposition.AUTHORITATIVE
-    assert agent._memory_service.disposition is expected
-    assert sentinels == [] and agent._memory_manager is None
-
-    # A manager that appears later (a double for any initialize, mirroring or dispatch path) is never driven.
-    agent._memory_manager = SentinelManager()
     with native_memory_sentinel(native_dir) as native:
+        agent = _agent({**authoritative_env.memory, "authoritative_failure_policy": policy})
+        expected = MemoryDisposition.STATELESS if stateless else MemoryDisposition.AUTHORITATIVE
+        assert agent._memory_service.disposition is expected
+        assert sentinels == [] and agent._memory_manager is None
+
+        # A manager that appears later (a double for any initialize, mirroring or dispatch path) is never driven.
+        agent._memory_manager = SentinelManager(sentinels)
         out = json.loads(agent._invoke_tool("memory", ADD, "task-1"))
     native.assert_untouched()
     if stateless:
@@ -119,7 +125,7 @@ def test_authoritative_selection_never_starts_an_additive_provider(authoritative
 def test_an_authoritative_failure_is_not_retried_as_an_additive_sidecar(authoritative_env, sentinels):
     """A fail_closed startup failure raises; the plugin name is not then loaded as a sidecar either."""
     authoritative_env.store.fail_transport("negotiate")
-    with pytest.raises(Exception) as caught:
+    with pytest.raises(MemoryBlockedError) as caught:
         _agent(authoritative_env.memory)
     assert not isinstance(caught.value, AdditiveStarted)
     assert sentinels == []

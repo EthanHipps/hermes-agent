@@ -77,6 +77,20 @@ def requests_authoritative_mode(raw_config: object) -> bool:
         return False
 
 
+def names_explicit_memory_mode(raw_config: object) -> bool:
+    """Did the operator name a mode or failure policy? Must never raise.
+
+    A ``memory`` mapping holding ``provider_mode`` or ``authoritative_failure_policy`` has opted into the
+    mode vocabulary, so an invalid value is a configuration error and is never reinterpreted as additive
+    (§9.1 L980). An absent mode and a non-mapping section keep degrading.
+    """
+    try:
+        section = raw_config.get("memory")  # type: ignore[union-attr]
+        return isinstance(section, dict) and ("provider_mode" in section or "authoritative_failure_policy" in section)
+    except Exception:
+        return False
+
+
 @dataclass(frozen=True)
 class SessionBinding:
     """How this Hermes session gets its frozen identity (contract C4)."""
@@ -211,7 +225,7 @@ def init_memory_service(
     try:
         config = resolve_memory_service_config(raw_config)
     except MemoryConfigurationError as exc:
-        if authoritative_requested:
+        if authoritative_requested or names_explicit_memory_mode(raw_config):
             raise
         logger.warning("memory configuration is invalid; continuing with built-in memory: %s", exc)
         return None, exc
