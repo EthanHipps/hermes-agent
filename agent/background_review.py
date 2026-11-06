@@ -883,6 +883,10 @@ def build_cache_parity_fork(
     from agent.memory_service.view import capture_parent_memory, open_fork_view
     parent_memory = memory_parent if memory_parent is not None else capture_parent_memory(agent)
     view = open_fork_view(parent_memory, surface=write_origin) if parent_memory is not None else None
+    if view is not None and parent_memory.state is not None and not parent_memory.session_id:
+        view.shutdown()                  # a frozen identity with no session to key its approvals to
+        from agent.memory_service.errors import MemoryBlockedError
+        raise MemoryBlockedError("the parent's frozen memory identity names no session", code="binding_invalid")
     init_kwargs = _fork_init_kwargs(agent, _rt, _routed, max_iterations)
     if view is not None:
         init_kwargs["memory_service"] = view
@@ -894,6 +898,10 @@ def build_cache_parity_fork(
         raise
     review_agent._memory_write_origin = review_agent._memory_write_context = write_origin
     review_agent._memory_store = agent._memory_store
+    if view is not None and parent_memory.session_id:
+        # The fork shares the live session_id (prefix warmth) but its approvals belong to the reviewed
+        # session: pin the key to the one captured at spawn so /new or /resume cannot move it.
+        review_agent._memory_session_key = parent_memory.session_id
     review_agent._memory_enabled = agent._memory_enabled
     review_agent._user_profile_enabled = agent._user_profile_enabled
     review_agent._memory_nudge_interval = review_agent._skill_nudge_interval = 0

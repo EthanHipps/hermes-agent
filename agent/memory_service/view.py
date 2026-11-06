@@ -150,6 +150,7 @@ class ParentMemory:
     config: MemoryServiceConfig
     disposition: str
     state: Optional[HostSessionState]
+    session_id: Optional[str] = None     # the session the frozen state belongs to; a fork's approvals stay keyed to it
 
 
 def capture_parent_memory(agent: Any) -> Optional[ParentMemory]:
@@ -159,7 +160,7 @@ def capture_parent_memory(agent: Any) -> Optional[ParentMemory]:
         return None
     disposition = getattr(service.disposition, "value", service.disposition)
     state = getattr(service, "session_state", None) if disposition == MemoryDisposition.AUTHORITATIVE.value else None
-    return ParentMemory(service.config, disposition, state)
+    return ParentMemory(service.config, disposition, state, getattr(agent, "_memory_session_key", None))
 
 
 def open_fork_view(parent: ParentMemory, *, surface: str,

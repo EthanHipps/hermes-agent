@@ -135,7 +135,7 @@ def test_an_injected_service_is_never_re_resolved_or_recorded(tmp_path, monkeypa
     calls, records = env.factory_calls, _records()
     follow_session_binding(agent)
     record_curated_prompt(agent, "a fork's own prompt")
-    assert agent._memory_service is view and agent._memory_session_key == parent.session_id
+    assert agent._memory_service is view and agent._memory_session_key == "injected-3"   # pinned, never followed
     assert env.factory_calls == calls and _records() == records   # the parent's record is untouched
 
 
@@ -276,6 +276,52 @@ def test_the_review_identity_is_frozen_when_the_review_is_spawned(tmp_path, monk
     assert parent._memory_service.identity != old_identity
     fork = env.fork(parent, memory_parent=run.memory_parent)
     assert fork._memory_service.identity == old_identity
+
+
+def _spawned_review_across_new(env, monkeypatch):
+    """A review spawned on ``session-a``, then ``/new`` moves the parent to ``session-b`` before dispatch."""
+    from agent.memory_service.lifecycle import follow_session_binding
+    parent = env.agent("session-a")
+    monkeypatch.setattr("run_agent.threading.Thread",
+                        lambda target=None, daemon=None, name=None: type("T", (), {"start": lambda self: None})())
+    monkeypatch.setattr("run_agent._review_should_defer", lambda agent, cfg: False)
+    parent._spawn_background_review(messages_snapshot=[{"role": "user", "content": "hi"}], review_memory=True)
+    run = parent._background_review_run
+    parent.session_id = "session-b"
+    follow_session_binding(parent)
+    return parent, run
+
+
+def test_deferred_review_stays_pinned_across_new_session(tmp_path, monkeypatch):
+    from agent.memory_service.approval_store import list_pending_approvals
+    from agent.memory_service.lifecycle import follow_session_binding
+    env = Env(tmp_path, monkeypatch)
+    parent, run = _spawned_review_across_new(env, monkeypatch)
+    fork = env.fork(parent, memory_parent=run.memory_parent)
+    assert fork.session_id == "session-b"                  # the fork still shares the live id (prefix warmth)
+    add_user = {"action": "add", "target": "user", "content": "prefers terse replies"}
+    follow_session_binding(fork)                           # what the fork's turn start does
+    with _origin(attended=False):
+        out = json.loads(fork._invoke_tool("memory", add_user, "task-1"))
+    pending = [record for _, record in list_pending_approvals()]
+    assert len(pending) == 1 and pending[0].session_id == "session-a", out
+    assert "APPROVAL_UNAVAILABLE" not in json.dumps(out).upper()
+    assert fork._memory_session_key == "session-a"
+
+
+def test_inconsistent_delegated_identity_fails_closed(tmp_path, monkeypatch):
+    import dataclasses
+    from agent.memory_service.errors import MemoryBlockedError
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent()
+    captured = capture_parent_memory(parent)
+    assert captured.session_id == "parent-1"
+    unkeyed = dataclasses.replace(captured, session_id=None)       # a frozen identity naming no session
+    views = env.factory_calls
+    with pytest.raises(MemoryBlockedError) as err:
+        env.fork(parent, memory_parent=unkeyed)
+    assert err.value.code == "binding_invalid"
+    assert env.backends[-1].shutdown_calls == 1 and env.factory_calls == views + 1   # the opened view was closed
 
 
 def test_side_question_fork_is_read_only_and_gates_through_its_view(tmp_path, monkeypatch):
