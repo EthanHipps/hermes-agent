@@ -25,8 +25,9 @@ def test_human_old_or_malformed_client_gets_typed_fixed_refusal(choice, env):
     with pytest.raises(HTTPException) as caught:
         asyncio.run(update_learning_node(body))
     assert caught.value.status_code == 400
-    assert caught.value.detail == {"code": "memory_admission_required", "message":
-        "An explicit memory admission declaration is required. Nothing was saved."}
+    assert caught.value.detail == {"ok": False, "code": "memory_admission_required", "message":
+        "An explicit memory admission declaration is required. Nothing was saved.",
+        "error": "memory_admission_required"}
     assert all(backend.count("stage_curated") == 0 for backend in env.backends)
     assert env.store.records[record.id].lifecycle == "active"
 
