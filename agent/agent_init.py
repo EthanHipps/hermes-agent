@@ -1260,7 +1260,10 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, *, memory_service=Non
         and "memory" not in (agent.disabled_toolsets or [])
     )
     if not skip_memory or _memory_toolset_requested:
-        from agent.memory_service.bootstrap import init_memory_service, requests_authoritative_mode
+        from agent.memory_service.bootstrap import (
+            init_memory_service, names_explicit_memory_mode, requests_authoritative_mode,
+        )
+        from agent.memory_service.config import MemoryConfigurationError
         from agent.memory_service.service import is_provider_managed
         from agent.memory_service.principal import gateway_identity_of
 
@@ -1326,8 +1329,10 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, *, memory_service=Non
                     session_db=getattr(agent, "_session_db", None),
                     gateway_identity=gateway_identity_of(agent),   # ruling R41-5 (I3)
                 )
-            except Exception:
-                if _authoritative_requested:
+            except Exception as _boot_exc:
+                # An explicitly named but invalid mode or policy is a configuration error, never additive (§9.1 L980).
+                if _authoritative_requested or (isinstance(_boot_exc, MemoryConfigurationError)
+                                                and names_explicit_memory_mode(_agent_cfg)):
                     raise
                 # agent._memory_service is already None from the top of this function.
             if agent._memory_service is None:

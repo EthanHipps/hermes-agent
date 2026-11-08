@@ -41,7 +41,11 @@ BLOCKED_NOTE = "[BLOCKED: curated memory record {id} matched threat pattern(s): 
 _SEPARATOR_CHARS = 3  # len("\n\u00a7\n"): native-compatible accounting (§8.5 L874)
 _LABELS = {"general": "Standing context", "hermes_memory": "Memory", "hermes_user": "User profile"}
 _SENTINEL_RE = re.compile(r"\[(MEMORY_SCOPED_EVIDENCE_(?:BEGIN|END))")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# The shared fence class: every control character except TAB (LF is handled by line splitting),
+# plus the invisible format and bidi characters that can hide or reorder a quoted line.
+_CONTROL_RE = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]"
+)
 _LABEL_RE = re.compile(r"[^A-Za-z0-9_.:\-]")
 
 
@@ -61,7 +65,7 @@ def _label(value: str) -> str:
 
 
 def _escape(text: str) -> str:
-    text = _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    text = _CONTROL_RE.sub(lambda m: f"\\u{{{ord(m.group()):x}}}", text)
     return _SENTINEL_RE.sub(r"\\[\1", text)
 
 
@@ -114,13 +118,20 @@ def _region(label: str, entries: Sequence[w.GeneralDeliveryItem]) -> List[str]:
         out.append(f"- {first}")
         out.extend(f"  {line}" for line in rest)
     for entry in (e for e in entries if e.lane == "scoped_evidence"):
-        ident = _label(entry.id)
-        scope = _label(f"{entry.origin_scope.kind}:{entry.origin_scope.id}")
-        out.append(EVIDENCE_OPEN.format(id=ident, scope=scope, source=_label(entry.provenance.surface)))
-        out.append(EVIDENCE_PREAMBLE)
-        out.extend(f"> {line}" for line in _body(entry))
-        out.append(EVIDENCE_CLOSE.format(id=ident))
+        out.extend(evidence_record_lines(entry))
     return out
+
+
+def evidence_record_lines(entry: w.DeliveredEntry) -> List[str]:
+    """One fenced scoped-evidence record: open fence, preamble, quoted body, close fence."""
+    ident = _label(entry.id)
+    scope = _label(f"{entry.origin_scope.kind}:{entry.origin_scope.id}")
+    return [
+        EVIDENCE_OPEN.format(id=ident, scope=scope, source=_label(entry.provenance.surface)),
+        EVIDENCE_PREAMBLE,
+        *(f"> {line}" for line in _body(entry)),
+        EVIDENCE_CLOSE.format(id=ident),
+    ]
 
 
 def render_curated_prompt(memory: Optional[w.CuratedSnapshot], user: Optional[w.CuratedSnapshot]) -> CuratedPromptRender:

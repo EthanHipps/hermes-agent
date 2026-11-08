@@ -242,10 +242,18 @@ rotated session id and, when the provider negotiated it, submits the committed s
 `capture_continuity` on a daemon thread over a second transport. Authoritative compressors emit
 `CURATED_MEMORY_SUMMARY_PREFIX` / `CURATED_MEMORY_COMPRESSION_NOTE`; retiring `SUMMARY_PREFIX`
 retires the variant too, and the frozen historical recognizers are never edited.
-**Per-turn authoritative recall is not wired; see ledger R40-8** — the entry in the ygg
-revision ledger's "Wave 6 fork decisions: R38, R40, R44 (2026-09-22)" section, which names R48
-as the owner of host recall wiring and of §9.6's host-visible recall warning (L1574) and
-recall-ambiguity blocking (L1576) cells.
+**Per-turn authoritative recall** is one event per user turn, before the tool loop:
+`turn_context.py::_memory_turn_start_and_prefetch` branches to
+`memory_service/turn_recall.py::authoritative_turn_recall` ahead of the additive manager path. It
+loads each enabled target, then makes one `recall_context` call per target (memory, then user) with
+that target's revision, the remaining event budget (3,000 rendered evidence scalars, 0 trusted, 20
+entries) and the union of IDs already delivered by both snapshots and the earlier call. A trivial or
+non-string message, a stateless session or a provider that did not negotiate recall makes no call.
+`ambiguous_policy` and a binding or epoch failure end the turn as `curated_memory_blocked`; any other
+recall failure renders no recall that turn and warns through `_emit_warning`. The rendered fenced text
+reaches the `api_content` sidecar byte for byte: `RenderedRecall` tells `compose_user_api_content` to
+skip the additive `<memory-context>` frame and its sanitizing, whose note would call the evidence
+authoritative. `TypedRecall` is never stored, and the per-request gate still makes its own fresh loads.
 
 Desktop/web, journey and REST memory surfaces route through `MemoryService` too, and none of them
 infers identity from the process directory. `agent/memory_service/admin.py::admin_service` binds an

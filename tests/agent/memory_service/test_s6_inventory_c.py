@@ -135,7 +135,7 @@ def test_an_injected_service_is_never_re_resolved_or_recorded(tmp_path, monkeypa
     calls, records = env.factory_calls, _records()
     follow_session_binding(agent)
     record_curated_prompt(agent, "a fork's own prompt")
-    assert agent._memory_service is view and agent._memory_session_key == parent.session_id
+    assert agent._memory_service is view and agent._memory_session_key == "injected-3"   # pinned, never followed
     assert env.factory_calls == calls and _records() == records   # the parent's record is untouched
 
 
@@ -276,6 +276,124 @@ def test_the_review_identity_is_frozen_when_the_review_is_spawned(tmp_path, monk
     assert parent._memory_service.identity != old_identity
     fork = env.fork(parent, memory_parent=run.memory_parent)
     assert fork._memory_service.identity == old_identity
+
+
+USER_ADD = {"action": "add", "target": "user", "content": "prefers terse replies"}
+
+
+def _fork_user_add(fork):
+    from agent.memory_service.lifecycle import follow_session_binding
+    follow_session_binding(fork)                           # what the fork's turn start does
+    with _origin(attended=False):
+        return json.loads(fork._invoke_tool("memory", USER_ADD, "task-1"))
+
+
+def _stub_review_thread(monkeypatch):
+    monkeypatch.setattr("run_agent.threading.Thread",
+                        lambda target=None, daemon=None, name=None: type("T", (), {"start": lambda self: None})())
+
+
+def _deferred_review_across_new(env, monkeypatch, *, next_cwd=None):
+    """A review queued on ``session-a`` under ``defer: auto``; ``/new`` (the CLI's reset steps) moves the
+    parent to ``session-b``; the parent's next turn follows the binding; the idle queue then dispatches."""
+    from datetime import datetime
+
+    from agent.memory_service.lifecycle import follow_session_binding
+    from agent.review_idle_queue import ReviewIdleQueue
+    queue = ReviewIdleQueue()
+    queue._ensure_thread = lambda: None                    # no dispatcher thread: the test dispatches
+    monkeypatch.setattr("agent.review_idle_queue.QUEUE", queue)
+    monkeypatch.setattr("run_agent._review_should_defer", lambda agent, cfg: True)
+    parent = env.agent("session-a")
+    _stub_review_thread(monkeypatch)
+    parent._spawn_background_review(messages_snapshot=[{"role": "user", "content": "hi"}], review_memory=True)
+    assert queue.pending_count() == 1 and parent._background_review_run is None
+    parent.session_id, parent.session_start = "session-b", datetime.now()     # cli_session_mixin.new_session
+    parent.reset_session_state()
+    parent._invalidate_system_prompt()
+    if next_cwd is not None:
+        monkeypatch.chdir(next_cwd)
+    follow_session_binding(parent)
+    item = queue._pending.popitem()[1]
+    item.agent._spawn_background_review_now(**item.kwargs)
+    return parent, parent._background_review_run.memory_parent
+
+
+def test_deferred_review_stays_pinned_across_new_session(tmp_path, monkeypatch):
+    from agent.memory_service.approval_store import list_pending_approvals
+    env = Env(tmp_path, monkeypatch)
+    parent, memory_parent = _deferred_review_across_new(env, monkeypatch)
+    assert memory_parent.session_id == "session-a" and parent._memory_session_key == "session-b"
+    fork = env.fork(parent, memory_parent=memory_parent)
+    assert fork.session_id == "session-b"                  # the fork still shares the live id (prefix warmth)
+    out = _fork_user_add(fork)
+    pending = [record for _, record in list_pending_approvals()]
+    assert out["success"] is True and out["staged"] is True and out["approval_required"] == ["target_user"]
+    assert len(pending) == 1 and pending[0].pending_id == out["pending_id"] and pending[0].session_id == "session-a"
+    assert fork._memory_session_key == "session-a"
+    assert env.store.records_for(REPO, "user") == []        # staged, not saved
+
+
+def test_inconsistent_delegated_identity_fails_closed(tmp_path, monkeypatch):
+    import dataclasses
+
+    from agent.memory_service.approval_store import list_pending_approvals
+    from agent.memory_service.errors import MemoryBlockedError
+    env = Env(tmp_path, monkeypatch)
+    parent = env.agent("session-a")
+    captured = capture_parent_memory(parent)
+    assert captured.session_id == "session-a"
+    # (a) a frozen identity that names no session is refused before any provider transport opens
+    calls = env.factory_calls
+    with pytest.raises(MemoryBlockedError) as err:
+        open_fork_view(dataclasses.replace(captured, session_id=None), surface="background_review",
+                       backend_factory=env._factory)
+    assert err.value.code == "binding_invalid" and env.factory_calls == calls
+    # (b) a captured session whose host record is a different identity never defers: it fails closed
+    other = env.agent("session-b")
+    assert other._memory_service.session_state != captured.state
+    fork = env.fork(parent, memory_parent=dataclasses.replace(captured, session_id="session-b"))
+    out = _fork_user_add(fork)
+    assert out["success"] is False and out["approval_required"] == ["target_user"] and "nothing was saved" in out["error"]
+    assert list_pending_approvals() == [] and env.store.records_for(REPO, "user") == []
+
+
+def _prompt_of(fork):
+    return fork._cached_system_prompt or fork._build_system_prompt()
+
+
+def test_review_fork_never_inherits_another_sessions_curated_prompt(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    env.store.registry.directories[os.path.realpath(repo_b)] = ("repo-2", "proj-1", None)
+    env.store.seed_record(REPO, "memory", "session A curated rule")
+    env.store.seed_record(w.ScopeRef(kind="repository", id="repo-2"), "memory", "session B curated rule")
+    parent, memory_parent = _deferred_review_across_new(env, monkeypatch, next_cwd=repo_b)
+    parent._cached_system_prompt = parent._build_system_prompt()       # session B's first turn renders its prompt
+    assert "session B curated rule" in parent._cached_system_prompt
+    fork = env.fork(parent, memory_parent=memory_parent)
+    prompt = _prompt_of(fork)
+    assert "session A curated rule" in prompt and "session B curated rule" not in prompt
+    assert fork._cached_system_prompt != parent._cached_system_prompt
+    assert fork.session_start != parent.session_start
+
+
+def test_review_fork_still_inherits_the_prompt_when_the_identity_is_unchanged(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    env.store.seed_record(REPO, "memory", "session A curated rule")
+    parent = env.agent()
+    parent._cached_system_prompt = parent._build_system_prompt()
+    fork = env.fork(parent)                                # compression and ordinary reviews keep the same state
+    assert fork._cached_system_prompt == parent._cached_system_prompt and fork.session_start == parent.session_start
+
+
+def test_an_additive_review_fork_inherits_the_prompt_as_before(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch, additive=True, memory_enabled=True, user_profile_enabled=True)
+    parent = env.agent("additive-4")
+    parent._cached_system_prompt = "a warm additive prompt"
+    fork = env.fork(parent)
+    assert fork._cached_system_prompt == "a warm additive prompt" and fork.session_start == parent.session_start
 
 
 def test_side_question_fork_is_read_only_and_gates_through_its_view(tmp_path, monkeypatch):

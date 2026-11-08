@@ -84,10 +84,18 @@ def compose_user_api_content(
     """Compose the API-bound content of the current turn's user message.
 
     Single source for the ``api_content`` sidecar and the wire bytes so they never drift
-    (what turn N sends is what turn N+1 replays). ``None`` when nothing is injected."""
+    (what turn N sends is what turn N+1 replays). ``None`` when nothing is injected.
+
+    Authoritative recall is appended as its renderer produced it; only an additive prefetch
+    takes the ``<memory-context>`` frame (see ``RenderedRecall``)."""
     if not isinstance(content, str):
         return None
-    fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
+    from agent.memory_service.turn_recall import RenderedRecall
+
+    if isinstance(ext_prefetch_cache, RenderedRecall):
+        fenced = ext_prefetch_cache
+    else:
+        fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
     injections = [part for part in (fenced, plugin_user_context) if part]
     if not injections:
         return None
@@ -767,10 +775,23 @@ def _memory_turn_start_and_prefetch(
 ) -> str:
     """Notify memory providers of the new turn, then prefetch external memory once
     before the tool loop (skipped on trivial prompts with no semantic signal).
-    Returns the prefetch text (``""`` when nothing was injected)."""
+    Returns the prefetch text (``""`` when nothing was injected).
+
+    A provider-managed session runs its recall event through MemoryService instead, outside
+    every ``suppress``: a MemoryBlockedError ends the turn with a typed result."""
+    from agent.memory_service.service import is_provider_managed
+
+    _query = original_user_message if isinstance(original_user_message, str) else ""
+    _service = getattr(agent, "_memory_service", None)
+    if is_provider_managed(_service):
+        from agent.memory_service.turn_recall import authoritative_turn_recall
+
+        _recall = authoritative_turn_recall(_service, _query)
+        if _recall.warning:
+            agent._emit_warning(_recall.warning)
+        return _recall.text
     if not agent._memory_manager:
         return ""
-    _query = original_user_message if isinstance(original_user_message, str) else ""
     # The author rides along so a provider can attribute THIS turn, not whoever opened the session.
     _author = turn_author if isinstance(turn_author, dict) else {}
     with suppress(Exception):

@@ -1706,12 +1706,45 @@ export interface McpCatalogResponse {
   diagnostics: { name: string; kind: string; message: string }[]
 }
 
-/** `GET /api/memory` — active provider + built-in memory file sizes. */
+/** Provider-managed (authoritative) memory authority, derived from config alone
+ *  (`hermes_cli/web_server_memory.py::curated_memory_status`). Carries no scopes. */
+export interface CuratedMemoryStatus {
+  authority: string
+  provider: string
+  provider_api: number
+  included: boolean
+  disposition: string
+  restore_action: string
+  provider_mode: 'authoritative'
+  failure_policy: null | string
+  targets: null | { memory: boolean; user: boolean }
+  configuration_error: null | string
+}
+
+/** `GET /api/memory` — active provider + built-in memory file sizes. In
+ *  authoritative mode `curated_memory` is present and `builtin_files` is zeroed. */
 export interface MemoryStatusResponse {
   active: string
   providers: { name: string; description: string; configured: boolean }[]
   builtin_files: { memory: number; user: number }
+  curated_memory?: CuratedMemoryStatus
 }
+
+/** `POST /api/memory/reset` body. `scopes` (`<kind>:<id>`, for example
+ *  `repository:repo-1`) and the context ids are for provider-managed memory only. */
+export interface MemoryResetRequest {
+  target: 'all' | 'memory' | 'user'
+  scopes?: string[]
+  org_id?: string
+  project_id?: string
+  repo_id?: string
+}
+
+/** `POST /api/memory/reset`: 200 native files deleted (additive), or 202 staged for approval
+ *  (authoritative). A refusal is a thrown 409; an unknown outcome a thrown 503. */
+export type MemoryResetResponse =
+  | { ok: boolean; deleted: string[] }
+  | { ok: false; code: 'approval_pending'; pending_id: string }
 
 /** `GET /api/curator` — background skill-curator status. */
 export interface CuratorStatusResponse {

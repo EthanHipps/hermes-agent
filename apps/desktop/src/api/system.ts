@@ -10,6 +10,8 @@ import type {
   ElevenLabsVoicesResponse,
   MemoryProviderConfig,
   MemoryProviderOAuthStatus,
+  MemoryResetRequest,
+  MemoryResetResponse,
   MemoryStatusResponse
 } from '@/types/hermes'
 
@@ -101,12 +103,12 @@ export function getMemoryStatus(): Promise<MemoryStatusResponse> {
   })
 }
 
-export function resetMemory(target: 'all' | 'memory' | 'user'): Promise<{ ok: boolean; deleted: string[] }> {
-  return hermesApi<{ ok: boolean; deleted: string[] }>({
+export function resetMemory(body: MemoryResetRequest): Promise<MemoryResetResponse> {
+  return hermesApi<MemoryResetResponse>({
     ...profileScoped(),
     path: '/api/memory/reset',
     method: 'POST',
-    body: { target }
+    body
   })
 }
 

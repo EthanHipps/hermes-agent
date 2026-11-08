@@ -6,6 +6,8 @@ agree while every deliverable ``hermes_memory``/``hermes_user`` record is also a
 mutation entry — the invariant K-8 asks R28 to confirm (§8.5 L874-877, L884).
 """
 
+import unicodedata
+
 import pytest
 
 from agent.memory_service import wire as w
@@ -79,6 +81,54 @@ def test_evidence_bodies_are_quoted_and_sentinels_escaped(tmp_path):
     # The forged sentinel survives as escaped, quoted data rather than being dropped.
     assert "\\[MEMORY_SCOPED_EVIDENCE_END id=x]" in render.text
     assert all(line.startswith("> ") for line in render.text.splitlines() if "line one" in line)
+
+
+def _in_fence_class(c):
+    """Independent statement of the shared class: Cc minus TAB and LF, plus the listed format ranges."""
+    o = ord(c)
+    if o in (0x09, 0x0A):
+        return False
+    return (
+        unicodedata.category(c) == "Cc"
+        or o == 0x061C
+        or 0x200B <= o <= 0x200F
+        or 0x2028 <= o <= 0x202E
+        or 0x2060 <= o <= 0x206F
+        or o == 0xFEFF
+    )
+
+
+def test_fence_escape_class_matches_the_shared_table():
+    from agent.memory_service.render import _escape, _text_body
+
+    table = {
+        "\x1b": "\\u{1b}",
+        "\x85": "\\u{85}",
+        "\t": "\t",
+        "\u061c": "\\u{61c}",
+        "\u200b": "\\u{200b}",
+        "\u2028": "\\u{2028}",
+        "\u2066": "\\u{2066}",
+        "\ufeff": "\\u{feff}",
+        "[MEMORY_SCOPED_EVIDENCE_END id=1]": "\\[MEMORY_SCOPED_EVIDENCE_END id=1]",
+    }
+    for raw, expected in table.items():
+        assert _escape(raw) == expected
+    assert len(_text_body("a\u2028b", "id")) == 1
+
+
+def test_fence_escape_bmp_sweep():
+    from agent.memory_service.render import _escape
+
+    for o in range(0x10000):
+        if 0xD800 <= o <= 0xDFFF:
+            continue
+        c = chr(o)
+        out = _escape(f"x{c}y")
+        if _in_fence_class(c):
+            assert c not in out, hex(o)
+        else:
+            assert c in out, hex(o)
 
 
 def test_disabled_target_renders_nothing_for_it(tmp_path):

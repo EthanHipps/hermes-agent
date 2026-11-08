@@ -74,9 +74,8 @@ def follow_session_binding(agent: Any) -> None:
     if not session_id or getattr(agent, "_memory_session_key", None) == session_id:
         return
     from agent.memory_service.view import is_injected
-    if is_injected(agent):          # ruling R43-10: an explicit dependency is never re-resolved (§9.7 L1625)
-        agent._memory_session_key = session_id
-        return
+    if is_injected(agent):          # ruling R43-10: an explicit dependency is never re-resolved (§9.7 L1625);
+        return                      # its key stays pinned to the session the dependency was frozen for
     from agent.memory_service.bootstrap import init_memory_service, resolve_session_binding
     from agent.memory_service.principal import gateway_identity_of
 

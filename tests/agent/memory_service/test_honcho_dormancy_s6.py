@@ -94,3 +94,82 @@ def test_authoritative_home_never_initializes_honcho_or_reads_native_files(tmp_p
     sentinel.assert_untouched()
     assert honcho_calls == {"initialize": [], "migrate": []}
     assert _files(native_dir) == before
+
+
+# ``hermes honcho migrate`` is the second route to the native files: it globs cwd and ~/.openclaw
+# for USER.md/MEMORY.md and uploads them through ``migrate_memory_files``. It registers on
+# ``memory.provider`` alone, so it refuses in an authoritative home before it looks at any file.
+
+@pytest.fixture
+def migrate_spies(monkeypatch):
+    """Every discovery, read and provider-contact seam of ``cmd_migrate``, recording instead of acting."""
+    from plugins.memory.honcho import cli
+    calls = {"discover": [], "connect": [], "prompt": []}
+
+    def discover(names):
+        calls["discover"].append(names)
+        raise AssertionError("cmd_migrate looked for native memory files")
+
+    def connect(*a, **kw):
+        calls["connect"].append(a)
+        raise AssertionError("cmd_migrate reached for a Honcho client")
+
+    monkeypatch.setattr(cli, "_find_memory_files", discover)
+    monkeypatch.setattr(cli, "_connect", connect)
+    monkeypatch.setattr(cli, "_session_manager", connect)
+    monkeypatch.setattr(cli, "_prompt", lambda *a, **kw: calls["prompt"].append(a) or "n")
+    return cli, calls
+
+
+def _migrate_args():
+    import argparse
+    return argparse.Namespace()
+
+
+@pytest.mark.parametrize("section", [
+    {"provider": "honcho", "provider_mode": "authoritative", "principal_id": "ethan"},
+    "authoritative",            # malformed: the section is not a mapping
+    ["provider_mode"],          # malformed: the section is not a mapping
+    {"provider": "honcho", "provider_mode": ["authoritative"]},   # malformed mode
+    {"provider": "honcho", "provider_mode": "sidecar"},           # unknown mode is never additive
+    {"provider": "honcho", "provider_mode": "Authoritative"},     # the mode is case-sensitive
+    {"provider": "honcho", "provider_mode": "authoritativ"},      # a typo of the mode
+    {"provider": "honcho", "authoritative_failure_policy": "stateless"},   # stateless names no mode
+])
+def test_migrate_refuses_in_an_authoritative_home_before_discovery(native_dir, migrate_spies, section):
+    cli, calls = migrate_spies
+    _write_config(section)
+    with native_memory_sentinel(native_dir) as sentinel:
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_migrate(_migrate_args())
+    assert exc.value.code not in (0, None)
+    sentinel.assert_untouched()
+    assert calls == {"discover": [], "connect": [], "prompt": []}
+
+
+def test_migrate_refuses_on_an_unparseable_config_file(native_dir, migrate_spies):
+    """An unparseable config.yaml cannot prove the home is additive, so it refuses too."""
+    from hermes_constants import get_hermes_home
+    cli, calls = migrate_spies
+    (get_hermes_home() / "config.yaml").write_text("memory: [unclosed\n", encoding="utf-8")
+    with native_memory_sentinel(native_dir) as sentinel:
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_migrate(_migrate_args())
+    assert exc.value.code not in (0, None)
+    sentinel.assert_untouched()
+    assert calls == {"discover": [], "connect": [], "prompt": []}
+
+
+@pytest.mark.parametrize("section", [
+    {"provider": "honcho"},
+    {"provider": "honcho", "provider_mode": None},
+    {"provider": "honcho", "provider_mode": "additive"},
+])
+def test_additive_migrate_is_unchanged(migrate_spies, section):
+    cli, calls = migrate_spies
+    calls_seen = []
+    cli._find_memory_files = lambda names: calls_seen.append(names) or []
+    _write_config(section)
+    cli.cmd_migrate(_migrate_args())      # no SystemExit: the walkthrough runs to its end
+    assert len(calls_seen) == 2           # user files, then agent files
+    assert calls["connect"] == []

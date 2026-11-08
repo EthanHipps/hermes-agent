@@ -497,6 +497,7 @@ def _memory_parts(agent: Any) -> List[str]:
             try:
                 _ext_mem_block = agent._memory_manager.build_system_prompt()
             except Exception:
+                logger.warning("Memory provider system prompt block was malformed; ignoring it")
                 _ext_mem_block = None
             if _ext_mem_block:
                 parts.append(_ext_mem_block)

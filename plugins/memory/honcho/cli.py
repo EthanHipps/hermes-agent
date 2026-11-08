@@ -1149,8 +1149,31 @@ def _offer(question: str, action, files: list[Path]) -> None:
         print(f"  Failed: {e}")
 
 
+def _refuse_in_authoritative_home() -> None:
+    """Exit before any file is looked at when the host runs authoritative memory.
+
+    The walkthrough globs native memory files and uploads them, which an authoritative
+    home must never do. Only a config that resolves to additive mode proves the home is
+    additive: an unreadable file, an unknown or malformed ``provider_mode`` and an invalid
+    memory section all fail to resolve, and refuse as well.
+    """
+    from agent.memory_service.config import MemoryMode, resolve_memory_service_config
+    from hermes_cli.config import require_readable_config_before_write
+
+    try:
+        refuse = resolve_memory_service_config(
+            require_readable_config_before_write()).provider_mode is not MemoryMode.ADDITIVE
+    except Exception:
+        refuse = True
+    if refuse:
+        sys.exit("hermes honcho migrate: refused. This home uses authoritative memory "
+                 "(or its memory configuration cannot be verified), so native memory "
+                 "files are not read or uploaded.")
+
+
 def cmd_migrate(args) -> None:
     """Step-by-step migration guide: OpenClaw native memory → Hermes + Honcho."""
+    _refuse_in_authoritative_home()
     user_files = _find_memory_files(["USER.md", "MEMORY.md"])  # facts about the user
     agent_files = _find_memory_files(["SOUL.md", "IDENTITY.md", "AGENTS.md", "TOOLS.md", "BOOTSTRAP.md"])
     cfg = _read_config()
