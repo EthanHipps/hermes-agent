@@ -84,6 +84,43 @@ def test_additive_status_is_unchanged(tmp_path):
     assert "curated_memory" not in data and data["builtin_files"]["memory"] == len(b"notes")
 
 
+@pytest.mark.parametrize("memory", [{"provider_mode": "authoritive"}, {"provider_mode": 1},
+                                   {"authoritative_failure_policy": "stateless"}])
+def test_invalid_explicit_mode_rest_reset_refuses(env, memory):
+    (get_hermes_home() / "config.yaml").write_text(yaml.safe_dump({"memory": memory}), encoding="utf-8")
+    before = _native_state(env.native)
+    with native_memory_sentinel(env.native) as sentinel:
+        resp = _client().post("/api/memory/reset", json={"target": "all"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "memory_configuration_error"
+    sentinel.assert_untouched()
+    assert _native_state(env.native) == before
+
+
+def test_invalid_effective_mode_rest_reset_refuses_after_raw_fallback(env):
+    from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.config import load_config
+    config_path = get_hermes_home() / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"memory": {"provider_mode": "authoritive"}}), encoding="utf-8")
+    assert load_config()["memory"]["provider_mode"] == "authoritive"
+    config_path.write_text("memory: [", encoding="utf-8")
+    assert home_memory_section(get_hermes_home()) == {}
+    before = _native_state(env.native)
+    resp = _client().post("/api/memory/reset", json={"target": "all"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "memory_configuration_error"
+    assert _native_state(env.native) == before
+
+
+def test_explicit_additive_mode_rest_reset_still_deletes(env):
+    (get_hermes_home() / "config.yaml").write_text(
+        yaml.safe_dump({"memory": {"provider_mode": "additive"}}), encoding="utf-8")
+    resp = _client().post("/api/memory/reset", json={"target": "all"})
+    assert resp.status_code == 200
+    assert set(resp.json()["deleted"]) == {"MEMORY.md", "USER.md"}
+    assert _native_state(env.native) == {}
+
+
 @pytest.mark.parametrize("body", [{"target": "all", "scopes": ["global:ethan"]}, {"target": "memory"},
                                   {"target": "memory", "scopes": ["repo:x"]},
                                   {"target": "user", "scopes": ["global:ethan"], "repo_id": "a\nb"}])

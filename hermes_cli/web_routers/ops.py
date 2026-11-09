@@ -25,7 +25,7 @@ from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import _path_is_under
 from hermes_cli.web_server_gateway import _restart_gateway_after
 from hermes_cli.web_server_memory import (
-    _normalize_memory_provider_name, _require_memory_provider_ready, curated_memory_status, curated_reset,
+    _normalize_memory_provider_name, _require_memory_provider_ready, curated_failure, curated_memory_status, curated_reset,
     rest_archive_dispositions,
 )
 from hermes_cli.web_models import (
@@ -494,11 +494,22 @@ async def reset_memory(body: MemoryReset):
     if target not in {"all", "memory", "user"}:
         raise HTTPException(status_code=400, detail="target must be all, memory, or user")
 
-    cfg = await asyncio.to_thread(load_config)
+    from agent.memory_service.admin import unavailable_payload
     from agent.memory_service.bootstrap import requests_authoritative_mode
-    if requests_authoritative_mode(cfg):
-        # §9.7 L1607: a scoped reset mutation through MemoryService; never a native file deletion.
-        return await asyncio.to_thread(curated_reset, cfg, body)
+    from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.memory_authoritative import invalid_explicit_mode
+    raw_cfg = {"memory": await asyncio.to_thread(home_memory_section, get_hermes_home())}
+    exc = None if requests_authoritative_mode(raw_cfg) else invalid_explicit_mode(raw_cfg)
+    if exc is None:
+        cfg = await asyncio.to_thread(load_config)
+        if requests_authoritative_mode(cfg):
+            # §9.7 L1607: a scoped reset mutation through MemoryService; never a native file deletion.
+            return await asyncio.to_thread(curated_reset, cfg, body)
+        exc = invalid_explicit_mode(cfg)
+    if exc is not None:
+        payload = unavailable_payload(exc)
+        status, error = curated_failure(payload)
+        raise HTTPException(status_code=status, detail={**payload, "error": error, "target": target})
 
     mem_dir = get_hermes_home() / "memories"
     deleted = []
