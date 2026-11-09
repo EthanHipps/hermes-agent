@@ -25,6 +25,7 @@ import pytest
 import yaml
 
 from agent.memory_provider import MemoryProvider
+from tools.lazy_deps import _allow_lazy_installs
 
 POISON = "SIDECAR-POISON-7d1f"
 
@@ -370,7 +371,9 @@ def baseline(tmp_path_factory):
     home = tmp_path_factory.mktemp("baseline")
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setenv("HERMES_HOME", str(home))
+        patcher.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
         run = run_scenario(home, None)
+        run.lazy_installs_allowed = _allow_lazy_installs()
     assert run.manager is None
     return run
 
@@ -390,6 +393,7 @@ def test_a_failing_additive_sidecar_never_damages_the_builtin_result(tmp_path, m
 
     # The built-in result is the baseline's: real tool results, rebuilt prompt parts and native bytes.
     assert observed.results == baseline.results
+    assert baseline.lazy_installs_allowed is False
     assert observed.prompts == baseline.prompts
     assert observed.native == baseline.native and "MEMORY.md" in observed.native
     assert all(POISON not in repr(part)

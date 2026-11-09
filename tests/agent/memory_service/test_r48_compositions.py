@@ -2,7 +2,7 @@
 approvals (R39 x R43), the gateway with approvals (R39 x R41), the kanban worker marker (EDD-106) and the
 archive block for a configured provider (K-10).
 
-Worlds use a full org -> project -> repo chain and principal ``ethan``, reached through the same
+Most worlds use a full org -> project -> repo chain and principal ``ethan``, reached through the same
 ``plugins.memory.load_authoritative_backend_factory`` seam as the neighbouring suites."""
 
 import asyncio
@@ -128,7 +128,8 @@ def test_multi_principal_gateway_reviews_only_the_callers_writes(tmp_path, monke
     """With two mapped principals a shared chat sees the change named but never its text, and the other
     principal's user cannot reach the record at all."""
     from agent.memory_service.approval_store import list_pending_approvals
-    env, parent = _gateway_world(tmp_path, monkeypatch, MULTI, "gw-3")
+    env = Env(tmp_path, monkeypatch, gateway_principals=MULTI)
+    parent = env.agent("gw-3", platform="telegram", user_id="111")
     pid = _stage_review_write(env, parent)
     runner, commits = _Gateway(parent), _commits(env)
     group = _say(runner, "pending", chat_type="group", chat_id="g1")
@@ -176,7 +177,7 @@ def test_dispatcher_spawn_env_carries_the_worker_marker(tmp_path, monkeypatch):
 def test_kanban_worker_never_contacts_the_provider(tmp_path, monkeypatch):
     from agent.memory_service.host_state import load_host_state
     from agent.memory_service.view import AgentSpawnedMemoryService, UnboundMemoryService
-    env = _org_chain(Env(tmp_path, monkeypatch))
+    env = Env(tmp_path, monkeypatch)
     monkeypatch.setenv("HERMES_KANBAN_TASK", _dispatcher_env(tmp_path, monkeypatch)["HERMES_KANBAN_TASK"])
     with native_memory_sentinel(_native_dir()) as sentinel:
         worker = env.agent("kanban-worker-9")
