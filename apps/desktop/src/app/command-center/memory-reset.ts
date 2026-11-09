@@ -54,7 +54,7 @@ export async function runMemoryReset(request: () => Promise<MemoryResetResponse>
       return { kind: 'refused', message }
     }
 
-    return status === 503 ? { kind: 'unavailable', message } : { kind: 'failed', message }
+    return status >= 400 && status < 500 ? { kind: 'failed', message } : { kind: 'unavailable', message }
   }
 
   if ('pending_id' in (result ?? {}) && (result as { code?: unknown }).code === 'approval_pending') {
