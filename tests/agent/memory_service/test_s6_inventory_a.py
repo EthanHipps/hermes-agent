@@ -557,6 +557,22 @@ def test_invalid_explicit_mode_reset_refuses_and_deletes_nothing(native_dir, mem
     assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
 
 
+def test_invalid_last_known_good_mode_reset_refuses_after_raw_fallback(native_dir):
+    from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.config_backups import backup_config
+    from hermes_cli.main_agent_cmds import cmd_memory
+    from hermes_constants import get_hermes_home
+    config_path = _write_config({"provider_mode": "authoritive"})
+    assert backup_config(config_path, "good") is not None
+    config_path.write_text("memory: [", encoding="utf-8")
+    assert home_memory_section(get_hermes_home()) == {}
+    before = _poison(native_dir)
+    with pytest.raises(SystemExit) as exited:
+        cmd_memory(Namespace(memory_command="reset", target="memory", yes=True, scope=None))
+    assert exited.value.code == 1
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
+
+
 @pytest.mark.parametrize("memory", [{"provider_mode": None}, {"provider_mode": ""}])
 def test_null_or_empty_mode_reset_stays_additive(native_dir, memory):
     from hermes_cli.main_agent_cmds import cmd_memory

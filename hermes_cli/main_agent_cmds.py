@@ -23,13 +23,17 @@ def _cmd_memory_off():
 
 def _cmd_memory_reset(args):
     from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.config import load_config_readonly
     from hermes_cli.memory_authoritative import (
         authoritative_only_flags, invalid_explicit_mode, requested_authoritative_config, reset_command,
     )
     from hermes_constants import get_hermes_home, display_hermes_home
     if (config := requested_authoritative_config()) is not None:
         sys.exit(reset_command(config, args))              # an approved, scoped provider-managed reset
-    if exc := invalid_explicit_mode({"memory": home_memory_section(get_hermes_home())}):
+    # The raw check comes first so a readable invalid mode refuses before the loader can touch the home;
+    # the effective check catches an unparseable file whose last-known-good copy names an invalid mode.
+    if exc := (invalid_explicit_mode({"memory": home_memory_section(get_hermes_home())})
+               or invalid_explicit_mode(load_config_readonly())):
         print(f"Invalid memory configuration: {exc}. Nothing was reset.")
         sys.exit(1)
     if flags := authoritative_only_flags(args):
