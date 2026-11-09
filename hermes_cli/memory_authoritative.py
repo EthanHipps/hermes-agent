@@ -30,6 +30,18 @@ def requested_authoritative_config() -> Optional[dict]:
     return config if requests_authoritative_mode(config) else None
 
 
+def invalid_explicit_mode(config: Mapping[str, Any]) -> Optional[MemoryConfigurationError]:
+    """Match startup's refusal of an invalid named mode or policy; an absent mode stays additive."""
+    from agent.memory_service.bootstrap import names_explicit_memory_mode
+    if not names_explicit_memory_mode(config):
+        return None
+    try:
+        resolve_memory_service_config(config)
+    except MemoryConfigurationError as exc:
+        return exc
+    return None
+
+
 def _session_block(cfg, session_id: str, backend_factory) -> Tuple[List[str], bool]:
     """A persisted session's frozen identity and scopes: validate (negotiate + validate_session), never bind."""
     from agent.memory_service.bootstrap import open_session_view

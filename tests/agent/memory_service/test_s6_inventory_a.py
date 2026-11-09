@@ -544,6 +544,46 @@ def test_invalid_authoritative_config_reset_deletes_nothing(authoritative_env, n
     assert exited.value.code == 1 and {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
 
 
+@pytest.mark.parametrize("memory", [{"provider_mode": "authoritive"}, {"provider_mode": 1},
+                                   {"authoritative_failure_policy": "stateless"}])
+def test_invalid_explicit_mode_reset_refuses_and_deletes_nothing(native_dir, memory):
+    from hermes_cli.main_agent_cmds import cmd_memory
+    _write_config(memory)
+    before = _poison(native_dir)
+    with native_memory_sentinel(native_dir) as sentinel, pytest.raises(SystemExit) as exited:
+        cmd_memory(Namespace(memory_command="reset", target="memory", yes=True, scope=None))
+    sentinel.assert_untouched()
+    assert exited.value.code == 1
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
+
+
+def test_invalid_last_known_good_mode_reset_refuses_after_raw_fallback(native_dir):
+    from hermes_cli.backup_memory import home_memory_section
+    from hermes_cli.config_backups import backup_config
+    from hermes_cli.main_agent_cmds import cmd_memory
+    from hermes_constants import get_hermes_home
+    config_path = _write_config({"provider_mode": "authoritive"})
+    assert backup_config(config_path, "good") is not None
+    config_path.write_text("memory: [", encoding="utf-8")
+    assert home_memory_section(get_hermes_home()) == {}
+    before = _poison(native_dir)
+    with pytest.raises(SystemExit) as exited:
+        cmd_memory(Namespace(memory_command="reset", target="memory", yes=True, scope=None))
+    assert exited.value.code == 1
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in native_dir.iterdir()} == before
+
+
+@pytest.mark.parametrize("memory", [{"provider_mode": None}, {"provider_mode": ""}])
+def test_null_or_empty_mode_reset_stays_additive(native_dir, memory):
+    from hermes_cli.main_agent_cmds import cmd_memory
+    _write_config(memory)
+    before = _poison(native_dir)
+    cmd_memory(Namespace(memory_command="reset", target="memory", yes=True, scope=None))
+    assert not (native_dir / "MEMORY.md").exists()
+    user = native_dir / "USER.md"
+    assert (user.read_bytes(), user.stat().st_mtime_ns) == before["USER.md"]
+
+
 def test_additive_reset_refuses_authoritative_flags_and_still_deletes_without_them(tmp_path, native_dir):
     from hermes_cli.main_agent_cmds import cmd_memory
     _write_config({"memory_enabled": True})
