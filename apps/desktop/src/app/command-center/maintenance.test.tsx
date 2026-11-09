@@ -209,6 +209,19 @@ describe('Maintenance memory reset', () => {
 })
 
 describe('runMemoryReset', () => {
+  it.each([
+    { error: httpError(500, 'boom'), expected: { kind: 'unavailable', message: 'boom' } },
+    { error: httpError(499, 'nope'), expected: { kind: 'failed', message: 'nope' } },
+    {
+      error: new Error('connect ECONNREFUSED'),
+      expected: { kind: 'unavailable', message: 'connect ECONNREFUSED' }
+    }
+  ])('classifies reset request errors', async ({ error, expected }) => {
+    const outcome = await runMemoryReset(() => Promise.reject(error))
+
+    expect(outcome).toEqual(expected)
+  })
+
   it('reports a pending approval with its id', async () => {
     const outcome = await runMemoryReset(() =>
       Promise.resolve({ ok: false, code: 'approval_pending', pending_id: 'abc123def456' })
